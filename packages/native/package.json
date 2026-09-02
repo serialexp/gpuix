@@ -65,7 +65,8 @@
   "scripts": {
     "artifacts": "napi artifacts",
     "build": "napi build --platform --esm --js index.js --release --features test-support && napi build --platform --js index.cjs --release --features test-support && bun run build:js",
-    "build:release": "napi build --platform --esm --js index.js --release --no-default-features && napi build --platform --js index.cjs --release --no-default-features && bun run build:js",
+    "build:release": "napi build --platform --esm --js index.js --release --no-default-features --features lua54 && napi build --platform --js index.cjs --release --no-default-features --features lua54 && bun run build:js",
+    "build:luajit": "napi build --platform --esm --js index.js --release --no-default-features --features test-support,luajit && napi build --platform --js index.cjs --release --no-default-features --features test-support,luajit && bun run build:js",
     "build:debug": "napi build --platform --esm --js index.js --features test-support && napi build --platform --js index.cjs --features test-support && bun run build:js",
     "build:js": "tsc",
     "build:web": "bun ../../scripts/web.ts --build-only",

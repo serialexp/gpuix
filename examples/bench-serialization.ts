@@ -9,6 +9,8 @@
 /// It also writes `tmp/batch-fixture.json`, which the Rust half of the bench
 /// (`packages/native/examples/bench_serde.rs`) reads. Both sides must measure
 /// the same bytes or the comparison is meaningless.
+/// The final table sends those bytes through the real napi `applyBatch` entry
+/// point, both pre-encoded and with `JSON.stringify` inside the timed region.
 ///
 ///   ChatApp ► reconciler ► wrapWithBatching ► CaptureRenderer.applyBatch(json)
 ///                                                    │
@@ -22,6 +24,7 @@
 
 import React from 'react'
 import { mkdirSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { createRoot, flushSync } from '@gpuix/react'
 import type { NativeRenderer } from '@gpuix/react'
@@ -30,6 +33,15 @@ import { Encoder as CborEncoder } from 'cbor-x'
 import { ChatApp } from './chat'
 
 type Op = unknown[]
+
+interface NativeBatchRenderer {
+  applyBatch(json: string): number[]
+  getRetainedElementCount(): number
+}
+
+interface NativeBinding {
+  TestGpuixRenderer?: new (width?: number, height?: number) => NativeBatchRenderer
+}
 
 // ── Capture ──────────────────────────────────────────────────────────
 //
@@ -306,6 +318,79 @@ function table(rows: Row[], baselineBytes: number): string {
   return [head, sep, ...body].join('\n')
 }
 
+// ── Actual napi boundary ────────────────────────────────────────────
+//
+// The codec rows above deliberately split JS and Rust so candidate formats can
+// be compared without requiring a native implementation for every one. That
+// split cannot answer what production applyBatch costs: napi must extract and
+// UTF-8 validate the JS string, allocate its Rust String, call the real parser,
+// apply the mutations, and convert the returned Vec back to JavaScript.
+//
+// TestGpuixRenderer.applyBatch has the same napi `String` argument, tree mutex,
+// and apply_batch_to_tree call as GpuixRenderer. It omits only window
+// invalidation, which is deliberately outside the mutation transport being
+// measured. Reapplying the same mount batch replaces the same element ids, so
+// every sample does the same amount of mutation work without constructing a
+// GPU window inside the timed region.
+
+function benchNativeBoundary(ops: Op[], iterations: number): string {
+  const require = createRequire(import.meta.url)
+  const native = require('../packages/native/index.js') as NativeBinding
+  const Renderer = native.TestGpuixRenderer
+  if (!Renderer) {
+    return [
+      'Skipped: this native build does not include `TestGpuixRenderer`.',
+      'Build `packages/native` with the default `test-support` feature and run again.',
+    ].join('\n')
+  }
+
+  const renderer = new Renderer(320, 200)
+  const payload = JSON.stringify(ops)
+  const expectedElements = new Set(
+    ops.filter((op) => op[0] === 'createElement').map((op) => op[1]),
+  ).size
+
+  for (let i = 0; i < 3; i++) {
+    JSON.stringify(ops)
+    renderer.applyBatch(payload)
+    renderer.applyBatch(JSON.stringify(ops))
+  }
+
+  const stringifyMs: number[] = []
+  const nativeMs: number[] = []
+  const endToEndMs: number[] = []
+  for (let i = 0; i < iterations; i++) {
+    let start = performance.now()
+    JSON.stringify(ops)
+    stringifyMs.push(performance.now() - start)
+
+    start = performance.now()
+    renderer.applyBatch(payload)
+    nativeMs.push(performance.now() - start)
+
+    start = performance.now()
+    renderer.applyBatch(JSON.stringify(ops))
+    endToEndMs.push(performance.now() - start)
+  }
+
+  const actualElements = renderer.getRetainedElementCount()
+  if (actualElements !== expectedElements) {
+    throw new Error(
+      `native boundary benchmark retained ${actualElements} elements, expected ${expectedElements}`,
+    )
+  }
+
+  return [
+    '| path | median | includes |',
+    '|---|---:|---|',
+    `| \`JSON.stringify(queue)\` | ${median(stringifyMs).toFixed(2)} ms | JS encoding only |`,
+    `| \`applyBatch(pre-encoded)\` | ${median(nativeMs).toFixed(2)} ms | napi string extraction + Rust decode/apply + return conversion |`,
+    `| \`JSON.stringify → applyBatch\` | ${median(endToEndMs).toFixed(2)} ms | complete mutation transport path |`,
+    '',
+    `Payload: ${(Buffer.byteLength(payload) / 1e6).toFixed(2)} MB. The renderer is warm and the same ${expectedElements.toLocaleString()} element ids are replaced on every sample.`,
+  ].join('\n')
+}
+
 // ── The honest cost of interning in JS ───────────────────────────────
 //
 // The `protocol A` and `protocol B` tables above are a lie about JS time:
@@ -423,6 +508,10 @@ for (const variant of variants) {
 
 console.log('## What interning actually costs JS\n')
 console.log(benchInterningCost(ops, iterations))
+console.log()
+
+console.log('## End-to-end napi boundary\n')
+console.log(benchNativeBoundary(ops, iterations))
 console.log()
 
 const fixturePath = resolve(import.meta.dir, '../tmp/batch-fixture.json')

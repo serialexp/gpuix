@@ -13,10 +13,18 @@ Every React commit turns into one `applyBatch(json)` call. This benchmark
 measures what that costs on both sides of the FFI boundary, on the real
 `ChatApp` queue rather than a synthetic one.
 
-**Headline: the wire codec is the smallest lever.** Swapping JSON for
-MessagePack buys 1.24x. Decoding straight into typed ops and sharing styles by
-content bought **4.2x on parse-and-apply, 7.9x fewer allocations, and 5.3x on
-tree memory**, with JSON unchanged and no change to `apply_styles`.
+**Headline: swapping one serialized codec for another is the smallest lever.**
+MessagePack buys 1.24x once bytes are inside Rust. Decoding straight into typed
+ops and sharing styles by content bought **4.2x on parse-and-apply, 7.9x fewer
+allocations, and 5.3x on tree memory**, with JSON unchanged and no change to
+`apply_styles`.
+
+That does not mean the end-to-end transport is free. The combined benchmark
+added later measures JavaScript encoding, napi string extraction and copying,
+Rust decode/apply, and return conversion in one timed operation. On the 10 000
+turn fixture it measured **92.65 ms**, so a protocol that avoids serialization
+and napi strings is a materially different proposition from replacing JSON
+with another serialized codec.
 
 That work has landed. A later hot/cold split moved sparse event and custom-prop
 maps out of every element, reducing the current 75,054-node tree from **44.5 MB
@@ -46,6 +54,9 @@ Four changes, in the order they landed:
    in `mark_changed` and twice per child per frame in `build_virtual_list`
 4. Styles are hash-consed by raw payload and shared as `Arc<StyleDesc>`, swept
    after each batch by `Arc::strong_count`
+5. `commitUpdate` now compares distinct style objects structurally instead of
+   resending every style on every host update. Style props follow React's
+   immutable-props model; mutating one object in place is not an update
 
 Rejected, with reasons, in [what was not done](#deliberately-not-doing).
 
@@ -81,6 +92,118 @@ The Rust half installs a counting `GlobalAlloc`, so "live heap" is the real
 resident cost of the tree, not a `size_of` estimate. It also asserts that the
 compact tree and the current tree hold the same parents, the same child order
 and the same styled elements before reporting any saving.
+
+The JS command also runs a combined boundary measurement through the native
+`TestGpuixRenderer.applyBatch`. That call has the same napi `String` argument,
+tree mutex, and `apply_batch_to_tree` implementation as the production
+renderer. It reports three medians from the same process:
+
+- `JSON.stringify(queue)` — JavaScript encoding only
+- `applyBatch(pre-encoded)` — napi string extraction and copying, Rust
+  decode/apply, and conversion of the return value to JavaScript
+- `JSON.stringify → applyBatch` — the complete mutation transport path
+
+The combined row deliberately excludes GPUI layout and paint. It reapplies the
+same mount batch to the same retained tree, replacing the same element IDs on
+every sample, so it measures a warm mutation boundary rather than native window
+construction or a frame.
+
+On the 10 000-turn fixture, five iterations on the benchmark machine produced:
+
+| path | median |
+|---|---:|
+| `JSON.stringify(queue)` | 34.25 ms |
+| `applyBatch(pre-encoded)` | 47.49 ms |
+| `JSON.stringify → applyBatch` | **92.65 ms** |
+
+The medians are independent and are not additive. In particular, the combined
+path creates a 13.06 MB JavaScript string immediately before napi extracts it,
+so allocation and GC pressure differ from repeatedly passing one pre-encoded
+string. The combined row is the number to use for the current end-to-end path;
+the other rows explain it, but must not be subtracted to claim a precise napi
+cost.
+
+## Workload matrix
+
+The 10 000-turn chat is intentionally a wide-tree stress case, not a model of
+every heavy React application. `examples/bench-workloads.tsx` runs the same
+combined napi measurement over structurally different mounts and updates:
+
+- the existing children-mode chat list
+- a depth-8 ternary tree with varied styles
+- 1 000 interactive dashboard cards with pointer, keyboard, and input events
+- 2 000 media cards carrying image paths and raw SVG source
+- one changed leaf inside 10 000 retained rows
+- a broad theme update across 1 000 cards
+- reversal of 5 000 keyed rows
+
+```bash
+cd examples
+CHAT_TURNS=10000 ITERATIONS=5 bun run bench:workloads
+```
+
+One run on the benchmark machine after structural style comparison produced:
+
+| workload | kind | ops | JSON | combined transport |
+|---|---|---:|---:|---:|
+| wide chat | mount | 221 764 | 13.06 MB | 101.01 ms |
+| deep branches | mount | 68 889 | 2.50 MB | 13.58 ms |
+| interactive dashboard | mount | 51 195 | 1.76 MB | 7.63 ms |
+| media grid | mount | 50 003 | 2.26 MB | 9.21 ms |
+| single leaf update | update | 2 | <0.01 MB | 0.01 ms |
+| broad theme update | update | 1 155 | 0.08 MB | 0.34 ms |
+| keyed reorder | update | 4 999 | 0.14 MB | 9.36 ms |
+
+The operation mix matters as much as the total. The dashboard emits 3 026
+event-listener operations. The media grid emits 6 000 custom props. Reversing
+the keyed list remains expensive despite a 0.14 MB payload because Rust must
+unlink and reattach 4 999 children. Before the style fix, changing one leaf in
+the un-memoized 10 000-row fixture emitted 30 001 complete `setStyle`
+operations plus one `setText`. It now emits one changed style and one text op;
+the broad theme update drops from 7 028 styles to the 1 155 that differ, and a
+pure reorder emits no styles.
+
+### Images in the transport benchmark
+
+An `<img>` does not send pixels through napi. Its `src` custom prop is a local
+filesystem path, and GPUI loads, decodes, animates, uploads, and paints the image
+later. The media workload therefore measures the path, `objectFit`, styles, and
+tree mutations, not image decode or GPU cost.
+
+Raw `<svg source>` is different: the complete SVG source string is a custom
+prop and does cross the mutation boundary. The media workload repeats an inline
+SVG icon on every card, so those bytes are included. A separate GPU benchmark
+using real files and `renderer.flush()` is required to compare image decoding,
+cache behavior, animation, upload, layout, and paint; none of those costs should
+be attributed to the wire protocol.
+
+## Does moving the host diff to Rust win?
+
+No. A second transport was built and measured, then removed. React host
+mutations maintained a JavaScript host tree, each commit serialized the complete
+tree as compact JSON tuples, and Rust validated it and reconciled records by
+stable host ID. Full React commit wall on the native renderer, three-sample
+medians on the 10 000-turn run:
+
+| workload | mutation commit | snapshot commit |
+|---|---:|---:|
+| wide chat mount | **200.94 ms** | 219.13 ms |
+| deep branch mount | **35.98 ms** | 37.06 ms |
+| interactive dashboard mount | **21.43 ms** | 24.38 ms |
+| media grid mount | 26.12 ms | **23.23 ms** |
+| single leaf update | **45.20 ms** | 86.45 ms |
+| broad theme update | **12.36 ms** | 25.48 ms |
+| keyed reorder | **148.50 ms** | 150.36 ms |
+
+Comparing records in Rust is cheap: a fixed-record prototype found the two
+changed leaf records in about 0.15 ms. Building the full snapshot, parsing it,
+validating the graph, resolving styles and walking unchanged records cost more
+than the mutations they replace. The leaf update settles it: two mutation
+tuples become a 60 001-node snapshot.
+
+An arena shared directly with an embedded language could change the result by
+removing JSON and JavaScript snapshot construction. With React producing the
+host tree, the incremental mutation transport is the better baseline.
 
 ## The fixture
 

@@ -64,6 +64,7 @@ url = { version = "2", features = ["serde"] }
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 napi = { version = "3.12.7", features = ["napi8", "serde-json"] }
 napi-derive = "3.6.8"
+mlua = { version = "0.11", default-features = false, features = ["serialize", "send"] }
 
 # The slow half of the engine split above. fancy-regex is pure Rust, so it is
 # the only Syntect engine that builds here, and the browser still pays ~133ms on
@@ -96,8 +97,10 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_HiDpi"] 
 [features]
 # test-support is default so published binaries include TestGpuixRenderer,
 # letting users write GPU-backed tests for their apps.
-default = ["test-support"]
+default = ["test-support", "lua54"]
 test-support = ["gpui/test-support", "gpui_platform/test-support", "gpui_macos/test-support", "gpui_macos/font-kit"]
+lua54 = ["mlua/lua54", "mlua/vendored"]
+luajit = ["mlua/luajit", "mlua/vendored"]
 
 [build-dependencies]
 napi-build = "2.4.4"

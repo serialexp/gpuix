@@ -204,6 +204,7 @@ fn install_test_image_http_client(cx: &mut gpui::App) {
 pub struct TestGpuixRenderer {
     tree: Arc<Mutex<RetainedTree>>,
     events: Arc<Mutex<Vec<EventPayload>>>,
+    lua_runtime: Mutex<Option<crate::lua_runtime::LuaRuntime>>,
     /// Same handle GpuixView paints against, so tests can assert on the live
     /// selection after simulating a drag.
     selection: crate::text::SharedSelection,
@@ -283,6 +284,7 @@ impl TestGpuixRenderer {
         Ok(Self {
             tree,
             events,
+            lua_runtime: Mutex::new(None),
             selection,
         })
     }
@@ -303,6 +305,38 @@ impl TestGpuixRenderer {
     pub fn apply_batch(&self, json: String) -> Result<Vec<f64>> {
         let mut tree = self.tree.lock().unwrap();
         apply_batch_to_tree(&mut tree, json.as_bytes()).map_err(Error::from_reason)
+    }
+
+    #[napi]
+    pub fn load_lua(&self, source: String) -> Result<()> {
+        let mut next_tree = RetainedTree::new();
+        let runtime = crate::lua_runtime::LuaRuntime::load(&source, &mut next_tree)
+            .map_err(Error::from_reason)?;
+        *self.tree.lock().unwrap() = next_tree;
+        *self.lua_runtime.lock().unwrap() = Some(runtime);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn load_luax(&self, source: String) -> Result<()> {
+        let mut next_tree = RetainedTree::new();
+        let runtime = crate::lua_runtime::LuaRuntime::load_luax(&source, &mut next_tree)
+            .map_err(Error::from_reason)?;
+        *self.tree.lock().unwrap() = next_tree;
+        *self.lua_runtime.lock().unwrap() = Some(runtime);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn dispatch_lua_event(&self, payload: EventPayload) -> Result<bool> {
+        let mut runtime = self.lua_runtime.lock().unwrap();
+        let runtime = runtime
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("No Lua app is loaded"))?;
+        let mut tree = self.tree.lock().unwrap();
+        runtime
+            .dispatch_event(payload, &mut tree)
+            .map_err(Error::from_reason)
     }
 
     // ── Test-specific methods ────────────────────────────────────────

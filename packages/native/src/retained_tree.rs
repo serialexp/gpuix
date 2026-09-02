@@ -322,6 +322,114 @@ impl RetainedTree {
         }
     }
 
+    /// Replace the render-facing fields of one retained element in one pass.
+    /// Embedded runtimes use this instead of serializing a mutation batch.
+    pub fn update_element(
+        &mut self,
+        id: u64,
+        style: Option<Arc<StyleDesc>>,
+        content: Option<String>,
+        events: HashSet<String>,
+        custom_props: HashMap<String, serde_json::Value>,
+        auto_focus: bool,
+        test_id: Option<String>,
+    ) {
+        let Some(element) = self.elements.get_mut(&id) else {
+            return;
+        };
+        let style_changed = match (&element.style, &style) {
+            (Some(current), Some(next)) => {
+                !Arc::ptr_eq(current, next) && current.as_ref() != next.as_ref()
+            }
+            (None, None) => false,
+            _ => true,
+        };
+        let content_changed = element.content != content;
+        let highlight_changed = element.custom_props.contains_key("highlight")
+            != custom_props.contains_key("highlight");
+        let custom_props_changed = element.custom_props != custom_props
+            || element.auto_focus != auto_focus
+            || element.test_id != test_id;
+
+        element.style = style;
+        element.content = content;
+        element.events = events;
+        element.custom_props = custom_props;
+        element.auto_focus = auto_focus;
+        element.test_id = test_id;
+
+        if content_changed {
+            self.mark_changed(id);
+        } else if style_changed || custom_props_changed {
+            self.mark_render_changed(id);
+        }
+        if highlight_changed {
+            if let Some(parent) = self.elements.get(&id).and_then(|element| element.parent) {
+                self.mark_changed(parent);
+            }
+        }
+    }
+
+    /// Set an element's complete ordered child list without replaying one
+    /// append operation per child. Existing child IDs keep all GPUI state.
+    pub fn replace_children(&mut self, parent_id: u64, children: Vec<u64>) {
+        let old_children = self
+            .elements
+            .get(&parent_id)
+            .map(|element| element.children.clone())
+            .unwrap_or_default();
+        if old_children == children {
+            return;
+        }
+
+        let next_children: HashSet<u64> = children.iter().copied().collect();
+        for child_id in old_children {
+            if !next_children.contains(&child_id) {
+                if let Some(child) = self.elements.get_mut(&child_id) {
+                    if child.parent == Some(parent_id) {
+                        child.parent = None;
+                    }
+                }
+            }
+        }
+
+        let mut changed_parents = HashSet::new();
+        for child_id in &children {
+            let old_parent = self
+                .elements
+                .get(child_id)
+                .and_then(|element| element.parent);
+            if let Some(old_parent) = old_parent {
+                if old_parent != parent_id {
+                    if let Some(parent) = self.elements.get_mut(&old_parent) {
+                        parent.children.retain(|id| id != child_id);
+                    }
+                    changed_parents.insert(old_parent);
+                }
+            }
+            if let Some(child) = self.elements.get_mut(child_id) {
+                child.parent = Some(parent_id);
+            }
+        }
+        if let Some(parent) = self.elements.get_mut(&parent_id) {
+            parent.children = children;
+        }
+        for changed_parent in changed_parents {
+            self.mark_changed(changed_parent);
+        }
+        self.mark_changed(parent_id);
+    }
+
+    pub fn set_root(&mut self, root_id: Option<u64>) {
+        if self.root_id == root_id {
+            return;
+        }
+        self.root_id = root_id;
+        if let Some(root_id) = root_id {
+            self.mark_changed(root_id);
+        }
+    }
+
     fn take_revision(&mut self) -> u64 {
         // Every content change takes a revision to invalidate caches, so this is
         // the one place that covers style, text, structure and custom props.

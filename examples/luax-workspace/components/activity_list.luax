@@ -1,0 +1,19 @@
+local ActivityRow = require("components.activity_row")
+local theme = require("theme")
+
+return function(props)
+    local keys = {}
+    local dependencies = {}
+    for index, item in ipairs(props.items) do
+        keys[index] = item.id
+        dependencies[index] = item.id == props.selectedId
+    end
+    local rows = gpuix.memo_batch(keys, dependencies, function(_, active, index)
+        return <ActivityRow item={props.items[index]} active={active} onSelect={props.onSelect} />
+    end)
+
+    return <div style={theme.styles.activity}>
+        <text style={{ color = theme.colors.muted, fontSize = 12 }}>ACTIVITY</text>
+        <div style={{ display = "flex", flexDirection = "column", gap = 8 }} children={rows} />
+    </div>
+end
