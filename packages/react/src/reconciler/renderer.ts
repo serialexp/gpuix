@@ -157,6 +157,8 @@ export interface RenderOptions extends WindowOptions, WindowKeyEventHandlers {
   renderer?: NativeRenderer
   /** GPUI scene overlay. Does not go through React or layout. */
   debugFrameOverlay?: DebugFrameOverlayMode
+  /** Experimental full host snapshot transport with Rust reconciliation. */
+  transport?: "mutations" | "snapshot"
 }
 
 export function resetRender(): void {
@@ -177,6 +179,7 @@ export function render(node: ReactNode, options: RenderOptions = {}): Root {
     onKeyUp,
     renderer: injected,
     debugFrameOverlay,
+    transport,
     ...windowOptions
   } = options
   const slot = renderSlot()
@@ -209,7 +212,7 @@ export function render(node: ReactNode, options: RenderOptions = {}): Root {
     console.log("[gpuix] remount: unmount previous tree")
     slot.root.unmount()
   }
-  const root = createRoot(host, { onEvent, onKeyDown, onKeyUp })
+  const root = createRoot(host, { onEvent, onKeyDown, onKeyUp, transport })
   slot.root = root
   flushSync(() => {
     root.render(node)

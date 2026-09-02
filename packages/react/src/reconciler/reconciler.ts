@@ -16,6 +16,7 @@ import {
   idAllocatorFor,
   nextWindowKeyEventId,
 } from "./event-registry.js"
+import { wrapWithSnapshots } from "./snapshot-renderer.js"
 import { hostConfig } from "./host-config.js"
 
 // Cast to any because @types/react-reconciler is out of date with react-reconciler 0.31.0
@@ -59,27 +60,30 @@ export interface Root {
   unmount: () => void
 }
 
-export function createRoot(
-  renderer: NativeRenderer,
-  rootEventHandlers: RootEventHandlers = {}
-): Root {
+export interface CreateRootOptions extends RootEventHandlers {
+  transport?: "mutations" | "snapshot"
+}
+
+export function createRoot(renderer: NativeRenderer, options: CreateRootOptions = {}): Root {
   let container: OpaqueRoot | null = null
-  const batchedRenderer = wrapWithBatching(renderer)
-  const ids = idAllocatorFor(renderer)
+  const hostRenderer =
+    options.transport === "snapshot"
+      ? wrapWithSnapshots(renderer)
+      : wrapWithBatching(renderer)
   const windowKeyEventId = nextWindowKeyEventId(renderer)
   const gpuixContainer: Container = {
-    renderer: batchedRenderer,
-    ids,
+    renderer: hostRenderer,
+    ids: idAllocatorFor(renderer),
     eventHandlers: new Map(),
-    windowKeyEventHandlers: rootEventHandlers,
+    windowKeyEventHandlers: options,
     windowKeyEventId,
-    onEvent: rootEventHandlers.onEvent,
+    onEvent: options.onEvent,
   }
   attachRoot(renderer, gpuixContainer)
   try {
     renderer.setWindowKeyEvents?.(
-      Boolean(rootEventHandlers.onKeyDown),
-      Boolean(rootEventHandlers.onKeyUp),
+      Boolean(options.onKeyDown),
+      Boolean(options.onKeyUp),
       windowKeyEventId
     )
   } catch (error) {

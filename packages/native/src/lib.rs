@@ -18,6 +18,12 @@ mod color;
 mod custom_elements;
 mod diff;
 mod element_tree;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+mod lua_app;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+mod lua_runtime;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+mod luax;
 mod markdown;
 mod motion;
 mod renderer;
@@ -36,6 +42,8 @@ mod theme;
 mod test_renderer;
 
 pub use element_tree::*;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub use lua_app::*;
 pub use renderer::*;
 pub use style::*;
 

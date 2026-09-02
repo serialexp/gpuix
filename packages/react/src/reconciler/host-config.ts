@@ -129,6 +129,41 @@ function sendStyle(renderer: MutationRenderer, id: number, props: Props): void {
   renderer.setStyle(id, style)
 }
 
+function styleValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+      return false
+    }
+    for (let index = 0; index < left.length; index++) {
+      if (!styleValuesEqual(left[index], right[index])) return false
+    }
+    return true
+  }
+  if (
+    left === null ||
+    right === null ||
+    typeof left !== "object" ||
+    typeof right !== "object"
+  ) {
+    return false
+  }
+  const leftRecord = left as Record<string, unknown>
+  const rightRecord = right as Record<string, unknown>
+  const leftKeys = Object.keys(leftRecord)
+  const rightKeys = Object.keys(right)
+  if (leftKeys.length !== rightKeys.length) return false
+  for (const key of leftKeys) {
+    if (
+      !Object.prototype.hasOwnProperty.call(rightRecord, key) ||
+      !styleValuesEqual(leftRecord[key], rightRecord[key])
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
 // ── Custom prop forwarding ───────────────────────────────────────────
 
 // Props that are handled by the reconciler directly (not forwarded as custom props).
@@ -382,9 +417,10 @@ export const hostConfig = {
     _internalInstanceHandle: unknown
   ): void {
     const container = containerFor(instance)
-    // Always resend style — per-element JSON is small, and this avoids
-    // bugs from same-reference mutations or style removal.
-    container.renderer.setStyle(instance.id, newProps.style ?? {})
+    const nextStyle = newProps.style ?? {}
+    if (!styleValuesEqual(oldProps.style ?? {}, nextStyle)) {
+      container.renderer.setStyle(instance.id, nextStyle)
+    }
     diffEventListeners(container, instance.id, oldProps, newProps)
     // Custom prop diff (for non-div/text elements)
     diffCustomProps(container.renderer, instance.id, instance.type, oldProps, newProps)

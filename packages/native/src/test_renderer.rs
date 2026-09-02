@@ -21,9 +21,9 @@ use gpui::AppContext as _;
 
 use crate::element_tree::EventPayload;
 use crate::renderer::{
-    apply_batch_to_tree, debug_frame_overlay_mode_name, debug_frame_overlay_stats_js,
-    parse_debug_frame_overlay_mode, to_element_id, DebugFrameOverlayStats, EventCallback,
-    GpuixView,
+    apply_batch_to_tree, apply_snapshot_to_tree, debug_frame_overlay_mode_name,
+    debug_frame_overlay_stats_js, parse_debug_frame_overlay_mode, to_element_id,
+    DebugFrameOverlayStats, EventCallback, GpuixView,
 };
 use crate::retained_tree::RetainedTree;
 
@@ -155,6 +155,7 @@ fn u32_to_mouse_button(button: u32) -> gpui::MouseButton {
 pub struct TestGpuixRenderer {
     tree: Arc<Mutex<RetainedTree>>,
     events: Arc<Mutex<Vec<EventPayload>>>,
+    lua_runtime: Mutex<Option<crate::lua_runtime::LuaRuntime>>,
     /// Same handle GpuixView paints against, so tests can assert on the live
     /// selection after simulating a drag.
     selection: crate::text::SharedSelection,
@@ -219,6 +220,7 @@ impl TestGpuixRenderer {
         Ok(Self {
             tree,
             events,
+            lua_runtime: Mutex::new(None),
             selection,
         })
     }
@@ -239,6 +241,45 @@ impl TestGpuixRenderer {
     pub fn apply_batch(&self, json: String) -> Result<Vec<f64>> {
         let mut tree = self.tree.lock().unwrap();
         apply_batch_to_tree(&mut tree, json.as_bytes()).map_err(Error::from_reason)
+    }
+
+    /// Reconcile one complete host snapshot by stable element id.
+    #[napi]
+    pub fn apply_snapshot(&self, json: String) -> Result<Vec<f64>> {
+        let mut tree = self.tree.lock().unwrap();
+        apply_snapshot_to_tree(&mut tree, json.as_bytes()).map_err(Error::from_reason)
+    }
+
+    #[napi]
+    pub fn load_lua(&self, source: String) -> Result<()> {
+        let mut next_tree = RetainedTree::new();
+        let runtime = crate::lua_runtime::LuaRuntime::load(&source, &mut next_tree)
+            .map_err(Error::from_reason)?;
+        *self.tree.lock().unwrap() = next_tree;
+        *self.lua_runtime.lock().unwrap() = Some(runtime);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn load_luax(&self, source: String) -> Result<()> {
+        let mut next_tree = RetainedTree::new();
+        let runtime = crate::lua_runtime::LuaRuntime::load_luax(&source, &mut next_tree)
+            .map_err(Error::from_reason)?;
+        *self.tree.lock().unwrap() = next_tree;
+        *self.lua_runtime.lock().unwrap() = Some(runtime);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn dispatch_lua_event(&self, payload: EventPayload) -> Result<bool> {
+        let mut runtime = self.lua_runtime.lock().unwrap();
+        let runtime = runtime
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("No Lua app is loaded"))?;
+        let mut tree = self.tree.lock().unwrap();
+        runtime
+            .dispatch_event(payload, &mut tree)
+            .map_err(Error::from_reason)
     }
 
     // ── Test-specific methods ────────────────────────────────────────

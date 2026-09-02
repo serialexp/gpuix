@@ -7,6 +7,35 @@ import { createTestRoot, hasNativeTestRenderer, TestRenderer } from "../testing.
 const describeNative = hasNativeTestRenderer ? describe : describe.skip
 
 describeNative("mutation lifecycle", () => {
+  it("renders and updates through Rust snapshot reconciliation", () => {
+    const { render, renderer, unmount } = createTestRoot({ transport: "snapshot" })
+
+    try {
+      render(
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          {["a", "b", "c"].map((value) => (
+            <text key={value}>{value}</text>
+          ))}
+        </div>
+      )
+      expect(renderer.getAllText()).toEqual(["a", "b", "c"])
+
+      render(
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          {["c", "b", "a"].map((value) => (
+            <text key={value} style={{ color: value === "b" ? "red" : "white" }}>
+              {value}
+            </text>
+          ))}
+        </div>
+      )
+      expect(renderer.getAllText()).toEqual(["c", "b", "a"])
+    } finally {
+      unmount()
+    }
+    expect(renderer.getRetainedElementCount()).toBe(0)
+  })
+
   it("does not paint host nodes from an abandoned Suspense render", () => {
     const { render, renderer, unmount } = createTestRoot()
     const pending = new Promise<never>(() => {})

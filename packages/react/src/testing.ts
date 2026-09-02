@@ -30,6 +30,7 @@ export {
 export type { MacCpuThrottle } from "./cpu-throttle.js"
 
 interface NativeTestRendererApi extends NativeRenderer {
+  applySnapshot(json: string): number[]
   flush(): void
   drainEvents(): EventPayload[]
   simulateKeystrokes(keystrokes: string): void
@@ -93,6 +94,7 @@ interface NativeTestRendererConstructor {
 export interface TestRendererOptions {
   width?: number
   height?: number
+  transport?: "mutations" | "snapshot"
 }
 
 export type TestWindowOptions = TestRendererOptions & WindowKeyEventHandlers
@@ -141,6 +143,7 @@ export class TestRenderer implements NativeRenderer {
   /** Native TestGpuixRenderer — all state lives here in Rust's RetainedTree. */
   private native: NativeTestRendererApi
   readonly applyBatch: NativeRenderer["applyBatch"]
+  readonly applySnapshot: NonNullable<NativeRenderer["applySnapshot"]>
   readonly focusNext: () => void
   readonly focusPrevious: () => void
   readonly setWindowKeyEvents: (
@@ -157,6 +160,7 @@ export class TestRenderer implements NativeRenderer {
     }
     this.native = new NativeTestRenderer(options.width, options.height)
     this.applyBatch = this.native.applyBatch.bind(this.native)
+    this.applySnapshot = this.native.applySnapshot.bind(this.native)
     this.focusNext = this.native.focusNext.bind(this.native)
     this.focusPrevious = this.native.focusPrevious.bind(this.native)
     this.setWindowKeyEvents = this.native.setWindowKeyEvents.bind(this.native)
@@ -609,6 +613,7 @@ export function createTestRoot(options: TestWindowOptions = {}): TestRoot {
   const root = createRoot(renderer, {
     onKeyDown: options.onKeyDown,
     onKeyUp: options.onKeyUp,
+    transport: options.transport,
   })
 
   const render = (node: ReactNode): void => {

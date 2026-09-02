@@ -784,6 +784,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 pub struct GpuixRenderer {
     event_callback: Mutex<Option<Arc<ThreadsafeFunction<EventPayload>>>>,
     tree: Arc<Mutex<RetainedTree>>,
+    lua_runtime: Mutex<Option<crate::lua_runtime::LuaRuntime>>,
     initialized: Arc<Mutex<bool>>,
     /// Shared with GpuixView so napi methods can read the live selection
     /// without an App context. Paint and napi calls can use different threads.
@@ -914,6 +915,7 @@ impl GpuixRenderer {
         Self {
             event_callback: Mutex::new(event_callback.map(Arc::new)),
             tree: Arc::new(Mutex::new(RetainedTree::new())),
+            lua_runtime: Mutex::new(None),
             initialized: Arc::new(Mutex::new(false)),
             selection: SharedSelection::default(),
             #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
@@ -1207,6 +1209,66 @@ impl GpuixRenderer {
         drop(tree);
         self.request_invalidate()?;
         Ok(destroyed)
+    }
+
+    /// Reconcile one complete host snapshot by stable element id.
+    #[napi]
+    pub fn apply_snapshot(&self, json: String) -> Result<Vec<f64>> {
+        let mut tree = self.tree.lock().unwrap();
+        let destroyed =
+            apply_snapshot_to_tree(&mut tree, json.as_bytes()).map_err(Error::from_reason)?;
+        drop(tree);
+        self.request_invalidate()?;
+        Ok(destroyed)
+    }
+
+    /// Load a Lua component function and render it directly into the retained
+    /// tree. Lua state updates never serialize a host tree or cross napi.
+    #[napi]
+    pub fn load_lua(&self, source: String) -> Result<()> {
+        let mut next_tree = RetainedTree::new();
+        let runtime = crate::lua_runtime::LuaRuntime::load(&source, &mut next_tree)
+            .map_err(Error::from_reason)?;
+        *self.tree.lock().unwrap() = next_tree;
+        *self.lua_runtime.lock().unwrap() = Some(runtime);
+        if *self.initialized.lock().unwrap() {
+            self.request_invalidate()?;
+        }
+        Ok(())
+    }
+
+    /// Transform LuaX syntax into direct host calls, then load it as Lua.
+    #[napi]
+    pub fn load_luax(&self, source: String) -> Result<()> {
+        let mut next_tree = RetainedTree::new();
+        let runtime = crate::lua_runtime::LuaRuntime::load_luax(&source, &mut next_tree)
+            .map_err(Error::from_reason)?;
+        *self.tree.lock().unwrap() = next_tree;
+        *self.lua_runtime.lock().unwrap() = Some(runtime);
+        if *self.initialized.lock().unwrap() {
+            self.request_invalidate()?;
+        }
+        Ok(())
+    }
+
+    /// Deliver one native event to Lua. The handler and any resulting
+    /// reconciliation execute in Rust; only this fixed-size event crosses napi.
+    #[napi]
+    pub fn dispatch_lua_event(&self, payload: EventPayload) -> Result<bool> {
+        let changed = {
+            let mut runtime = self.lua_runtime.lock().unwrap();
+            let runtime = runtime
+                .as_mut()
+                .ok_or_else(|| Error::from_reason("No Lua app is loaded"))?;
+            let mut tree = self.tree.lock().unwrap();
+            runtime
+                .dispatch_event(payload, &mut tree)
+                .map_err(Error::from_reason)?
+        };
+        if changed && *self.initialized.lock().unwrap() {
+            self.request_invalidate()?;
+        }
+        Ok(changed)
     }
 
     // ── Frame loop ───────────────────────────────────────────────────
@@ -2414,6 +2476,17 @@ impl WebGpuixRenderer {
         json: String,
     ) -> Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue> {
         let destroyed = apply_batch_to_tree(&mut self.tree.lock().unwrap(), json.as_bytes())
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
+        notify_web();
+        Ok(web_number_array(destroyed))
+    }
+
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = applySnapshot)]
+    pub fn apply_snapshot(
+        &self,
+        json: String,
+    ) -> Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue> {
+        let destroyed = apply_snapshot_to_tree(&mut self.tree.lock().unwrap(), json.as_bytes())
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
         notify_web();
         Ok(web_number_array(destroyed))
@@ -5391,6 +5464,14 @@ pub fn apply_batch_to_tree(tree: &mut RetainedTree, bytes: &[u8]) -> BatchResult
     tree.styles.maybe_sweep(live_elements);
 
     Ok(destroyed_ids)
+}
+
+/// Apply an authoritative host snapshot to the same retained tree used by the
+/// mutation transport. Kept beside `apply_batch_to_tree` so benchmarks exercise
+/// the production entry point rather than a replica.
+pub fn apply_snapshot_to_tree(tree: &mut RetainedTree, bytes: &[u8]) -> BatchResult<Vec<f64>> {
+    tree.reconcile_snapshot(bytes)
+        .map(|destroyed| destroyed.into_iter().map(|id| id as f64).collect())
 }
 
 // ── Types ────────────────────────────────────────────────────────────

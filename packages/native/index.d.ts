@@ -26,6 +26,20 @@ export declare class GpuixRenderer {
    * Acquires the tree mutex ONCE for the entire batch.
    */
   applyBatch(json: string): Array<number>
+  /** Reconcile one complete host snapshot by stable element id. */
+  applySnapshot(json: string): Array<number>
+  /**
+   * Load a Lua component function and render it directly into the retained
+   * tree. Lua state updates never serialize a host tree or cross napi.
+   */
+  loadLua(source: string): void
+  /** Transform LuaX syntax into direct host calls, then load it as Lua. */
+  loadLuax(source: string): void
+  /**
+   * Deliver one native event to Lua. The handler and any resulting
+   * reconciliation execute in Rust; only this fixed-size event crosses napi.
+   */
+  dispatchLuaEvent(payload: EventPayload): boolean
   /** Pump the native event loop. Returns false after the last window closes. */
   tick(): boolean
   isInitialized(): boolean
@@ -162,6 +176,11 @@ export declare class TestGpuixRenderer {
    * Returns accumulated destroyed IDs from all destroyElement ops.
    */
   applyBatch(json: string): Array<number>
+  /** Reconcile one complete host snapshot by stable element id. */
+  applySnapshot(json: string): Array<number>
+  loadLua(source: string): void
+  loadLuax(source: string): void
+  dispatchLuaEvent(payload: EventPayload): boolean
   /**
    * Notify the view entity and run GPUI until parked.
    * This triggers GpuixView::render() → build_element() → GPUI layout.

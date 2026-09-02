@@ -6,11 +6,14 @@
 ///
 /// All IDs are u64 — JS generates them with an incrementing counter,
 /// passes them as numbers across napi (no string allocation).
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::style::StyleDesc;
+use serde::Deserialize;
+use serde_json::value::RawValue;
 
 pub struct RetainedElement {
     pub id: u64,
@@ -190,6 +193,146 @@ pub struct RetainedTree {
     next_revision: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TreeSnapshot<'a> {
+    root_id: Option<f64>,
+    #[serde(borrow)]
+    nodes: Vec<SnapshotNode<'a>>,
+}
+
+#[derive(Deserialize)]
+struct SnapshotNode<'a>(
+    f64,
+    #[serde(borrow)] Cow<'a, str>,
+    #[serde(borrow)] Option<&'a RawValue>,
+    #[serde(borrow)] Option<Cow<'a, str>>,
+    #[serde(borrow)] Vec<Cow<'a, str>>,
+    Vec<f64>,
+    #[serde(borrow)] HashMap<Cow<'a, str>, serde_json::Value>,
+);
+
+struct PendingSnapshotNode<'a> {
+    id: u64,
+    element_type: String,
+    style: Option<&'a RawValue>,
+    content: Option<String>,
+    events: HashSet<String>,
+    children: Vec<u64>,
+    parent: Option<u64>,
+    custom_props: HashMap<String, serde_json::Value>,
+    auto_focus: bool,
+    test_id: Option<String>,
+}
+
+fn snapshot_id(id: f64) -> Result<u64, String> {
+    if !id.is_finite() || id < 0.0 || id.fract() != 0.0 || id > 9_007_199_254_740_991.0 {
+        return Err(format!("Invalid element id: {id}"));
+    }
+    Ok(id as u64)
+}
+
+fn prepare_snapshot(bytes: &[u8]) -> Result<(Option<u64>, Vec<PendingSnapshotNode<'_>>), String> {
+    let snapshot: TreeSnapshot<'_> = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Failed to parse snapshot: {error}"))?;
+    let root_id = snapshot.root_id.map(snapshot_id).transpose()?;
+    let mut nodes = Vec::with_capacity(snapshot.nodes.len());
+    let mut indexes = rustc_hash::FxHashMap::default();
+
+    for (index, node) in snapshot.nodes.into_iter().enumerate() {
+        let id = snapshot_id(node.0)?;
+        if indexes.insert(id, index).is_some() {
+            return Err(format!("Snapshot contains duplicate element id {id}"));
+        }
+        let mut custom_props: HashMap<String, serde_json::Value> = node
+            .6
+            .into_iter()
+            .map(|(key, value)| (key.into_owned(), value))
+            .collect();
+        let auto_focus = custom_props
+            .remove("autoFocus")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let test_id = custom_props
+            .remove("testId")
+            .and_then(|value| value.as_str().map(str::to_string));
+        nodes.push(PendingSnapshotNode {
+            id,
+            element_type: node.1.into_owned(),
+            style: node.2,
+            content: node.3.map(Cow::into_owned),
+            events: node.4.into_iter().map(Cow::into_owned).collect(),
+            children: node
+                .5
+                .into_iter()
+                .map(snapshot_id)
+                .collect::<Result<Vec<_>, _>>()?,
+            parent: None,
+            custom_props,
+            auto_focus,
+            test_id,
+        });
+    }
+
+    match root_id {
+        Some(root_id) if !indexes.contains_key(&root_id) => {
+            return Err(format!("Snapshot root {root_id} does not exist"));
+        }
+        None if !nodes.is_empty() => {
+            return Err("Snapshot has elements but no root".to_string());
+        }
+        _ => {}
+    }
+
+    let mut parents = rustc_hash::FxHashMap::default();
+    for node in &nodes {
+        for child_id in &node.children {
+            if !indexes.contains_key(child_id) {
+                return Err(format!(
+                    "Snapshot element {} references missing child {child_id}",
+                    node.id
+                ));
+            }
+            if *child_id == node.id {
+                return Err(format!("Snapshot element {} contains itself", node.id));
+            }
+            if let Some(previous) = parents.insert(*child_id, node.id) {
+                return Err(format!(
+                    "Snapshot element {child_id} has parents {previous} and {}",
+                    node.id
+                ));
+            }
+        }
+    }
+    for node in &mut nodes {
+        node.parent = parents.get(&node.id).copied();
+    }
+
+    if let Some(root_id) = root_id {
+        if parents.contains_key(&root_id) {
+            return Err(format!("Snapshot root {root_id} has a parent"));
+        }
+        let mut reached = rustc_hash::FxHashSet::default();
+        let mut stack = vec![root_id];
+        while let Some(id) = stack.pop() {
+            if !reached.insert(id) {
+                continue;
+            }
+            let node = &nodes[indexes[&id]];
+            stack.extend(node.children.iter().copied());
+        }
+        if reached.len() != nodes.len() {
+            return Err(format!(
+                "Snapshot root reaches {} of {} elements",
+                reached.len(),
+                nodes.len()
+            ));
+        }
+    }
+
+    Ok((root_id, nodes))
+}
+
 impl RetainedTree {
     pub fn new() -> Self {
         Self {
@@ -204,6 +347,233 @@ impl RetainedTree {
         let revision = self.take_revision();
         self.elements
             .insert(id, RetainedElement::new(id, element_type, revision));
+    }
+
+    /// Replace the render-facing fields of one retained element in one pass.
+    /// Embedded runtimes use this instead of serializing a mutation batch.
+    pub fn update_element(
+        &mut self,
+        id: u64,
+        style: Option<Arc<StyleDesc>>,
+        content: Option<String>,
+        events: HashSet<String>,
+        custom_props: HashMap<String, serde_json::Value>,
+        auto_focus: bool,
+        test_id: Option<String>,
+    ) {
+        let Some(element) = self.elements.get_mut(&id) else {
+            return;
+        };
+        let style_changed = match (&element.style, &style) {
+            (Some(current), Some(next)) => {
+                !Arc::ptr_eq(current, next) && current.as_ref() != next.as_ref()
+            }
+            (None, None) => false,
+            _ => true,
+        };
+        let content_changed = element.content != content;
+        let highlight_changed = element.custom_props.contains_key("highlight")
+            != custom_props.contains_key("highlight");
+        let custom_props_changed = element.custom_props != custom_props
+            || element.auto_focus != auto_focus
+            || element.test_id != test_id;
+
+        element.style = style;
+        element.content = content;
+        element.events = events;
+        element.custom_props = custom_props;
+        element.auto_focus = auto_focus;
+        element.test_id = test_id;
+
+        if content_changed {
+            self.mark_changed(id);
+        } else if style_changed || custom_props_changed {
+            self.mark_render_changed(id);
+        }
+        if highlight_changed {
+            if let Some(parent) = self.elements.get(&id).and_then(|element| element.parent) {
+                self.mark_changed(parent);
+            }
+        }
+    }
+
+    /// Set an element's complete ordered child list without replaying one
+    /// append operation per child. Existing child IDs keep all GPUI state.
+    pub fn replace_children(&mut self, parent_id: u64, children: Vec<u64>) {
+        let old_children = self
+            .elements
+            .get(&parent_id)
+            .map(|element| element.children.clone())
+            .unwrap_or_default();
+        if old_children == children {
+            return;
+        }
+
+        let next_children: HashSet<u64> = children.iter().copied().collect();
+        for child_id in old_children {
+            if !next_children.contains(&child_id) {
+                if let Some(child) = self.elements.get_mut(&child_id) {
+                    if child.parent == Some(parent_id) {
+                        child.parent = None;
+                    }
+                }
+            }
+        }
+
+        let mut changed_parents = HashSet::new();
+        for child_id in &children {
+            let old_parent = self
+                .elements
+                .get(child_id)
+                .and_then(|element| element.parent);
+            if let Some(old_parent) = old_parent {
+                if old_parent != parent_id {
+                    if let Some(parent) = self.elements.get_mut(&old_parent) {
+                        parent.children.retain(|id| id != child_id);
+                    }
+                    changed_parents.insert(old_parent);
+                }
+            }
+            if let Some(child) = self.elements.get_mut(child_id) {
+                child.parent = Some(parent_id);
+            }
+        }
+        if let Some(parent) = self.elements.get_mut(&parent_id) {
+            parent.children = children;
+        }
+        for changed_parent in changed_parents {
+            self.mark_changed(changed_parent);
+        }
+        self.mark_changed(parent_id);
+    }
+
+    pub fn set_root(&mut self, root_id: Option<u64>) {
+        if self.root_id == root_id {
+            return;
+        }
+        self.root_id = root_id;
+        if let Some(root_id) = root_id {
+            self.mark_changed(root_id);
+        }
+    }
+
+    /// Reconcile one authoritative host snapshot by stable React host ID.
+    /// Parsing, structural validation, and style decoding complete before the
+    /// retained tree is touched, so a malformed snapshot is atomic like a
+    /// mutation batch.
+    pub fn reconcile_snapshot(&mut self, bytes: &[u8]) -> Result<Vec<u64>, String> {
+        let (root_id, pending) = prepare_snapshot(bytes)?;
+        let mut resolved_styles = Vec::with_capacity(pending.len());
+        for (index, node) in pending.iter().enumerate() {
+            let style = node
+                .style
+                .map(|raw| self.styles.intern(raw.get().as_bytes()))
+                .transpose()
+                .map_err(|error| {
+                    self.styles.sweep();
+                    format!("Snapshot node {index} style parse error: {error}")
+                })?;
+            resolved_styles.push(style);
+        }
+
+        let incoming: rustc_hash::FxHashSet<u64> = pending.iter().map(|node| node.id).collect();
+        let mut destroyed: Vec<u64> = self
+            .elements
+            .keys()
+            .filter(|id| !incoming.contains(id))
+            .copied()
+            .collect();
+        destroyed.sort_unstable();
+        self.elements.retain(|id, _| incoming.contains(id));
+
+        let old_root = self.root_id;
+        let mut changes: rustc_hash::FxHashMap<u64, bool> = rustc_hash::FxHashMap::default();
+        for (node, style) in pending.into_iter().zip(resolved_styles) {
+            let Some(element) = self.elements.get_mut(&node.id) else {
+                let revision = self.take_revision();
+                let mut element = RetainedElement::new(node.id, node.element_type, revision);
+                element.style = style;
+                element.content = node.content;
+                element.events = node.events;
+                element.children = node.children;
+                element.parent = node.parent;
+                element.custom_props = node.custom_props;
+                element.auto_focus = node.auto_focus;
+                element.test_id = node.test_id;
+                self.elements.insert(node.id, element);
+                continue;
+            };
+
+            let type_changed = element.element_type != node.element_type;
+            let style_changed = element.style.as_deref() != style.as_deref();
+            let content_changed = element.content != node.content;
+            let structure_changed =
+                element.children != node.children || element.parent != node.parent;
+            let highlight_changed = element.custom_props.contains_key("highlight")
+                != node.custom_props.contains_key("highlight");
+            let custom_props_changed = element.custom_props != node.custom_props;
+
+            element.element_type = node.element_type;
+            element.style = style;
+            element.content = node.content;
+            element.events = node.events;
+            element.children = node.children;
+            element.parent = node.parent;
+            element.custom_props = node.custom_props;
+            element.auto_focus = node.auto_focus;
+            element.test_id = node.test_id;
+
+            let search_changed = type_changed || content_changed || structure_changed;
+            let render_changed = search_changed || style_changed || custom_props_changed;
+            if render_changed {
+                changes
+                    .entry(node.id)
+                    .and_modify(|search| *search |= search_changed)
+                    .or_insert(search_changed);
+            }
+            if highlight_changed {
+                if let Some(parent) = node.parent {
+                    changes.insert(parent, true);
+                }
+            }
+        }
+        self.root_id = root_id;
+        if old_root != root_id {
+            if let Some(root_id) = root_id {
+                changes.insert(root_id, true);
+            }
+        }
+        self.mark_snapshot_changes(changes);
+        self.styles.maybe_sweep(self.elements.len());
+        Ok(destroyed)
+    }
+
+    fn mark_snapshot_changes(&mut self, changes: rustc_hash::FxHashMap<u64, bool>) {
+        if changes.is_empty() {
+            return;
+        }
+        let revision = self.take_revision();
+        let mut visited: rustc_hash::FxHashMap<u64, bool> = rustc_hash::FxHashMap::default();
+        for (id, search) in changes {
+            let mut current = Some(id);
+            while let Some(current_id) = current {
+                match visited.get_mut(&current_id) {
+                    Some(previous) if *previous || !search => break,
+                    Some(previous) => *previous = true,
+                    None => {
+                        visited.insert(current_id, search);
+                    }
+                }
+                let Some(element) = self.elements.get_mut(&current_id) else {
+                    break;
+                };
+                element.subtree_revision = revision;
+                if search {
+                    element.search_revision = revision;
+                }
+                current = element.parent;
+            }
+        }
     }
 
     fn take_revision(&mut self) -> u64 {
@@ -550,6 +920,11 @@ mod tests {
         crate::renderer::apply_batch_to_tree(tree, json.as_bytes()).expect("valid batch");
     }
 
+    fn reconcile(tree: &mut RetainedTree, json: &str) -> Vec<u64> {
+        tree.reconcile_snapshot(json.as_bytes())
+            .expect("valid snapshot")
+    }
+
     fn tree_with_child() -> RetainedTree {
         let mut tree = RetainedTree::new();
         tree.create_element(1, "div".to_string());
@@ -559,6 +934,72 @@ mod tests {
         tree.append_child(2, 3);
         tree.set_text(3, "hello".to_string());
         tree
+    }
+
+    #[test]
+    fn snapshot_reconciliation_preserves_unchanged_records() {
+        let mut tree = RetainedTree::new();
+        let snapshot = r##"{
+            "rootId":1,
+            "nodes":[
+                [1,"div",{"color":"red"},null,["click"],[2],{"testId":"root"}],
+                [2,"text",null,"hello",[],[],{}]
+            ]
+        }"##;
+        assert!(reconcile(&mut tree, snapshot).is_empty());
+        assert_eq!(tree.root_id, Some(1));
+        assert_eq!(tree.elements[&1].children, vec![2]);
+        assert_eq!(tree.elements[&2].parent, Some(1));
+        assert_eq!(tree.elements[&1].test_id.as_deref(), Some("root"));
+        assert!(tree.elements[&1].events.contains("click"));
+
+        let revision = tree.elements[&1].subtree_revision;
+        assert!(reconcile(&mut tree, snapshot).is_empty());
+        assert_eq!(tree.elements[&1].subtree_revision, revision);
+    }
+
+    #[test]
+    fn snapshot_reconciliation_updates_and_destroys_by_id() {
+        let mut tree = RetainedTree::new();
+        reconcile(
+            &mut tree,
+            r#"{"rootId":1,"nodes":[[1,"div",null,null,[],[2],{}],[2,"text",null,"old",[],[],{}]]}"#,
+        );
+        let revision = tree.elements[&1].search_revision;
+
+        let destroyed = reconcile(
+            &mut tree,
+            r#"{"rootId":1,"nodes":[[1,"div",null,null,[],[2],{}],[2,"text",null,"new",[],[],{}]]}"#,
+        );
+        assert!(destroyed.is_empty());
+        assert_eq!(tree.elements[&2].content.as_deref(), Some("new"));
+        assert!(tree.elements[&1].search_revision > revision);
+
+        let destroyed = reconcile(
+            &mut tree,
+            r#"{"rootId":1,"nodes":[[1,"div",null,null,[],[],{}]]}"#,
+        );
+        assert_eq!(destroyed, vec![2]);
+        assert_eq!(tree.elements[&1].children, Vec::<u64>::new());
+    }
+
+    #[test]
+    fn malformed_snapshot_is_atomic() {
+        let mut tree = RetainedTree::new();
+        reconcile(
+            &mut tree,
+            r#"{"rootId":1,"nodes":[[1,"div",{"color":"red"},null,[],[],{}]]}"#,
+        );
+        let revision = tree.elements[&1].subtree_revision;
+        let error = tree
+            .reconcile_snapshot(br#"{"rootId":1,"nodes":[[1,"div",{"color":5},null,[],[2],{}]]}"#)
+            .expect_err("missing child must fail");
+        assert!(error.contains("missing child 2"), "{error}");
+        assert_eq!(
+            tree.elements[&1].style.as_ref().unwrap().color.as_deref(),
+            Some("red")
+        );
+        assert_eq!(tree.elements[&1].subtree_revision, revision);
     }
 
     #[test]

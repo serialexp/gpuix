@@ -578,6 +578,8 @@ export interface AnchoredProps extends Props {
 export interface NativeRenderer {
   /** Apply one React commit. Returns every element id destroyed by the batch. */
   applyBatch(json: string): Array<number>
+  /** Reconcile one complete host snapshot by stable element id. */
+  applySnapshot?(json: string): Array<number>
 
   // ── Focus API ──────────────────────────────────────────────────
   focusElement?(elementId: number): void

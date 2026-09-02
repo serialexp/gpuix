@@ -1,0 +1,72 @@
+local ui = gpuix
+local theme = require("theme")
+local data = require("data")
+local Sidebar = require("components.sidebar")
+local Detail = require("components.detail")
+local ActivityList = require("components.activity_list")
+local Composer = require("components.composer")
+
+local function title_for(id)
+    for _, conversation in ipairs(data.conversations) do
+        if conversation.id == id then return conversation.title end
+    end
+    return "Workspace"
+end
+
+return function()
+    local active_id, set_active_id = ui.use_state("runtime")
+    local compact, set_compact = ui.use_state(false)
+    local mode, set_mode = ui.use_state("markdown")
+    local selected_activity, set_selected_activity = ui.use_state("activity-1")
+    local draft, set_draft = ui.use_state("")
+
+    return <div testId="luax-workspace" style={theme.styles.root}>
+        <Sidebar
+            items={data.conversations}
+            activeId={active_id}
+            compact={compact}
+            onSelect={set_active_id}
+        />
+        <div style={theme.styles.content}>
+            <div style={theme.styles.header}>
+                <div
+                    testId="toggle-sidebar"
+                    style={theme.styles.button}
+                    onClick={function() set_compact(function(value) return not value end) end}
+                >
+                    <text>{compact and "Expand" or "Compact"}</text>
+                </div>
+                <text style={{ color = theme.colors.muted }}>Native Lua workspace</text>
+                <div style={{ flexGrow = 1 }} />
+                <div
+                    testId="show-markdown"
+                    style={mode == "markdown" and theme.styles.button_active or theme.styles.button}
+                    onClick={function() set_mode("markdown") end}
+                ><text>Markdown</text></div>
+                <div
+                    testId="show-code"
+                    style={mode == "code" and theme.styles.button_active or theme.styles.button}
+                    onClick={function() set_mode("code") end}
+                ><text>Code</text></div>
+            </div>
+            <div style={theme.styles.body}>
+                <Detail
+                    title={title_for(active_id)}
+                    mode={mode}
+                    markdown={data.overview}
+                    code={data.code}
+                />
+                <ActivityList
+                    items={data.activities}
+                    selectedId={selected_activity}
+                    onSelect={set_selected_activity}
+                />
+            </div>
+            <Composer
+                value={draft}
+                onChange={function(event) set_draft(event.value or "") end}
+                onClear={function() set_draft("") end}
+            />
+        </div>
+    </div>
+end
