@@ -1,0 +1,74 @@
+local util = require("gpuix._util")
+
+local root_style = { display = "flex", position = "relative", alignItems = "start" }
+local trigger_style = {
+    display = "flex",
+    alignItems = "center",
+    focusVisible = util.focus_ring,
+}
+local content_style = {
+    maxWidth = 280,
+    padding = 8,
+    borderRadius = 6,
+    background = "#27272a",
+    color = "#fafafa",
+}
+
+return function(props)
+    local internal_open, set_internal_open = gpuix.use_state(props.defaultOpen == true)
+    local controlled = props.open ~= nil
+    local open = internal_open
+    if controlled then open = props.open end
+
+    local function set_open(next_open)
+        if next_open == open then return end
+        if not controlled then set_internal_open(next_open) end
+        util.call(props.onOpenChange, next_open)
+    end
+
+    local state = { open = open }
+    local content
+    if open then
+        local body = props.renderContent and props.renderContent(state)
+            or <text>{props.content or ""}</text>
+        content = <anchored
+            side={props.side or "top"}
+            align={props.align or "center"}
+            gap={props.sideOffset or 5}
+            fit="snap"
+            snapMargin={props.collisionPadding or 8}
+            deferred
+            priority={props.priority or 1}
+        >
+            <div
+                testId={util.test_id(props.testId, "-content")}
+                onMouseEnter={function()
+                    if not props.disableHoverableContent then set_open(true) end
+                end}
+                onMouseLeave={function() set_open(false) end}
+                style={util.resolve_style(props.contentStyle, state, content_style)}
+            >
+                {body}
+            </div>
+        </anchored>
+    end
+
+    return <div style={util.resolve_style(props.style, state, root_style)}>
+        <div
+            testId={props.testId}
+            tabIndex={props.tabIndex or 0}
+            onMouseEnter={function() set_open(true) end}
+            onMouseLeave={function() set_open(false) end}
+            onMouseDown={function() set_open(false) end}
+            onClick={function() set_open(false) end}
+            onFocus={function() set_open(true) end}
+            onBlur={function() set_open(false) end}
+            onKeyDown={function(event)
+                if event.key == "escape" then set_open(false) end
+            end}
+            style={util.resolve_style(props.triggerStyle, state, trigger_style)}
+            children={props}
+        />
+        {content}
+    </div>
+end

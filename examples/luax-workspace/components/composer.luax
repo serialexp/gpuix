@@ -1,4 +1,5 @@
 local theme = require("theme")
+local Button = require("gpuix.button")
 
 return function(props)
     local sent, set_sent = gpuix.use_state(0)
@@ -15,7 +16,7 @@ return function(props)
             end}
             style={theme.styles.input}
         />
-        <div
+        <Button
             testId="send-message"
             style={theme.styles.button_active}
             onClick={function()
@@ -24,6 +25,6 @@ return function(props)
             end}
         >
             <text>Send ({sent})</text>
-        </div>
+        </Button>
     </div>
 end

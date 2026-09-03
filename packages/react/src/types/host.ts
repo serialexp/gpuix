@@ -181,9 +181,11 @@ export interface StyleDesc {
   selectionColor?: string
 
   // Pseudo-selector styles — applied by GPUI natively (no JS round-trip).
-  // Nesting is one level deep: hover/active cannot contain hover/active.
-  hover?: Omit<StyleDesc, "hover" | "active">
-  active?: Omit<StyleDesc, "hover" | "active">
+  // Nesting is one level deep: pseudo styles cannot contain pseudo styles.
+  hover?: Omit<StyleDesc, "hover" | "active" | "focus" | "focusVisible">
+  active?: Omit<StyleDesc, "hover" | "active" | "focus" | "focusVisible">
+  focus?: Omit<StyleDesc, "hover" | "active" | "focus" | "focusVisible">
+  focusVisible?: Omit<StyleDesc, "hover" | "active" | "focus" | "focusVisible">
 }
 
 // Element types supported by GPUIX
@@ -454,10 +456,9 @@ export interface TextareaProps extends InputProps {
 type VirtualListShared = {
   // See the note on `Props.key`.
   key?: React.Key | null
-  /** No `hover` or `active`: gpui's `List` has no interactive element identity,
-   *  so it cannot hold the pressed or hovered state those styles read. Put them
-   *  on a wrapping `<div>` instead. */
-  style?: Omit<StyleDesc, "hover" | "active">
+  /** No pseudo styles: gpui's `List` has no interactive element identity.
+   *  Put them on a wrapping `<div>` instead. */
+  style?: Omit<StyleDesc, "hover" | "active" | "focus" | "focusVisible">
   children?: React.ReactNode
   ref?: React.Ref<PublicInstance>
   alignment?: "top" | "bottom"

@@ -232,6 +232,8 @@ pub struct StyleDesc {
     // Uses Box to avoid infinite-size struct (StyleDesc contains StyleDesc).
     pub hover: Option<Box<StyleDesc>>,
     pub active: Option<Box<StyleDesc>>,
+    pub focus: Option<Box<StyleDesc>>,
+    pub focus_visible: Option<Box<StyleDesc>>,
 }
 
 pub use crate::color::{parse_color, parse_color_hex};
@@ -392,6 +394,30 @@ mod tests {
         .color_space(gpui::ColorSpace::Oklab);
 
         assert_eq!(style.resolved_background(), Some(expected));
+    }
+
+    #[test]
+    fn parses_focus_pseudo_styles() {
+        let style: StyleDesc = serde_json::from_str(
+            r##"{"focus":{"borderColor":"#ffffff"},"focusVisible":{"boxShadow":{"offsetX":0,"offsetY":0,"blurRadius":0,"spreadRadius":2,"color":"#60a5fa"}}}"##,
+        )
+        .unwrap();
+
+        assert_eq!(
+            style
+                .focus
+                .as_deref()
+                .and_then(|style| style.border_color.as_deref()),
+            Some("#ffffff")
+        );
+        assert_eq!(
+            style
+                .focus_visible
+                .as_deref()
+                .and_then(|style| style.box_shadow.as_ref())
+                .map(|shadow| shadow.spread_radius),
+            Some(2.0)
+        );
     }
 
     #[test]

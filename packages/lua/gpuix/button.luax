@@ -1,0 +1,34 @@
+local util = require("gpuix._util")
+
+local default_style = {
+    display = "flex",
+    flexDirection = "row",
+    alignItems = "center",
+    focusVisible = util.focus_ring,
+}
+
+return function(props)
+    local disabled = props.disabled == true
+    local state = { disabled = disabled }
+    local on_click
+    if props.onClick ~= nil then
+        on_click = function(event)
+            if not disabled then props.onClick(event) end
+        end
+    end
+
+    return <div
+        testId={props.testId}
+        autoFocus={props.autoFocus == true}
+        tabIndex={disabled and -1 or (props.tabIndex or 0)}
+        onClick={on_click}
+        onFocus={props.onFocus}
+        onBlur={props.onBlur}
+        onKeyDown={props.onKeyDown}
+        onKeyUp={props.onKeyUp}
+        onMouseEnter={props.onMouseEnter}
+        onMouseLeave={props.onMouseLeave}
+        style={util.resolve_style(props.style, state, default_style)}
+        children={props}
+    />
+end

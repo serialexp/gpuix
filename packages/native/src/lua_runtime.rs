@@ -20,11 +20,50 @@ const ELEMENT_HELPERS: &[(&str, &str)] = &[
     ("virtual_list", "virtual-list"),
 ];
 
+const BUILTIN_LUA_MODULES: &[(&str, &str, bool)] = &[
+    (
+        "gpuix._util",
+        include_str!("../../lua/gpuix/_util.lua"),
+        false,
+    ),
+    (
+        "gpuix.button",
+        include_str!("../../lua/gpuix/button.luax"),
+        true,
+    ),
+    (
+        "gpuix.checkbox",
+        include_str!("../../lua/gpuix/checkbox.luax"),
+        true,
+    ),
+    (
+        "gpuix.radio_group",
+        include_str!("../../lua/gpuix/radio_group.luax"),
+        true,
+    ),
+    (
+        "gpuix.select",
+        include_str!("../../lua/gpuix/select.luax"),
+        true,
+    ),
+    (
+        "gpuix.combobox",
+        include_str!("../../lua/gpuix/combobox.luax"),
+        true,
+    ),
+    (
+        "gpuix.tooltip",
+        include_str!("../../lua/gpuix/tooltip.luax"),
+        true,
+    ),
+];
+
 const HANDLE_INDEX_BITS: u32 = 32;
 const HANDLE_INDEX_MASK: u64 = u32::MAX as u64;
 const HANDLE_MAX_GENERATION: u64 = i32::MAX as u64;
 
 type StyleCache = HashMap<Vec<u8>, Arc<StyleDesc>>;
+type HostHandleMap = HashMap<i64, u64>;
 
 #[derive(Clone, Copy)]
 struct NodeHandle {
@@ -67,6 +106,7 @@ enum HookKind {
     Memo,
     Callback,
     Effect,
+    Store,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +159,12 @@ enum HookSlot {
         dependencies: Option<DependencyList>,
         cleanup: Option<Arc<RegistryKey>>,
     },
+    Store {
+        store: String,
+        selector: Option<Arc<RegistryKey>>,
+        equality: Option<Arc<RegistryKey>>,
+        selected: Arc<RegistryKey>,
+    },
 }
 
 #[derive(Clone, Default)]
@@ -137,6 +183,53 @@ struct EffectJob {
     id: Option<HookId>,
     cleanup: Option<Arc<RegistryKey>>,
     callback: Option<Arc<RegistryKey>>,
+}
+
+#[derive(Clone)]
+struct StoreSubscriber {
+    id: HookId,
+    selector: Option<Arc<RegistryKey>>,
+    equality: Option<Arc<RegistryKey>>,
+    selected: Arc<RegistryKey>,
+}
+
+#[derive(Clone)]
+struct StoreEntry {
+    state: Arc<RegistryKey>,
+    reducer: Arc<RegistryKey>,
+    listeners: HashMap<u64, Arc<RegistryKey>>,
+    next_listener_id: u64,
+}
+
+#[derive(Clone, Default)]
+struct StoreSnapshot {
+    entries: HashMap<String, StoreEntry>,
+}
+
+#[derive(Default)]
+struct StoreRegistry {
+    entries: HashMap<String, StoreEntry>,
+    dispatching: HashSet<String>,
+}
+
+impl StoreRegistry {
+    fn snapshot(&self) -> StoreSnapshot {
+        StoreSnapshot {
+            entries: self.entries.clone(),
+        }
+    }
+
+    fn restore(&mut self, snapshot: StoreSnapshot) {
+        self.entries = snapshot.entries;
+        self.dispatching.clear();
+    }
+
+    fn begin_reload(&mut self) {
+        for store in self.entries.values_mut() {
+            store.listeners.clear();
+        }
+        self.dispatching.clear();
+    }
 }
 
 struct HookFrame {
@@ -370,6 +463,57 @@ impl HookStore {
         }
         self.dirty = true;
         Ok(())
+    }
+
+    fn store_subscribers(&self, store: &str) -> Vec<StoreSubscriber> {
+        self.components
+            .iter()
+            .flat_map(|(component_id, component)| {
+                component
+                    .slots
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(index, slot)| match slot {
+                        HookSlot::Store {
+                            store: slot_store,
+                            selector,
+                            equality,
+                            selected,
+                        } if slot_store == store => Some(StoreSubscriber {
+                            id: HookId {
+                                component: component_id.clone(),
+                                index,
+                            },
+                            selector: selector.clone(),
+                            equality: equality.clone(),
+                            selected: selected.clone(),
+                        }),
+                        _ => None,
+                    })
+            })
+            .collect()
+    }
+
+    fn apply_store_updates(
+        &mut self,
+        updates: Vec<(HookId, Arc<RegistryKey>)>,
+    ) -> HashSet<ComponentId> {
+        let mut changed_components = HashSet::new();
+        for (id, next) in updates {
+            let Some(HookSlot::Store { selected, .. }) = self
+                .components
+                .get_mut(&id.component)
+                .and_then(|component| component.slots.get_mut(id.index))
+            else {
+                continue;
+            };
+            *selected = next;
+            changed_components.insert(id.component);
+        }
+        if !changed_components.is_empty() {
+            self.dirty = true;
+        }
+        changed_components
     }
 
     fn queue_effect(
@@ -814,6 +958,7 @@ impl RenderArena {
 
 struct LuaNode {
     id: u64,
+    handle_token: i64,
     element_type: String,
     key: Option<Arc<str>>,
     events: HashMap<String, Function>,
@@ -831,8 +976,11 @@ pub(crate) struct LuaRuntime {
     lua: Lua,
     render: Function,
     hooks: Arc<Mutex<HookStore>>,
+    stores: Arc<Mutex<StoreRegistry>>,
     memo: Arc<Mutex<MemoStore>>,
     arena: Arc<Mutex<RenderArena>>,
+    host_handles: Arc<Mutex<HostHandleMap>>,
+    focus_request: Arc<Mutex<Option<u64>>>,
     root: Option<LuaNode>,
     handlers: HashMap<(u64, String), Function>,
     loaded_modules: Arc<Mutex<HashSet<String>>>,
@@ -876,11 +1024,25 @@ impl LuaRuntime {
     ) -> Result<Self, String> {
         let lua = Lua::new();
         let hooks = Arc::new(Mutex::new(HookStore::new()));
+        let stores = Arc::new(Mutex::new(StoreRegistry::default()));
         let memo = Arc::new(Mutex::new(MemoStore::default()));
         let arena = Arc::new(Mutex::new(RenderArena::default()));
+        let host_handles = Arc::new(Mutex::new(HostHandleMap::new()));
+        let focus_request = Arc::new(Mutex::new(None));
         let styles = Arc::new(Mutex::new(StyleCache::new()));
         let loaded_modules = Arc::new(Mutex::new(HashSet::new()));
-        install_api(&lua, hooks.clone(), memo.clone(), arena.clone(), styles).map_err(lua_error)?;
+        install_api(
+            &lua,
+            hooks.clone(),
+            stores.clone(),
+            memo.clone(),
+            arena.clone(),
+            host_handles.clone(),
+            focus_request.clone(),
+            styles,
+        )
+        .map_err(lua_error)?;
+        install_builtin_modules(&lua).map_err(lua_error)?;
         if let Some(root) = path.and_then(Path::parent) {
             install_module_searcher(&lua, root, loaded_modules.clone()).map_err(lua_error)?;
         }
@@ -891,8 +1053,11 @@ impl LuaRuntime {
             lua,
             render,
             hooks,
+            stores,
             memo,
             arena,
+            host_handles,
+            focus_request,
             root: None,
             handlers: HashMap::new(),
             loaded_modules,
@@ -915,10 +1080,13 @@ impl LuaRuntime {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("luax"));
         let entry = compile_entry(&self.lua, &source, Some(path), luax)?;
         let hook_snapshot = self.hooks.lock().unwrap().snapshot();
+        let store_snapshot = self.stores.lock().unwrap().snapshot();
         let module_snapshot = self.unload_modules().map_err(lua_error)?;
+        self.stores.lock().unwrap().begin_reload();
         let render = match entry.call::<Function>(()) {
             Ok(render) => render,
             Err(error) => {
+                self.stores.lock().unwrap().restore(store_snapshot);
                 self.restore_modules(module_snapshot).map_err(lua_error)?;
                 return Err(lua_error(error));
             }
@@ -938,12 +1106,14 @@ impl LuaRuntime {
                     let Some(mismatch) = mismatch else {
                         self.render = previous_render;
                         self.hooks.lock().unwrap().restore(hook_snapshot);
+                        self.stores.lock().unwrap().restore(store_snapshot);
                         self.restore_modules(module_snapshot).map_err(lua_error)?;
                         return Err(error);
                     };
                     if !reset_components.insert(mismatch.clone()) {
                         self.render = previous_render;
                         self.hooks.lock().unwrap().restore(hook_snapshot);
+                        self.stores.lock().unwrap().restore(store_snapshot);
                         self.restore_modules(module_snapshot).map_err(lua_error)?;
                         return Err(error);
                     }
@@ -954,6 +1124,7 @@ impl LuaRuntime {
                 Err(error) => {
                     self.render = previous_render;
                     self.hooks.lock().unwrap().restore(hook_snapshot);
+                    self.stores.lock().unwrap().restore(store_snapshot);
                     self.restore_modules(module_snapshot).map_err(lua_error)?;
                     return Err(error);
                 }
@@ -966,6 +1137,7 @@ impl LuaRuntime {
         payload: EventPayload,
         tree: &mut RetainedTree,
     ) -> Result<bool, String> {
+        *self.focus_request.lock().unwrap() = None;
         let id = payload.element_id as u64;
         let Some(handler) = self
             .handlers
@@ -981,6 +1153,10 @@ impl LuaRuntime {
             self.render(tree, false)?;
         }
         Ok(dirty)
+    }
+
+    pub(crate) fn take_focus_request(&self) -> Option<u64> {
+        self.focus_request.lock().unwrap().take()
     }
 
     fn render(&mut self, tree: &mut RetainedTree, refreshing: bool) -> Result<(), String> {
@@ -1046,8 +1222,15 @@ impl LuaRuntime {
         let old = self.root.take();
         let arena = self.arena.clone();
         let mut arena = arena.lock().unwrap();
-        let root = match reconcile_node(tree, &mut self.next_id, old, &mut arena, root_handle.index)
-        {
+        let mut handle_aliases = HostHandleMap::new();
+        let root = match reconcile_node(
+            tree,
+            &mut self.next_id,
+            old,
+            &mut arena,
+            root_handle.index,
+            &mut handle_aliases,
+        ) {
             Ok(root) => root,
             Err(error) => {
                 drop(arena);
@@ -1057,6 +1240,8 @@ impl LuaRuntime {
         };
         drop(arena);
         tree.set_root(Some(root.id));
+        collect_host_handles(&root, &mut handle_aliases);
+        *self.host_handles.lock().unwrap() = handle_aliases;
         self.handlers.clear();
         collect_handlers(&root, &mut self.handlers);
         self.root = Some(root);
@@ -1154,6 +1339,24 @@ fn run_effect_cleanups(lua: &Lua, jobs: &[EffectJob]) {
             eprintln!("gpuix-lua effect cleanup error: {error}");
         }
     }
+}
+
+fn install_builtin_modules(lua: &Lua) -> mlua::Result<()> {
+    let package: Table = lua.globals().get("package")?;
+    let preload: Table = package.get("preload")?;
+    for &(name, source, luax) in BUILTIN_LUA_MODULES {
+        let source = if luax {
+            crate::luax::transform(source).map_err(mlua::Error::runtime)?
+        } else {
+            source.to_string()
+        };
+        let loader = lua
+            .load(&source)
+            .set_name(format!("@{name}"))
+            .into_function()?;
+        preload.set(name, loader)?;
+    }
+    Ok(())
 }
 
 fn compile_entry(
@@ -1312,6 +1515,7 @@ fn hook_signature_label(signature: HookSignature) -> String {
         HookKind::Memo => "use_memo",
         HookKind::Callback => "use_callback",
         HookKind::Effect => "use_effect",
+        HookKind::Store => "store.use_state",
     };
     let Some(value_type) = signature.value_type else {
         return kind.to_string();
@@ -1417,11 +1621,293 @@ fn component_key(value: Value) -> mlua::Result<Option<ComponentKey>> {
     }
 }
 
+fn select_store_value(
+    lua: &Lua,
+    selector: &Option<Arc<RegistryKey>>,
+    state: Value,
+) -> mlua::Result<Value> {
+    match selector {
+        Some(selector) => lua
+            .registry_value::<Function>(selector.as_ref())?
+            .call::<Value>(state),
+        None => Ok(state),
+    }
+}
+
+fn store_values_equal(
+    lua: &Lua,
+    equality: &Option<Arc<RegistryKey>>,
+    previous: Value,
+    next: Value,
+) -> mlua::Result<bool> {
+    match equality {
+        Some(equality) => lua
+            .registry_value::<Function>(equality.as_ref())?
+            .call::<bool>((previous, next)),
+        None => Ok(previous == next),
+    }
+}
+
+fn prepare_store_updates(
+    lua: &Lua,
+    subscribers: Vec<StoreSubscriber>,
+    next_state: &Value,
+) -> mlua::Result<Vec<(HookId, Arc<RegistryKey>)>> {
+    let mut updates = Vec::new();
+    for subscriber in subscribers {
+        let previous = lua.registry_value::<Value>(subscriber.selected.as_ref())?;
+        let next = select_store_value(lua, &subscriber.selector, next_state.clone())?;
+        if !store_values_equal(lua, &subscriber.equality, previous, next.clone())? {
+            updates.push((subscriber.id, Arc::new(lua.create_registry_value(next)?)));
+        }
+    }
+    Ok(updates)
+}
+
+fn clear_store_dispatch(stores: &Arc<Mutex<StoreRegistry>>, name: &str) {
+    stores.lock().unwrap().dispatching.remove(name);
+}
+
+fn dispatch_store(
+    lua: &Lua,
+    name: &str,
+    action: Value,
+    stores: &Arc<Mutex<StoreRegistry>>,
+    hooks: &Arc<Mutex<HookStore>>,
+    memo: &Arc<Mutex<MemoStore>>,
+) -> mlua::Result<Value> {
+    let (state, reducer) = {
+        let mut stores = stores.lock().unwrap();
+        if !stores.dispatching.insert(name.to_string()) {
+            return Err(mlua::Error::runtime(format!(
+                "store {name:?} dispatched while its reducer was already running"
+            )));
+        }
+        let Some(store) = stores.entries.get(name) else {
+            stores.dispatching.remove(name);
+            return Err(mlua::Error::runtime(format!(
+                "store {name:?} no longer exists"
+            )));
+        };
+        (store.state.clone(), store.reducer.clone())
+    };
+
+    let current = match lua.registry_value::<Value>(state.as_ref()) {
+        Ok(current) => current,
+        Err(error) => {
+            clear_store_dispatch(stores, name);
+            return Err(error);
+        }
+    };
+    let reducer = match lua.registry_value::<Function>(reducer.as_ref()) {
+        Ok(reducer) => reducer,
+        Err(error) => {
+            clear_store_dispatch(stores, name);
+            return Err(error);
+        }
+    };
+    let next = match reducer.call::<Value>((current, action.clone())) {
+        Ok(next) => next,
+        Err(error) => {
+            clear_store_dispatch(stores, name);
+            return Err(error);
+        }
+    };
+    let subscribers = hooks.lock().unwrap().store_subscribers(name);
+    let updates = match prepare_store_updates(lua, subscribers, &next) {
+        Ok(updates) => updates,
+        Err(error) => {
+            clear_store_dispatch(stores, name);
+            return Err(error);
+        }
+    };
+    let next = match lua.create_registry_value(next) {
+        Ok(next) => Arc::new(next),
+        Err(error) => {
+            clear_store_dispatch(stores, name);
+            return Err(error);
+        }
+    };
+    let listeners = {
+        let mut stores = stores.lock().unwrap();
+        let Some(store) = stores.entries.get_mut(name) else {
+            stores.dispatching.remove(name);
+            return Err(mlua::Error::runtime(format!(
+                "store {name:?} no longer exists"
+            )));
+        };
+        store.state = next;
+        let listeners = store.listeners.values().cloned().collect::<Vec<_>>();
+        stores.dispatching.remove(name);
+        listeners
+    };
+    let changed_components = hooks.lock().unwrap().apply_store_updates(updates);
+    if !changed_components.is_empty() {
+        memo.lock().unwrap().entries.retain(|_, entry| {
+            !entry
+                .components
+                .iter()
+                .any(|component| changed_components.contains(component))
+        });
+    }
+    for listener in listeners {
+        let result = lua
+            .registry_value::<Function>(listener.as_ref())
+            .and_then(|listener| listener.call::<()>(()));
+        if let Err(error) = result {
+            eprintln!("gpuix-lua store listener error: {error}");
+        }
+    }
+    Ok(action)
+}
+
+fn create_store_table(
+    lua: &Lua,
+    name: String,
+    stores: Arc<Mutex<StoreRegistry>>,
+    hooks: Arc<Mutex<HookStore>>,
+    memo: Arc<Mutex<MemoStore>>,
+) -> mlua::Result<Table> {
+    let store = lua.create_table()?;
+    store.set("name", name.as_str())?;
+
+    let state_name = name.clone();
+    let state_stores = stores.clone();
+    store.set(
+        "get_state",
+        lua.create_function(move |lua, ()| {
+            let state = state_stores
+                .lock()
+                .unwrap()
+                .entries
+                .get(&state_name)
+                .map(|store| store.state.clone())
+                .ok_or_else(|| {
+                    mlua::Error::runtime(format!("store {state_name:?} no longer exists"))
+                })?;
+            lua.registry_value::<Value>(state.as_ref())
+        })?,
+    )?;
+
+    let dispatch_name = name.clone();
+    let dispatch_stores = stores.clone();
+    let dispatch_hooks = hooks.clone();
+    let dispatch_memo = memo.clone();
+    store.set(
+        "dispatch",
+        lua.create_function(move |lua, action: Value| {
+            dispatch_store(
+                lua,
+                &dispatch_name,
+                action,
+                &dispatch_stores,
+                &dispatch_hooks,
+                &dispatch_memo,
+            )
+        })?,
+    )?;
+
+    let subscribe_name = name.clone();
+    let subscribe_stores = stores.clone();
+    store.set(
+        "subscribe",
+        lua.create_function(move |lua, listener: Function| {
+            let listener = Arc::new(lua.create_registry_value(listener)?);
+            let id = {
+                let mut stores = subscribe_stores.lock().unwrap();
+                let store = stores.entries.get_mut(&subscribe_name).ok_or_else(|| {
+                    mlua::Error::runtime(format!("store {subscribe_name:?} no longer exists"))
+                })?;
+                let id = store.next_listener_id;
+                store.next_listener_id = store.next_listener_id.wrapping_add(1);
+                store.listeners.insert(id, listener);
+                id
+            };
+            let unsubscribe_name = subscribe_name.clone();
+            let unsubscribe_stores = subscribe_stores.clone();
+            lua.create_function(move |_, ()| {
+                if let Some(store) = unsubscribe_stores
+                    .lock()
+                    .unwrap()
+                    .entries
+                    .get_mut(&unsubscribe_name)
+                {
+                    store.listeners.remove(&id);
+                }
+                Ok(())
+            })
+        })?,
+    )?;
+
+    let hook_name = name;
+    let hook_stores = stores;
+    let hook_hooks = hooks;
+    store.set(
+        "use_state",
+        lua.create_function(
+            move |lua, (selector, equality): (Option<Function>, Option<Function>)| {
+                let state = hook_stores
+                    .lock()
+                    .unwrap()
+                    .entries
+                    .get(&hook_name)
+                    .map(|store| store.state.clone())
+                    .ok_or_else(|| {
+                        mlua::Error::runtime(format!("store {hook_name:?} no longer exists"))
+                    })?;
+                let state = lua.registry_value::<Value>(state.as_ref())?;
+                let selector = selector
+                    .map(|selector| lua.create_registry_value(selector).map(Arc::new))
+                    .transpose()?;
+                let equality = equality
+                    .map(|equality| lua.create_registry_value(equality).map(Arc::new))
+                    .transpose()?;
+                let selected = select_store_value(lua, &selector, state)?;
+                let signature = HookSignature {
+                    kind: HookKind::Store,
+                    value_type: None,
+                };
+                let (id, existing) = hook_hooks
+                    .lock()
+                    .unwrap()
+                    .next_hook(signature)
+                    .map_err(mlua::Error::runtime)?;
+                if existing.is_some() && !matches!(&existing, Some(HookSlot::Store { .. })) {
+                    return Err(mlua::Error::runtime(
+                        "store.use_state found an incompatible hook slot",
+                    ));
+                }
+                let slot = HookSlot::Store {
+                    store: hook_name.clone(),
+                    selector,
+                    equality,
+                    selected: Arc::new(lua.create_registry_value(selected.clone())?),
+                };
+                if existing.is_some() {
+                    hook_hooks
+                        .lock()
+                        .unwrap()
+                        .replace_slot(&id, slot)
+                        .map_err(mlua::Error::runtime)?;
+                } else {
+                    hook_hooks.lock().unwrap().push_slot(&id, slot);
+                }
+                Ok(selected)
+            },
+        )?,
+    )?;
+
+    Ok(store)
+}
+
 fn install_api(
     lua: &Lua,
     hooks: Arc<Mutex<HookStore>>,
+    stores: Arc<Mutex<StoreRegistry>>,
     memo: Arc<Mutex<MemoStore>>,
     arena: Arc<Mutex<RenderArena>>,
+    host_handles: Arc<Mutex<HostHandleMap>>,
+    focus_request: Arc<Mutex<Option<u64>>>,
     styles: Arc<Mutex<StyleCache>>,
 ) -> mlua::Result<()> {
     let api = lua.create_table()?;
@@ -1474,6 +1960,18 @@ fn install_api(
     })?;
     api.set("text", text)?;
 
+    let focus = lua.create_function(move |_, handle: i64| {
+        let id = host_handles
+            .lock()
+            .unwrap()
+            .get(&handle)
+            .copied()
+            .ok_or_else(|| mlua::Error::runtime("gpuix.focus expects a mounted host handle"))?;
+        *focus_request.lock().unwrap() = Some(id);
+        Ok(())
+    })?;
+    api.set("focus", focus)?;
+
     for (name, element_type) in ELEMENT_HELPERS {
         let element_type = (*element_type).to_string();
         let helper_arena = arena.clone();
@@ -1491,6 +1989,43 @@ fn install_api(
         lua.create_userdata(StyleHandle(style))
     })?;
     api.set("style", style)?;
+
+    let create_store_stores = stores.clone();
+    let create_store_hooks = hooks.clone();
+    let create_store_memo = memo.clone();
+    let create_store = lua.create_function(
+        move |lua, (name, reducer, initial_state): (String, Function, Value)| {
+            if name.is_empty() {
+                return Err(mlua::Error::runtime("gpuix.create_store name is empty"));
+            }
+            let reducer = Arc::new(lua.create_registry_value(reducer)?);
+            let initial_state = Arc::new(lua.create_registry_value(initial_state)?);
+            {
+                let mut stores = create_store_stores.lock().unwrap();
+                if let Some(store) = stores.entries.get_mut(&name) {
+                    store.reducer = reducer;
+                } else {
+                    stores.entries.insert(
+                        name.clone(),
+                        StoreEntry {
+                            state: initial_state,
+                            reducer,
+                            listeners: HashMap::new(),
+                            next_listener_id: 1,
+                        },
+                    );
+                }
+            }
+            create_store_table(
+                lua,
+                name,
+                create_store_stores.clone(),
+                create_store_hooks.clone(),
+                create_store_memo.clone(),
+            )
+        },
+    )?;
+    api.set("create_store", create_store)?;
 
     let state_hooks = hooks.clone();
     let state_memo = memo.clone();
@@ -2372,7 +2907,10 @@ fn reconcile_node(
     old: Option<LuaNode>,
     arena: &mut RenderArena,
     index: usize,
+    handle_aliases: &mut HostHandleMap,
 ) -> Result<LuaNode, String> {
+    let handle_token =
+        packed_handle_token(arena.generation, index, "nodes").map_err(|error| error.to_string())?;
     match arena.take(index)? {
         ArenaNode::Cached(cached) => {
             let old = old.ok_or_else(|| {
@@ -2389,6 +2927,7 @@ fn reconcile_node(
                     cached.memo_key
                 ));
             }
+            handle_aliases.insert(handle_token, old.id);
             Ok(old)
         }
         ArenaNode::Pending(mut next) => {
@@ -2431,6 +2970,7 @@ fn reconcile_node(
                         Some(previous),
                         arena,
                         child_index,
+                        handle_aliases,
                     )?);
                 }
             } else {
@@ -2449,7 +2989,14 @@ fn reconcile_node(
                         Some(key) => keyed.remove(key),
                         None => unkeyed.pop_front(),
                     };
-                    children.push(reconcile_node(tree, next_id, previous, arena, child_index)?);
+                    children.push(reconcile_node(
+                        tree,
+                        next_id,
+                        previous,
+                        arena,
+                        child_index,
+                        handle_aliases,
+                    )?);
                 }
                 for child in keyed.into_values().chain(unkeyed) {
                     tree.destroy_element(child.id);
@@ -2469,6 +3016,7 @@ fn reconcile_node(
             tree.replace_children(id, children.iter().map(|child| child.id).collect());
             Ok(LuaNode {
                 id,
+                handle_token,
                 element_type: next.element_type,
                 key: next.key,
                 events: next.events,
@@ -2476,6 +3024,13 @@ fn reconcile_node(
                 memo_key: next.memo_key,
             })
         }
+    }
+}
+
+fn collect_host_handles(node: &LuaNode, handles: &mut HostHandleMap) {
+    handles.insert(node.handle_token, node.id);
+    for child in &node.children {
+        collect_host_handles(child, handles);
     }
 }
 
@@ -2610,11 +3165,10 @@ mod tests {
         assert!(changed);
         assert_eq!(tree.root_id, Some(root_id));
         assert_eq!(before_ids, tree.elements.keys().copied().collect());
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| element.content.as_deref() == Some("Count: 1"))
-        );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.content.as_deref() == Some("Count: 1")));
     }
 
     #[test]
@@ -2768,6 +3322,229 @@ mod tests {
     }
 
     #[test]
+    fn redux_store_selectors_skip_unchanged_updates_and_invalidate_memoized_components() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(
+            r#"
+                local ui = gpuix
+                renders = 0
+                store = ui.create_store("counter", function(state, action)
+                    if action.type == "increment" then
+                        return { count = state.count + 1, noise = state.noise }
+                    end
+                    if action.type == "noise" then
+                        return { count = state.count, noise = state.noise + 1 }
+                    end
+                    return state
+                end, { count = 0, noise = 0 })
+
+                local function Counter()
+                    renders = renders + 1
+                    local count = store.use_state(function(state) return state.count end)
+                    return <div>
+                        <text>count:{count}</text>
+                        <div testId="increment" onClick={function()
+                            store.dispatch({ type = "increment" })
+                        end} />
+                        <div testId="noise" onClick={function()
+                            store.dispatch({ type = "noise" })
+                        end} />
+                    </div>
+                end
+
+                return function()
+                    return ui.memo("counter", true, function()
+                        return ui.h(Counter, {})
+                    end)
+                end
+            "#,
+            &mut tree,
+        )
+        .unwrap();
+
+        assert!(has_text(&tree, "count:0"));
+        assert_eq!(runtime.lua.globals().get::<i64>("renders").unwrap(), 1);
+        assert!(!dispatch_by_test_id(&mut runtime, &mut tree, "noise").unwrap());
+        assert_eq!(runtime.lua.globals().get::<i64>("renders").unwrap(), 1);
+
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "increment").unwrap());
+        assert!(has_text(&tree, "count:1"));
+        assert_eq!(runtime.lua.globals().get::<i64>("renders").unwrap(), 2);
+        let store: Table = runtime.lua.globals().get("store").unwrap();
+        let get_state: Function = store.get("get_state").unwrap();
+        let state: Table = get_state.call(()).unwrap();
+        assert_eq!(state.get::<i64>("noise").unwrap(), 1);
+    }
+
+    #[test]
+    fn redux_store_supports_custom_selector_equality_and_listeners() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load(
+            r#"
+                local ui = gpuix
+                renders = 0
+                notifications = 0
+                local store = ui.create_store("parity", function(state, action)
+                    return { count = state.count + action.amount }
+                end, { count = 0 })
+                local unsubscribe = store.subscribe(function()
+                    notifications = notifications + 1
+                end)
+
+                return function()
+                    renders = renders + 1
+                    local selected = store.use_state(
+                        function(state) return { parity = state.count % 2 } end,
+                        function(previous, next) return previous.parity == next.parity end
+                    )
+                    return ui.div {
+                        ui.text("parity:" .. selected.parity),
+                        ui.div { testId = "add-two", onClick = function()
+                            store.dispatch({ amount = 2 })
+                        end },
+                        ui.div { testId = "add-one", onClick = function()
+                            store.dispatch({ amount = 1 })
+                        end },
+                        ui.div { testId = "unsubscribe", onClick = unsubscribe },
+                    }
+                end
+            "#,
+            &mut tree,
+        )
+        .unwrap();
+
+        assert!(!dispatch_by_test_id(&mut runtime, &mut tree, "add-two").unwrap());
+        assert_eq!(runtime.lua.globals().get::<i64>("renders").unwrap(), 1);
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("notifications").unwrap(),
+            1
+        );
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "add-one").unwrap());
+        assert!(has_text(&tree, "parity:1"));
+        assert_eq!(runtime.lua.globals().get::<i64>("renders").unwrap(), 2);
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("notifications").unwrap(),
+            2
+        );
+        assert!(!dispatch_by_test_id(&mut runtime, &mut tree, "unsubscribe").unwrap());
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "add-one").unwrap());
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("notifications").unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn redux_store_can_subscribe_to_the_entire_state() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load(
+            r#"
+                local ui = gpuix
+                local store = ui.create_store("whole", function(state, action)
+                    return { count = state.count + 1 }
+                end, { count = 0 })
+                return function()
+                    local state = store.use_state()
+                    return ui.div {
+                        ui.text("whole:" .. state.count),
+                        ui.div { testId = "increment", onClick = function()
+                            store.dispatch({})
+                        end },
+                    }
+                end
+            "#,
+            &mut tree,
+        )
+        .unwrap();
+
+        assert!(has_text(&tree, "whole:0"));
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "increment").unwrap());
+        assert!(has_text(&tree, "whole:1"));
+    }
+
+    #[test]
+    fn reload_preserves_named_store_state_and_replaces_its_reducer() {
+        let app = TempLuaApp::new();
+        let entry = app.write(
+            "main.luax",
+            r#"
+                local ui = gpuix
+                local store = ui.create_store("counter", function(state, action)
+                    return { count = state.count + 1 }
+                end, { count = 0 })
+                notifications = notifications or 0
+                store.subscribe(function() notifications = notifications + 1 end)
+                return function()
+                    local count = store.use_state(function(state) return state.count end)
+                    return <div>
+                        <text>one:{count}</text>
+                        <div testId="increment" onClick={function() store.dispatch({}) end} />
+                    </div>
+                end
+            "#,
+        );
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_file(&entry, &mut tree).unwrap();
+        dispatch_by_test_id(&mut runtime, &mut tree, "increment").unwrap();
+        assert!(has_text(&tree, "one:1"));
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("notifications").unwrap(),
+            1
+        );
+
+        app.write(
+            "main.luax",
+            r#"
+                local ui = gpuix
+                local store = ui.create_store("counter", function(state, action)
+                    return { count = state.count + 10 }
+                end, { count = 100 })
+                store.subscribe(function() notifications = notifications + 1 end)
+                return function()
+                    local count = store.use_state(function(state) return state.count end)
+                    return <div>
+                        <text>two:{count}</text>
+                        <div testId="increment" onClick={function() store.dispatch({}) end} />
+                    </div>
+                end
+            "#,
+        );
+
+        assert_eq!(
+            runtime.reload_file(&entry, &mut tree).unwrap(),
+            ReloadOutcome::PreservedState
+        );
+        assert!(has_text(&tree, "two:1"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "increment").unwrap();
+        assert!(has_text(&tree, "two:11"));
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("notifications").unwrap(),
+            2
+        );
+
+        app.write(
+            "main.luax",
+            r#"
+                local ui = gpuix
+                local store = ui.create_store("counter", function(state, action)
+                    return { count = state.count + 100 }
+                end, { count = 1000 })
+                store.subscribe(function() notifications = notifications + 100 end)
+                return function()
+                    error("failed replacement")
+                end
+            "#,
+        );
+        assert!(runtime.reload_file(&entry, &mut tree).is_err());
+        dispatch_by_test_id(&mut runtime, &mut tree, "increment").unwrap();
+        assert!(has_text(&tree, "two:21"));
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("notifications").unwrap(),
+            3
+        );
+    }
+
+    #[test]
     fn swapping_different_hook_kinds_is_rejected() {
         let mut tree = RetainedTree::new();
         let mut runtime = LuaRuntime::load(
@@ -2830,16 +3607,14 @@ mod tests {
         let runtime = LuaRuntime::load_file(&entry, &mut tree).unwrap();
 
         assert_eq!(runtime.lua.globals().get::<i64>("module_loads").unwrap(), 1);
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| element.content.as_deref() == Some("Imported component"))
-        );
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| element.test_id.as_deref() == Some("card"))
-        );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.content.as_deref() == Some("Imported component")));
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.test_id.as_deref() == Some("card")));
     }
 
     #[test]
@@ -2913,22 +3688,18 @@ mod tests {
         let outcome = runtime.reload_file(&entry, &mut tree).unwrap();
 
         assert_eq!(outcome, ReloadOutcome::PreservedState);
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| { element.content.as_deref() == Some("Count: 1") })
-        );
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| { element.content.as_deref() == Some("Version two") })
-        );
-        assert!(
-            !tree
-                .elements
-                .values()
-                .any(|element| { element.content.as_deref() == Some("Version one") })
-        );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| { element.content.as_deref() == Some("Count: 1") }));
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| { element.content.as_deref() == Some("Version two") }));
+        assert!(!tree
+            .elements
+            .values()
+            .any(|element| { element.content.as_deref() == Some("Version one") }));
     }
 
     #[test]
@@ -3028,11 +3799,10 @@ mod tests {
         let outcome = runtime.reload_file(&entry, &mut tree).unwrap();
 
         assert_eq!(outcome, ReloadOutcome::ResetState);
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| { element.content.as_deref() == Some("Count: 100") })
-        );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| { element.content.as_deref() == Some("Count: 100") }));
     }
 
     #[test]
@@ -3125,11 +3895,10 @@ mod tests {
                 &mut tree,
             )
             .unwrap();
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| { element.content.as_deref() == Some("Count: 1") })
-        );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| { element.content.as_deref() == Some("Count: 1") }));
     }
 
     #[test]
@@ -3176,23 +3945,20 @@ mod tests {
             .find(|element| element.test_id.as_deref() == Some("button"))
             .unwrap()
             .id;
-        assert!(
-            runtime
-                .dispatch_event(
-                    EventPayload {
-                        element_id: button_id as f64,
-                        event_type: "click".to_string(),
-                        ..Default::default()
-                    },
-                    &mut tree,
-                )
-                .unwrap()
-        );
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| element.content.as_deref() == Some("Count: 1"))
-        );
+        assert!(runtime
+            .dispatch_event(
+                EventPayload {
+                    element_id: button_id as f64,
+                    event_type: "click".to_string(),
+                    ..Default::default()
+                },
+                &mut tree,
+            )
+            .unwrap());
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.content.as_deref() == Some("Count: 1")));
     }
 
     #[test]
@@ -3356,29 +4122,25 @@ mod tests {
             tree.elements.keys().copied().collect::<HashSet<_>>(),
             before_ids
         );
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| element.content.as_deref() == Some("enabled"))
-        );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.content.as_deref() == Some("enabled")));
 
-        assert!(
-            runtime
-                .dispatch_event(
-                    EventPayload {
-                        element_id: root_id as f64,
-                        event_type: "click".to_string(),
-                        ..Default::default()
-                    },
-                    &mut tree,
-                )
-                .unwrap()
-        );
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| element.content.as_deref() == Some("enabled"))
-        );
+        assert!(runtime
+            .dispatch_event(
+                EventPayload {
+                    element_id: root_id as f64,
+                    event_type: "click".to_string(),
+                    ..Default::default()
+                },
+                &mut tree,
+            )
+            .unwrap());
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.content.as_deref() == Some("enabled")));
     }
 
     #[test]
@@ -3501,11 +4263,10 @@ mod tests {
 
         let row_three = &tree.elements[&row_three_id];
         assert_eq!(row_three.subtree_revision, row_three_revision);
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| element.content.as_deref() == Some("active"))
-        );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.content.as_deref() == Some("active")));
     }
 
     #[test]
@@ -3560,11 +4321,10 @@ mod tests {
             tree.elements[&row_three_id].subtree_revision,
             row_three_revision
         );
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| element.content.as_deref() == Some("active"))
-        );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.content.as_deref() == Some("active")));
     }
 
     #[test]
@@ -3620,11 +4380,10 @@ mod tests {
             tree.elements[children.last().unwrap()].content.as_deref(),
             Some("after")
         );
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| element.test_id.as_deref() == Some("row-3"))
-        );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.test_id.as_deref() == Some("row-3")));
     }
 
     #[test]
@@ -3801,17 +4560,14 @@ mod tests {
             )
             .unwrap();
 
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| element.content.as_deref() == Some("1"))
-        );
-        assert!(
-            !tree
-                .elements
-                .values()
-                .any(|element| element.content.as_deref() == Some("2"))
-        );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.content.as_deref() == Some("1")));
+        assert!(!tree
+            .elements
+            .values()
+            .any(|element| element.content.as_deref() == Some("2")));
     }
 
     #[test]
@@ -3917,6 +4673,52 @@ mod tests {
             tree.elements[&root.children[1]].content.as_deref(),
             Some("42")
         );
+    }
+
+    #[test]
+    fn bundled_luax_components_load_without_a_source_directory() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(
+            r#"
+                local Button = require("gpuix.button")
+                local Checkbox = require("gpuix.checkbox")
+                return function()
+                    local checked, set_checked = gpuix.use_state(false)
+                    return <div>
+                        <Button key="bundled-button" testId="bundled-button">
+                            <text>button</text>
+                        </Button>
+                        <Checkbox
+                            key="bundled-checkbox"
+                            testId="bundled-checkbox"
+                            checked={checked}
+                            defaultChecked
+                            label={checked and "on" or "off"}
+                            onCheckedChange={set_checked}
+                        />
+                    </div>
+                end
+            "#,
+            &mut tree,
+        )
+        .unwrap();
+
+        let button = tree
+            .elements
+            .values()
+            .find(|element| element.test_id.as_deref() == Some("bundled-button"))
+            .unwrap();
+        assert_eq!(
+            button.custom_props.get("tabIndex"),
+            Some(&serde_json::json!(0))
+        );
+        assert!(has_text(&tree, "off"));
+        assert!(!has_text(&tree, "✓"));
+        assert!(
+            dispatch_by_test_id(&mut runtime, &mut tree, "bundled-checkbox-indicator").unwrap()
+        );
+        assert!(has_text(&tree, "on"));
+        assert!(has_text(&tree, "✓"));
     }
 
     #[test]

@@ -2244,11 +2244,12 @@ Limited relative-color forms can derive a new color from a base value:
 
 **Selection:** `userSelect` (`"text"` | `"none"`), `selectionColor` — both inherit down the tree
 
-### Hover and active
+### Interactive pseudo styles
 
-`hover` and `active` are **nested style objects**. GPUI applies them natively
-when the pointer is over the element or the mouse is down. There is no
-JavaScript round trip.
+`hover`, `active`, `focus`, and `focusVisible` are **nested style objects**.
+GPUI applies them natively with no JavaScript round trip. `focusVisible` only
+applies when the element is focused and the latest input came from the
+keyboard, matching the purpose of CSS `:focus-visible`.
 
 ```tsx
 <div
@@ -2258,20 +2259,28 @@ JavaScript round trip.
     padding: 12,
     hover: { backgroundColor: '#45475a' },
     active: { backgroundColor: '#585b70' },
+    focusVisible: {
+      boxShadow: {
+        offsetX: 0,
+        offsetY: 0,
+        blurRadius: 0,
+        spreadRadius: 2,
+        color: '#60a5fa',
+      },
+    },
   }}
 >
   Press
 </div>
 ```
 
-Nesting is one level deep. A `hover` object cannot contain another `hover` or
-`active`.
+Nesting is one level deep. A pseudo-style object cannot contain another
+pseudo-style object.
 
 They work on **every** element, including `<text>`, `<code>`, `<markdown>`,
 `<diff>`, `<img>`, `<svg>` and the editors. The one exception is
 `<virtual-list>`, whose `style` type rejects them: gpui's list has no
-interactive identity to hold a hovered or pressed state, so put them on a
-wrapping `<div>`.
+interactive identity to hold these states, so put them on a wrapping `<div>`.
 
 > **Note: `white-space: pre` is not supported.** GPUI's text system only has `normal` (wraps) and `nowrap` (single line). To preserve newlines like HTML `<pre>`, split your text on `\n` in React and render each line as a separate `<text>` element in a flex column:
 >
@@ -2647,7 +2656,7 @@ The test renderer uses `VisualTestAppContext` with a `TestDispatcher` for determ
 - [x] Cross-element text selection
 - [x] Text highlighting and search (`highlight`, `useTextSearch`)
 - [x] Headless Select, Combobox, and Tooltip
-- [x] Native `hover` and `active` styles
+- [x] Native hover, active, focus, and focus-visible styles
 - [x] Window title (`setWindowTitle`)
 - [x] Window chrome (`titlebarTransparent`, `windowBackground`, traffic-light position)
 - [x] macOS menu bar with the standard shortcuts (`appName`)

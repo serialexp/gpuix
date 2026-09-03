@@ -14,6 +14,16 @@ local colors = {
     green = "#34d399",
 }
 
+local focus_visible = {
+    boxShadow = {
+        offsetX = 0,
+        offsetY = 0,
+        blurRadius = 0,
+        spreadRadius = 2,
+        color = colors.blue,
+    },
+}
+
 local styles = {
     root = ui.style {
         width = "100%",
@@ -79,16 +89,16 @@ local styles = {
         overflow = "scroll",
     },
     activity = ui.style {
-        width = 360,
+        width = 340,
         flexShrink = 0,
         display = "flex",
         flexDirection = "column",
+        minHeight = 0,
         padding = 14,
         gap = 8,
         borderLeftWidth = 1,
         borderColor = colors.border,
         background = colors.sidebar,
-        overflow = "scroll",
     },
     card = ui.style {
         display = "flex",
@@ -110,6 +120,7 @@ local styles = {
         paddingBottom = 7,
         borderRadius = 7,
         background = colors.raised,
+        focusVisible = focus_visible,
     },
     button_active = ui.style {
         display = "flex",
@@ -122,6 +133,7 @@ local styles = {
         borderRadius = 7,
         background = colors.accent,
         color = "#17181c",
+        focusVisible = focus_visible,
     },
     composer = ui.style {
         display = "flex",
@@ -139,6 +151,7 @@ local styles = {
         borderRadius = 8,
         background = colors.raised,
         color = colors.text,
+        focusVisible = focus_visible,
     },
 }
 
@@ -156,4 +169,5 @@ return {
     colors = colors,
     styles = styles,
     native = native_theme,
+    focus_visible = focus_visible,
 }

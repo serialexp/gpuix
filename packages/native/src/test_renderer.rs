@@ -272,14 +272,21 @@ impl TestGpuixRenderer {
 
     #[napi]
     pub fn dispatch_lua_event(&self, payload: EventPayload) -> Result<bool> {
-        let mut runtime = self.lua_runtime.lock().unwrap();
-        let runtime = runtime
-            .as_mut()
-            .ok_or_else(|| Error::from_reason("No Lua app is loaded"))?;
-        let mut tree = self.tree.lock().unwrap();
-        runtime
-            .dispatch_event(payload, &mut tree)
-            .map_err(Error::from_reason)
+        let (changed, focus_request) = {
+            let mut runtime = self.lua_runtime.lock().unwrap();
+            let runtime = runtime
+                .as_mut()
+                .ok_or_else(|| Error::from_reason("No Lua app is loaded"))?;
+            let mut tree = self.tree.lock().unwrap();
+            let changed = runtime
+                .dispatch_event(payload, &mut tree)
+                .map_err(Error::from_reason)?;
+            (changed, runtime.take_focus_request())
+        };
+        if let Some(id) = focus_request {
+            self.focus_element(id as f64)?;
+        }
+        Ok(changed)
     }
 
     // ── Test-specific methods ────────────────────────────────────────

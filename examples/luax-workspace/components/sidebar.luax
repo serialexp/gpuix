@@ -4,6 +4,38 @@ local styles = theme.styles
 local colors = theme.colors
 
 return function(props)
+    local function active_index()
+        for index, conversation in ipairs(props.items) do
+            if conversation.id == props.activeId then return index end
+        end
+        return 1
+    end
+
+    local function select_index(index)
+        local conversation = props.items[index]
+        if conversation ~= nil and conversation.id ~= props.activeId then
+            props.onSelect(conversation.id)
+        end
+    end
+
+    local function move(direction)
+        if #props.items == 0 then return end
+        local index = math.max(1, math.min(#props.items, active_index() + direction))
+        select_index(index)
+    end
+
+    local function handle_key(event)
+        if event.key == "down" then
+            move(1)
+        elseif event.key == "up" then
+            move(-1)
+        elseif event.key == "home" then
+            select_index(1)
+        elseif event.key == "end" then
+            select_index(#props.items)
+        end
+    end
+
     local rows = {}
     for index, conversation in ipairs(props.items) do
         local active = conversation.id == props.activeId
@@ -29,7 +61,19 @@ return function(props)
             {not props.compact and <text style={{ fontSize = 17, color = colors.text }}>GPUIX Lua</text> or nil}
         </div>
         <div style={{ height = 1, background = colors.border }} />
-        <div style={{ display = "flex", flexDirection = "column", gap = 7 }} children={rows} />
+        <div
+            testId="conversation-list"
+            tabIndex={0}
+            onKeyDown={handle_key}
+            style={{
+                display = "flex",
+                flexDirection = "column",
+                gap = 7,
+                borderRadius = 8,
+                focusVisible = theme.focus_visible,
+            }}
+            children={rows}
+        />
         <div style={{ flexGrow = 1 }} />
         <text style={{ color = colors.faint, fontSize = 11 }}>
             {props.compact and "LuaX" or "No JavaScript runtime"}

@@ -1255,16 +1255,20 @@ impl GpuixRenderer {
     /// reconciliation execute in Rust; only this fixed-size event crosses napi.
     #[napi]
     pub fn dispatch_lua_event(&self, payload: EventPayload) -> Result<bool> {
-        let changed = {
+        let (changed, focus_request) = {
             let mut runtime = self.lua_runtime.lock().unwrap();
             let runtime = runtime
                 .as_mut()
                 .ok_or_else(|| Error::from_reason("No Lua app is loaded"))?;
             let mut tree = self.tree.lock().unwrap();
-            runtime
+            let changed = runtime
                 .dispatch_event(payload, &mut tree)
-                .map_err(Error::from_reason)?
+                .map_err(Error::from_reason)?;
+            (changed, runtime.take_focus_request())
         };
+        if let Some(id) = focus_request {
+            self.focus_element(id as f64)?;
+        }
         if changed && *self.initialized.lock().unwrap() {
             self.request_invalidate()?;
         }
@@ -4736,12 +4740,12 @@ pub(crate) fn apply_height<E: gpui::Styled>(el: E, dim: &crate::style::Dimension
     }
 }
 
-/// Base styles plus gpui's `hover` and `active` refinements.
+/// Base styles plus gpui's interactive refinements.
 ///
 /// Every stateful GPUI root must go through this, never `apply_styles` alone.
-/// `StyleDesc` carries `hover` and `active` for every element type, so a custom
-/// element that only applied the base styles accepted the prop, serialized it,
-/// and dropped it. gpui reads both refinements from the element state behind the
+/// `StyleDesc` carries hover, active, and focus styles for every element type,
+/// so a custom element that only applied the base styles accepts the prop,
+/// serializes it, and drops it. gpui reads the refinements from state behind the
 /// element's `ElementId`, so the caller must have called `.id(..)` first.
 pub(crate) fn apply_interactive_styles<E>(mut el: E, style: &StyleDesc) -> E
 where
@@ -4753,6 +4757,12 @@ where
     }
     if let Some(active_style) = style.active.as_deref() {
         el = el.active(|refinement| apply_styles(refinement, active_style));
+    }
+    if let Some(focus_style) = style.focus.as_deref() {
+        el = el.focus(|refinement| apply_styles(refinement, focus_style));
+    }
+    if let Some(focus_visible_style) = style.focus_visible.as_deref() {
+        el = el.focus_visible(|refinement| apply_styles(refinement, focus_visible_style));
     }
     el
 }

@@ -1,8 +1,11 @@
 local theme = require("theme")
+local DiffPanel = require("components.diff_panel")
+local WidgetGallery = require("components.widget_gallery")
 
 return function(props)
-    local body = props.mode == "code"
-        and <div style={theme.styles.card}>
+    local body
+    if props.mode == "code" then
+        body = <div style={theme.styles.card}>
             <text style={{ color = theme.colors.muted, fontSize = 12 }}>RUST EVENT PATH</text>
             <code
                 code={props.code}
@@ -12,9 +15,15 @@ return function(props)
                 style={{ background = theme.colors.canvas, borderRadius = 8 }}
             />
         </div>
-        or <div style={theme.styles.card}>
+    elseif props.mode == "diff" then
+        body = <DiffPanel key="diff" patch={props.patch} />
+    elseif props.mode == "widgets" then
+        body = <WidgetGallery key="widgets" />
+    else
+        body = <div style={theme.styles.card}>
             <markdown source={props.markdown} theme={theme.native} />
         </div>
+    end
 
     return <div style={theme.styles.detail}>
         <div style={{ display = "flex", flexDirection = "row", alignItems = "center", gap = 8, width = "100%", minWidth = 0 }}>

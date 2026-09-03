@@ -1,0 +1,94 @@
+local util = require("gpuix._util")
+
+local group_style = {
+    display = "flex",
+    flexDirection = "row",
+    alignItems = "center",
+    gap = 12,
+}
+
+local item_style = {
+    display = "flex",
+    flexDirection = "row",
+    alignItems = "center",
+    gap = 6,
+    focusVisible = util.focus_ring,
+}
+
+local indicator_style = {
+    width = 18,
+    height = 18,
+    display = "flex",
+    alignItems = "center",
+    justifyContent = "center",
+    borderRadius = 9,
+    borderWidth = 1,
+    borderColor = "#71717a",
+}
+
+return function(props)
+    local options = props.options or {}
+    local initial = props.defaultValue
+    if initial == nil and options[1] ~= nil then initial = options[1].value end
+    local internal_value, set_internal_value = gpuix.use_state(initial)
+    local controlled = props.value ~= nil
+    local value = internal_value
+    if controlled then value = props.value end
+
+    local function set_value(next_value)
+        if next_value == value then return end
+        if not controlled then set_internal_value(next_value) end
+        util.call(props.onValueChange, next_value)
+    end
+
+    local rows = {}
+    local function move_from(index, direction)
+        for offset = 1, #options do
+            local next_index = ((index - 1 + direction * offset) % #options) + 1
+            if not util.is_disabled(options[next_index]) then
+                set_value(options[next_index].value)
+                gpuix.focus(rows[next_index])
+                return
+            end
+        end
+    end
+
+    for index, option in ipairs(options) do
+        local option_index = index
+        local option_value = option.value
+        local selected = option_value == value
+        local state = {
+            selected = selected,
+            disabled = util.is_disabled(option),
+            option = option,
+        }
+        local function select_option()
+            if not state.disabled then set_value(option_value) end
+        end
+        rows[index] = <div
+            key={option_value}
+            testId={util.test_id(props.testId, "-" .. option_value)}
+            tabIndex={state.disabled and -1 or (selected and 0 or -1)}
+            onClick={select_option}
+            onKeyDown={function(event)
+                if event.key == "right" or event.key == "down" then
+                    move_from(option_index, 1)
+                elseif event.key == "left" or event.key == "up" then
+                    move_from(option_index, -1)
+                end
+            end}
+            style={util.resolve_style(props.itemStyle, state, item_style)}
+        >
+            <div
+                testId={util.test_id(props.testId, "-" .. option_value .. "-indicator")}
+                onClick={select_option}
+                style={util.resolve_style(props.indicatorStyle, state, indicator_style)}
+            >
+                {selected and <div onClick={select_option} style={{ width = 8, height = 8, borderRadius = 4, background = "#fafafa" }} /> or nil}
+            </div>
+            <text>{option.label or option_value}</text>
+        </div>
+    end
+
+    return <div style={util.resolve_style(props.style, { value = value }, group_style)} children={rows} />
+end
