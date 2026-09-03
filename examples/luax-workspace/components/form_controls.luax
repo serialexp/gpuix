@@ -1,0 +1,109 @@
+local theme = require("theme")
+local Checkbox = require("gpuix.checkbox")
+local RadioGroup = require("gpuix.radio_group")
+local Select = require("gpuix.select")
+local Combobox = require("gpuix.combobox")
+local Tooltip = require("gpuix.tooltip")
+
+local density_options = {
+    { value = "comfortable", label = "Comfort" },
+    { value = "compact", label = "Compact" },
+}
+
+local runtime_options = {
+    { value = "lua54", label = "Lua 5.4" },
+    { value = "luajit", label = "LuaJIT" },
+    { value = "both", label = "Benchmark both" },
+}
+
+local framework_options = { "GPUI", "Taffy", "LuaJIT", "React", "Rust" }
+
+return function()
+    local notifications, set_notifications = gpuix.use_state(true)
+    local density, set_density = gpuix.use_state("comfortable")
+    local runtime, set_runtime = gpuix.use_state("lua54")
+    local framework, set_framework = gpuix.use_state("Taffy")
+
+    return <div style={theme.styles.card}>
+        <text style={{ color = theme.colors.muted, fontSize = 12 }}>COMPOSED FORM CONTROLS</text>
+        <div style={{ display = "flex", flexDirection = "row", alignItems = "center", gap = 24, flexWrap = "wrap" }}>
+            <div style={{ display = "flex", flexDirection = "column", gap = 7 }}>
+                <text style={{ color = theme.colors.faint, fontSize = 11 }}>CHECKBOX</text>
+                <Checkbox
+                    key="notifications"
+                    testId="notifications-checkbox"
+                    checked={notifications}
+                    label={notifications and "Enabled" or "Disabled"}
+                    onCheckedChange={set_notifications}
+                    indicatorStyle={function(state) return {
+                        width = 20,
+                        height = 20,
+                        display = "flex",
+                        alignItems = "center",
+                        justifyContent = "center",
+                        borderRadius = 5,
+                        borderWidth = 1,
+                        borderColor = state.checked and theme.colors.accent or theme.colors.border,
+                        background = state.checked and theme.colors.accent or theme.colors.canvas,
+                        color = "#17181c",
+                    } end}
+                />
+            </div>
+            <div style={{ display = "flex", flexDirection = "column", gap = 7 }}>
+                <text style={{ color = theme.colors.faint, fontSize = 11 }}>RADIO GROUP</text>
+                <RadioGroup
+                    key="density"
+                    testId="density"
+                    options={density_options}
+                    value={density}
+                    onValueChange={set_density}
+                />
+            </div>
+            <div style={{ display = "flex", flexDirection = "column", gap = 7 }}>
+                <text style={{ color = theme.colors.faint, fontSize = 11 }}>SELECT</text>
+                <Select
+                    key="runtime"
+                    testId="runtime-select"
+                    options={runtime_options}
+                    value={runtime}
+                    onValueChange={set_runtime}
+                    placeholder="Choose runtime"
+                />
+            </div>
+            <div style={{ display = "flex", flexDirection = "column", gap = 7 }}>
+                <text style={{ color = theme.colors.faint, fontSize = 11 }}>COMBOBOX</text>
+                <Combobox
+                    key="framework"
+                    testId="framework-combobox"
+                    items={framework_options}
+                    value={framework}
+                    defaultInputValue="Taffy"
+                    onValueChange={set_framework}
+                    autoHighlight
+                    placeholder="Filter frameworks"
+                />
+            </div>
+            <div style={{ display = "flex", flexDirection = "column", gap = 7 }}>
+                <text style={{ color = theme.colors.faint, fontSize = 11 }}>TOOLTIP</text>
+                <Tooltip
+                    key="tooltip"
+                    testId="controls-tooltip"
+                    content="Rendered in a deferred anchored layer"
+                    side="top"
+                    sideOffset={6}
+                    triggerStyle={theme.styles.button}
+                    contentStyle={{
+                        padding = 8,
+                        borderRadius = 7,
+                        borderWidth = 1,
+                        borderColor = theme.colors.border,
+                        background = theme.colors.raised,
+                    }}
+                ><text>Hover or focus</text></Tooltip>
+            </div>
+        </div>
+        <text testId="controls-state" style={{ color = theme.colors.faint, fontSize = 11 }}>
+            {"State: " .. (notifications and "notifications on" or "notifications off") .. " · " .. density .. " · " .. runtime .. " · " .. framework}
+        </text>
+    </div>
+end

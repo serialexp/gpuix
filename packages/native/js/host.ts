@@ -228,6 +228,9 @@ export interface StyleDesc {
   // Nesting is one level deep: a state style cannot contain another.
   hover?: StateStyleDesc
   active?: StateStyleDesc
+  /** While focused by any input, a mouse press included, like CSS `:focus`.
+   *  Needs a focusable element. */
+  focus?: StateStyleDesc
   /** While focused after keyboard input (Tab), like CSS `:focus-visible`.
    *  A mouse press never shows it. Needs a focusable element. */
   focusVisible?: StateStyleDesc
@@ -238,7 +241,7 @@ export interface StyleDesc {
 
 export type StateStyleDesc = Omit<
   StyleDesc,
-  "hover" | "active" | "focusVisible" | "keyboardFocusDim"
+  "hover" | "active" | "focus" | "focusVisible" | "keyboardFocusDim"
 >
 
 // Element types supported by GPUIX

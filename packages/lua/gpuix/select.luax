@@ -1,0 +1,183 @@
+local util = require("gpuix._util")
+
+local root_style = { display = "flex", position = "relative", alignItems = "start" }
+local trigger_style = {
+    width = 200,
+    height = 36,
+    display = "flex",
+    flexDirection = "row",
+    alignItems = "center",
+    paddingLeft = 10,
+    paddingRight = 10,
+    borderRadius = 7,
+    borderWidth = 1,
+    borderColor = "#52525b",
+    background = "#18181b",
+    focusVisible = util.focus_ring,
+}
+local content_style = {
+    width = 200,
+    display = "flex",
+    flexDirection = "column",
+    padding = 5,
+    gap = 2,
+    borderRadius = 8,
+    borderWidth = 1,
+    borderColor = "#52525b",
+    background = "#27272a",
+    focusVisible = util.focus_ring,
+}
+local item_style = {
+    display = "flex",
+    flexDirection = "row",
+    alignItems = "center",
+    width = "100%",
+    padding = 9,
+    gap = 8,
+    borderRadius = 6,
+}
+
+return function(props)
+    local options = props.options or {}
+    local internal_value, set_internal_value = gpuix.use_state(props.defaultValue)
+    local internal_open, set_internal_open = gpuix.use_state(props.defaultOpen == true)
+    local active_index, set_active_index = gpuix.use_state(0)
+    local controlled_value = props.value ~= nil
+    local controlled_open = props.open ~= nil
+    local value = internal_value
+    local open = internal_open
+    if controlled_value then value = props.value end
+    if controlled_open then open = props.open end
+    local disabled = props.disabled == true
+
+    local function set_value(next_value)
+        if next_value == value then return end
+        if not controlled_value then set_internal_value(next_value) end
+        util.call(props.onValueChange, next_value)
+    end
+
+    local function set_open(next_open)
+        if next_open == open then return end
+        if not controlled_open then set_internal_open(next_open) end
+        util.call(props.onOpenChange, next_open)
+    end
+
+    local function selected_index()
+        return util.option_index(options, value) or 0
+    end
+
+    local function open_menu()
+        if disabled or #options == 0 then return end
+        local index = selected_index()
+        if index == 0 or util.is_disabled(options[index]) then
+            index = 1
+            while index <= #options and util.is_disabled(options[index]) do index = index + 1 end
+        end
+        set_active_index(index <= #options and index or 0)
+        set_open(true)
+    end
+
+    local function move_active(direction)
+        if #options == 0 then return end
+        local start = active_index
+        if start == 0 then start = direction > 0 and 0 or 1 end
+        for offset = 1, #options do
+            local index = ((start - 1 + direction * offset) % #options) + 1
+            if not util.is_disabled(options[index]) then
+                set_active_index(index)
+                return
+            end
+        end
+    end
+
+    local function choose(index)
+        local option = options[index]
+        if option == nil or util.is_disabled(option) then return end
+        set_value(option.value)
+        set_open(false)
+    end
+
+    local function handle_key(event)
+        local ctrl = event.modifiers and event.modifiers.ctrl
+        if event.key == "escape" then
+            set_open(false)
+        elseif event.key == "down" or (event.key == "n" and ctrl) then
+            if not open then open_menu() end
+            move_active(1)
+        elseif event.key == "up" or (event.key == "p" and ctrl) then
+            if not open then open_menu() end
+            move_active(-1)
+        elseif event.key == "enter" or event.key == "space" then
+            if open then choose(active_index) else open_menu() end
+        end
+    end
+
+    local selected = options[selected_index()]
+    local root_state = { open = open, value = value, disabled = disabled }
+    local menu
+    if open then
+        local items = {}
+        for index, option in ipairs(options) do
+            local option_index = index
+            local state = {
+                selected = option.value == value,
+                highlighted = index == active_index,
+                disabled = util.is_disabled(option),
+                option = option,
+            }
+            local item_content = props.renderItem and props.renderItem(option, state)
+                or <text>{option.label or option.value}</text>
+            items[index] = <div
+                key={option.value}
+                testId={util.test_id(props.testId, "-option-" .. option.value)}
+                onMouseEnter={function()
+                    if not state.disabled then set_active_index(option_index) end
+                end}
+                onClick={function() choose(option_index) end}
+                style={util.resolve_style(props.itemStyle, state, item_style)}
+            >
+                {item_content}
+            </div>
+        end
+
+        menu = <anchored
+            side={props.side or "bottom"}
+            align={props.align or "start"}
+            gap={props.sideOffset or 5}
+            fit="snap"
+            snapMargin={props.collisionPadding or 8}
+            deferred
+            priority={props.priority or 1}
+        >
+            <div
+                testId={util.test_id(props.testId, "-content")}
+                autoFocus
+                tabIndex={0}
+                onMouseDownOutside={function() set_open(false) end}
+                onKeyDown={handle_key}
+                style={util.resolve_style(props.contentStyle, root_state, content_style)}
+                children={items}
+            />
+        </anchored>
+    end
+
+    local value_content = props.renderValue and props.renderValue(selected, root_state)
+        or <text>{selected and (selected.label or selected.value) or (props.placeholder or "Select…")}</text>
+
+    return <div style={util.resolve_style(props.style, root_state, root_style)}>
+        <div
+            testId={props.testId}
+            tabIndex={disabled and -1 or (props.tabIndex or 0)}
+            onClick={function()
+                if not disabled then
+                    if open then set_open(false) else open_menu() end
+                end
+            end}
+            onKeyDown={handle_key}
+            style={util.resolve_style(props.triggerStyle, root_state, trigger_style)}
+        >
+            {value_content}
+        </div>
+        {menu}
+    </div>
+end

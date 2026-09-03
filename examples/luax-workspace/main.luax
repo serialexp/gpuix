@@ -1,10 +1,12 @@
 local ui = gpuix
 local theme = require("theme")
 local data = require("data")
+local store = require("store")
 local Sidebar = require("components.sidebar")
 local Detail = require("components.detail")
 local ActivityList = require("components.activity_list")
 local Composer = require("components.composer")
+local Button = require("gpuix.button")
 
 local function title_for(id)
     for _, conversation in ipairs(data.conversations) do
@@ -13,12 +15,26 @@ local function title_for(id)
     return "Workspace"
 end
 
+local function select_active_id(state) return state.active_id end
+local function select_compact(state) return state.compact end
+local function select_mode(state) return state.mode end
+local function select_activity(state) return state.selected_activity end
+local function select_draft(state) return state.draft end
+
+local function set_active_id(id)
+    store.dispatch({ type = "select_conversation", id = id })
+end
+
+local function set_selected_activity(id)
+    store.dispatch({ type = "select_activity", id = id })
+end
+
 return function()
-    local active_id, set_active_id = ui.use_state("runtime")
-    local compact, set_compact = ui.use_state(false)
-    local mode, set_mode = ui.use_state("markdown")
-    local selected_activity, set_selected_activity = ui.use_state("activity-1")
-    local draft, set_draft = ui.use_state("")
+    local active_id = store.use_state(select_active_id)
+    local compact = store.use_state(select_compact)
+    local mode = store.use_state(select_mode)
+    local selected_activity = store.use_state(select_activity)
+    local draft = store.use_state(select_draft)
 
     return <div testId="luax-workspace" style={theme.styles.root}>
         <Sidebar
@@ -29,25 +45,35 @@ return function()
         />
         <div style={theme.styles.content}>
             <div style={theme.styles.header}>
-                <div
+                <Button
                     testId="toggle-sidebar"
                     style={theme.styles.button}
-                    onClick={function() set_compact(function(value) return not value end) end}
+                    onClick={function() store.dispatch({ type = "toggle_sidebar" }) end}
                 >
                     <text>{compact and "Expand" or "Compact"}</text>
-                </div>
-                <text style={{ color = theme.colors.muted }}>Native Lua workspace</text>
+                </Button>
+                <text style={{ color = theme.colors.muted }}>LuaX</text>
                 <div style={{ flexGrow = 1 }} />
-                <div
+                <Button
                     testId="show-markdown"
                     style={mode == "markdown" and theme.styles.button_active or theme.styles.button}
-                    onClick={function() set_mode("markdown") end}
-                ><text>Markdown</text></div>
-                <div
+                    onClick={function() store.dispatch({ type = "set_mode", mode = "markdown" }) end}
+                ><text>Markdown</text></Button>
+                <Button
                     testId="show-code"
                     style={mode == "code" and theme.styles.button_active or theme.styles.button}
-                    onClick={function() set_mode("code") end}
-                ><text>Code</text></div>
+                    onClick={function() store.dispatch({ type = "set_mode", mode = "code" }) end}
+                ><text>Code</text></Button>
+                <Button
+                    testId="show-diff"
+                    style={mode == "diff" and theme.styles.button_active or theme.styles.button}
+                    onClick={function() store.dispatch({ type = "set_mode", mode = "diff" }) end}
+                ><text>Diff</text></Button>
+                <Button
+                    testId="show-widgets"
+                    style={mode == "widgets" and theme.styles.button_active or theme.styles.button}
+                    onClick={function() store.dispatch({ type = "set_mode", mode = "widgets" }) end}
+                ><text>Widgets</text></Button>
             </div>
             <div style={theme.styles.body}>
                 <Detail
@@ -55,6 +81,7 @@ return function()
                     mode={mode}
                     markdown={data.overview}
                     code={data.code}
+                    patch={data.patch}
                 />
                 <ActivityList
                     items={data.activities}
@@ -64,8 +91,10 @@ return function()
             </div>
             <Composer
                 value={draft}
-                onChange={function(event) set_draft(event.value or "") end}
-                onClear={function() set_draft("") end}
+                onChange={function(event)
+                    store.dispatch({ type = "set_draft", value = event.value or "" })
+                end}
+                onClear={function() store.dispatch({ type = "set_draft", value = "" }) end}
             />
         </div>
     </div>

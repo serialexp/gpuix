@@ -3389,7 +3389,7 @@ order given. Its fields are `offsetX`, `offsetY`, `blurRadius`, `spreadRadius`,
 
 **Selection:** `userSelect` (`"text"` | `"none"`), `selectionColor` — both inherit down the tree
 
-**Focus:** `focusVisible`. See [Focus styles](#focus-styles)
+**Focus:** `focus`, `focusVisible`. See [Focus styles](#focus-styles)
 
 ### Hover and active
 
@@ -3405,14 +3405,23 @@ JavaScript round trip.
     padding: 12,
     hover: { backgroundColor: '#45475a' },
     active: { backgroundColor: '#585b70' },
+    focusVisible: {
+      boxShadow: {
+        offsetX: 0,
+        offsetY: 0,
+        blurRadius: 0,
+        spreadRadius: 2,
+        color: '#60a5fa',
+      },
+    },
   }}
 >
   Press
 </div>
 ```
 
-Nesting is one level deep. A `hover` object cannot contain another `hover` or
-`active`.
+Nesting is one level deep. A pseudo-style object cannot contain another
+pseudo-style object.
 
 They work on **every** element, including `<text>`, `<code>`, `<markdown>`,
 `<diff>`, `<img>`, `<svg>` and the editors. The one exception is
@@ -3426,8 +3435,8 @@ wrapping `<div>`.
 element has focus **and the last input was the keyboard**, like CSS
 `:focus-visible`. GPUI applies it natively.
 
-A mouse press never shows it, on text fields too. There is no separate
-`focus` key.
+A mouse press never shows it, on text fields too. `focus` is the same kind of
+nested style for any focus, a mouse press included, like CSS `:focus`.
 
 ```tsx
 <div
@@ -3857,7 +3866,7 @@ The test renderer uses `VisualTestAppContext` with a `TestDispatcher` for determ
 - [x] Cross-element text selection
 - [x] Text highlighting and search (`highlight`, `useTextSearch`)
 - [x] Headless Select, Combobox, and Tooltip
-- [x] Native `hover` and `active` styles
+- [x] Native hover, active, focus, and focus-visible styles
 - [x] Window title (`setWindowTitle`)
 - [x] Native window controls (`minimizeWindow`, `zoomWindow`, `toggleFullscreen`)
 - [x] Window chrome (`titlebarTransparent`, `windowBackground`, traffic-light position)

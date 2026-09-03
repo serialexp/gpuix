@@ -1,5 +1,6 @@
 local theme = require("theme")
 local colors = theme.colors
+local Button = require("gpuix.button")
 
 local base = gpuix.style {
     display = "flex",
@@ -11,6 +12,8 @@ local base = gpuix.style {
     background = "#1d2027",
     borderWidth = 1,
     borderColor = "#2d323d",
+    marginBottom = 8,
+    focusVisible = theme.focus_visible,
 }
 local active_style = gpuix.style {
     display = "flex",
@@ -22,10 +25,12 @@ local active_style = gpuix.style {
     background = "#252933",
     borderWidth = 1,
     borderColor = "#e2795b",
+    marginBottom = 8,
+    focusVisible = theme.focus_visible,
 }
 
 return function(props)
-    return <div
+    return <Button
         key={props.item.id}
         testId={props.item.id}
         style={props.active and active_style or base}
@@ -52,5 +57,5 @@ return function(props)
             overflow = "hidden",
             textOverflow = "ellipsis",
         }}>{props.item.detail}</text>
-    </div>
+    </Button>
 end

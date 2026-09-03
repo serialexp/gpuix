@@ -96,20 +96,28 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<()
             let window_for_events = window.clone();
             cx.spawn(async move |cx| {
                 while let Some(payload) = event_receiver.next().await {
-                    let changed = {
+                    let (changed, focus_request) = {
                         let mut runtime = runtime_for_events.lock().unwrap();
                         let mut tree = tree_for_events.lock().unwrap();
                         match runtime.dispatch_event(payload, &mut tree) {
-                            Ok(changed) => changed,
+                            Ok(changed) => (changed, runtime.take_focus_request()),
                             Err(error) => {
                                 log::error!("Lua event failed: {error}");
-                                false
+                                (false, None)
                             }
                         }
                     };
-                    if changed {
+                    if changed || focus_request.is_some() {
                         window_for_events
-                            .update(cx, |_view, _window, cx| cx.notify())
+                            .update(cx, |view, window, cx| {
+                                if let Some(id) = focus_request {
+                                    view.reveal_virtual_list_ancestor(id);
+                                    if let Some(handle) = view.focus_handles.get(&id) {
+                                        handle.focus(window, cx);
+                                    }
+                                }
+                                cx.notify();
+                            })
                             .ok();
                     }
                 }
@@ -269,26 +277,167 @@ mod tests {
         let mut tree = RetainedTree::new();
         let mut runtime = LuaRuntime::load_file(&path, &mut tree).unwrap();
 
-        assert!(tree.elements.len() > 80);
         assert!(
-            tree.elements
-                .values()
-                .any(|element| element.element_type == "markdown")
+            tree.elements.len() > 80,
+            "workspace retained {} elements",
+            tree.elements.len()
         );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.element_type == "markdown"));
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.element_type == "virtual-list"));
+        let conversation_list = tree
+            .elements
+            .values()
+            .find(|element| element.test_id.as_deref() == Some("conversation-list"))
+            .unwrap();
+        assert_eq!(
+            conversation_list.custom_props.get("tabIndex"),
+            Some(&serde_json::json!(0))
+        );
+        assert!(!tree.elements.values().any(|element| {
+            element
+                .test_id
+                .as_deref()
+                .is_some_and(|test_id| test_id.starts_with("conversation-"))
+                && element.test_id.as_deref() != Some("conversation-list")
+                && element.custom_props.contains_key("tabIndex")
+        }));
+
+        dispatch_key_test_id(&mut runtime, &mut tree, "conversation-list", "down");
+        assert_eq!(content_count(&tree, "Binary protocol"), 2);
+        assert_eq!(content_count(&tree, "Embedded Lua runtime"), 1);
+        dispatch_key_test_id(&mut runtime, &mut tree, "conversation-list", "down");
+        assert_eq!(content_count(&tree, "Native text selection"), 2);
+        assert_eq!(content_count(&tree, "Binary protocol"), 1);
+        dispatch_key_test_id(&mut runtime, &mut tree, "conversation-list", "up");
+        assert_eq!(content_count(&tree, "Binary protocol"), 2);
+        assert_eq!(content_count(&tree, "Native text selection"), 1);
+
+        dispatch_test_id(&mut runtime, &mut tree, "show-diff", "click", None);
+        assert!(tree.elements.values().any(|element| {
+            element.test_id.as_deref() == Some("workspace-diff") && element.element_type == "diff"
+        }));
+
+        dispatch_test_id(&mut runtime, &mut tree, "show-widgets", "click", None);
+        assert!(tree.elements.values().any(|element| {
+            element.test_id.as_deref() == Some("showcase-image") && element.element_type == "img"
+        }));
+        dispatch_test_id(
+            &mut runtime,
+            &mut tree,
+            "notifications-checkbox-indicator",
+            "click",
+            None,
+        );
+        dispatch_test_id(
+            &mut runtime,
+            &mut tree,
+            "density-compact-indicator",
+            "click",
+            None,
+        );
+        assert!(tree.elements.values().any(|element| {
+            element.content.as_deref() == Some("State: notifications off · compact · lua54 · Taffy")
+        }));
+
+        dispatch_test_id(&mut runtime, &mut tree, "runtime-select", "click", None);
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| { element.test_id.as_deref() == Some("runtime-select-content") }));
+        dispatch_test_id(
+            &mut runtime,
+            &mut tree,
+            "runtime-select-option-luajit",
+            "click",
+            None,
+        );
+        assert!(tree.elements.values().any(|element| {
+            element.content.as_deref()
+                == Some("State: notifications off · compact · luajit · Taffy")
+        }));
+        assert!(!tree
+            .elements
+            .values()
+            .any(|element| { element.test_id.as_deref() == Some("runtime-select-content") }));
+
+        dispatch_test_id(
+            &mut runtime,
+            &mut tree,
+            "framework-combobox",
+            "change",
+            Some("ru"),
+        );
+        assert!(tree.elements.values().any(|element| {
+            element.test_id.as_deref() == Some("framework-combobox-option-Rust")
+        }));
+        dispatch_test_id(
+            &mut runtime,
+            &mut tree,
+            "framework-combobox-option-Rust",
+            "click",
+            None,
+        );
+        assert!(tree.elements.values().any(|element| {
+            element.content.as_deref() == Some("State: notifications off · compact · luajit · Rust")
+        }));
+
+        dispatch_test_id(
+            &mut runtime,
+            &mut tree,
+            "controls-tooltip",
+            "mouseEnter",
+            None,
+        );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| { element.test_id.as_deref() == Some("controls-tooltip-content") }));
+        dispatch_test_id(
+            &mut runtime,
+            &mut tree,
+            "controls-tooltip",
+            "mouseLeave",
+            None,
+        );
+        assert!(!tree
+            .elements
+            .values()
+            .any(|element| { element.test_id.as_deref() == Some("controls-tooltip-content") }));
+
+        dispatch_test_id(&mut runtime, &mut tree, "show-popover", "click", None);
+        assert!(tree.elements.values().any(|element| {
+            element.test_id.as_deref() == Some("widget-popover")
+                && element.element_type == "anchored"
+        }));
+        dispatch_test_id(
+            &mut runtime,
+            &mut tree,
+            "widget-popover-close",
+            "click",
+            None,
+        );
+        assert!(!tree
+            .elements
+            .values()
+            .any(|element| element.test_id.as_deref() == Some("widget-popover")));
 
         dispatch_test_id(&mut runtime, &mut tree, "show-code", "click", None);
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| element.element_type == "code")
-        );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.element_type == "code"));
 
         dispatch_test_id(&mut runtime, &mut tree, "toggle-sidebar", "click", None);
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| element.content.as_deref() == Some("Expand"))
-        );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.content.as_deref() == Some("Expand")));
 
         dispatch_test_id(&mut runtime, &mut tree, "activity-7", "click", None);
         dispatch_test_id(
@@ -305,11 +454,10 @@ mod tests {
         }));
 
         dispatch_test_id(&mut runtime, &mut tree, "send-message", "click", None);
-        assert!(
-            tree.elements
-                .values()
-                .any(|element| element.content.as_deref() == Some("Send (1)"))
-        );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.content.as_deref() == Some("Send (1)")));
         assert!(tree.elements.values().any(|element| {
             element.test_id.as_deref() == Some("workspace-composer")
                 && element.custom_props.get("value")
@@ -362,18 +510,48 @@ mod tests {
             .find(|element| element.test_id.as_deref() == Some(test_id))
             .unwrap()
             .id;
-        assert!(
-            runtime
-                .dispatch_event(
-                    EventPayload {
-                        element_id: element_id as f64,
-                        event_type: event_type.to_string(),
-                        value: value.map(str::to_string),
-                        ..Default::default()
-                    },
-                    tree,
-                )
-                .unwrap()
-        );
+        assert!(runtime
+            .dispatch_event(
+                EventPayload {
+                    element_id: element_id as f64,
+                    event_type: event_type.to_string(),
+                    value: value.map(str::to_string),
+                    ..Default::default()
+                },
+                tree,
+            )
+            .unwrap());
+    }
+
+    fn dispatch_key_test_id(
+        runtime: &mut LuaRuntime,
+        tree: &mut RetainedTree,
+        test_id: &str,
+        key: &str,
+    ) {
+        let element_id = tree
+            .elements
+            .values()
+            .find(|element| element.test_id.as_deref() == Some(test_id))
+            .unwrap()
+            .id;
+        assert!(runtime
+            .dispatch_event(
+                EventPayload {
+                    element_id: element_id as f64,
+                    event_type: "keyDown".to_string(),
+                    key: Some(key.to_string()),
+                    ..Default::default()
+                },
+                tree,
+            )
+            .unwrap());
+    }
+
+    fn content_count(tree: &RetainedTree, content: &str) -> usize {
+        tree.elements
+            .values()
+            .filter(|element| element.content.as_deref() == Some(content))
+            .count()
     }
 }

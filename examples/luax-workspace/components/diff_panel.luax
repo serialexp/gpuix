@@ -1,0 +1,33 @@
+local theme = require("theme")
+
+return function(props)
+    local selected_line, set_selected_line = gpuix.use_state("Click a changed line")
+
+    return <div style={{ display = "flex", flexDirection = "column", gap = 10 }}>
+        <div style={{ display = "flex", flexDirection = "row", alignItems = "center", gap = 8 }}>
+            <text style={{ color = theme.colors.muted, fontSize = 12 }}>NATIVE UNIFIED DIFF</text>
+            <div style={{ flexGrow = 1 }} />
+            <text testId="diff-selection" style={{ color = theme.colors.faint, fontSize = 11 }}>
+                {selected_line}
+            </text>
+        </div>
+        <diff
+            testId="workspace-diff"
+            patch={props.patch}
+            wordDiff
+            maxLines={40}
+            theme={theme.native}
+            onLineClick={function(event)
+                local line = event.newLine or event.oldLine or "?"
+                set_selected_line("Selected line " .. line)
+            end}
+            style={{
+                width = "100%",
+                borderWidth = 1,
+                borderColor = theme.colors.border,
+                borderRadius = 10,
+                background = theme.colors.raised,
+            }}
+        />
+    </div>
+end

@@ -14,6 +14,11 @@ return function(props)
 
     return <div style={theme.styles.activity}>
         <text style={{ color = theme.colors.muted, fontSize = 12 }}>ACTIVITY</text>
-        <div style={{ display = "flex", flexDirection = "column", gap = 8 }} children={rows} />
+        <virtual-list
+            estimatedItemHeight={68}
+            overdraw={136}
+            style={{ flexGrow = 1, minHeight = 0 }}
+            children={rows}
+        />
     </div>
 end

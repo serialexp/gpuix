@@ -1,0 +1,86 @@
+local theme = require("theme")
+local icons = require("icons")
+local FormControls = require("components.form_controls")
+local Button = require("gpuix.button")
+
+return function()
+    local image_clicks, set_image_clicks = gpuix.use_state(0)
+    local popover_open, set_popover_open = gpuix.use_state(false)
+
+    local popover
+    if popover_open then
+        popover = <anchored
+            testId="widget-popover"
+            position={{ x = 700, y = 88 }}
+            side="bottom"
+            align="end"
+            gap={8}
+            fit="switch"
+            style={{
+                width = 270,
+                display = "flex",
+                flexDirection = "column",
+                padding = 14,
+                gap = 7,
+                borderRadius = 10,
+                borderWidth = 1,
+                borderColor = theme.colors.accent,
+                background = theme.colors.raised,
+            }}
+        >
+            <text style={{ color = theme.colors.accent }}>Anchored GPUI layer</text>
+            <text style={{ color = theme.colors.muted, fontSize = 12 }}>
+                This layer snaps to the window and paints outside normal layout.
+            </text>
+            <Button
+                testId="widget-popover-close"
+                style={theme.styles.button_active}
+                onClick={function() set_popover_open(false) end}
+            ><text>Close</text></Button>
+        </anchored>
+    end
+
+    return <div style={{ display = "flex", flexDirection = "column", gap = 14 }}>
+        <FormControls key="form-controls" />
+
+        <div style={theme.styles.card}>
+            <div style={{ display = "flex", flexDirection = "row", alignItems = "center", gap = 8 }}>
+                <text style={{ color = theme.colors.muted, fontSize = 12 }}>NATIVE IMAGE</text>
+                <div style={{ flexGrow = 1 }} />
+                <text style={{ color = theme.colors.faint, fontSize = 11 }}>clicks: {image_clicks}</text>
+            </div>
+            <img
+                testId="showcase-image"
+                src="docs/images/showcase.png"
+                objectFit="cover"
+                tabIndex={0}
+                onClick={function() set_image_clicks(function(value) return value + 1 end) end}
+                style={{
+                    width = "100%",
+                    height = 220,
+                    borderRadius = 8,
+                    focusVisible = theme.focus_visible,
+                }}
+            />
+        </div>
+
+        <div style={theme.styles.card}>
+            <text style={{ color = theme.colors.muted, fontSize = 12 }}>SVG + ANCHORED LAYER</text>
+            <div style={{ display = "flex", flexDirection = "row", alignItems = "center", gap = 12 }}>
+                <svg source={icons.logo} style={{ width = 44, height = 44 }} />
+                <div style={{ display = "flex", flexDirection = "column", gap = 3, flexGrow = 1 }}>
+                    <text>Raw SVG remains a native element</text>
+                    <text style={{ color = theme.colors.faint, fontSize = 11 }}>
+                        The popover uses GPUI deferred painting.
+                    </text>
+                </div>
+                <Button
+                    testId="show-popover"
+                    style={popover_open and theme.styles.button_active or theme.styles.button}
+                    onClick={function() set_popover_open(not popover_open) end}
+                ><text>{popover_open and "Hide" or "Show"}</text></Button>
+            </div>
+        </div>
+        {popover}
+    </div>
+end

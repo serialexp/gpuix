@@ -57,6 +57,9 @@ Host constructors return packed integer handles. Parent child arrays contain
 only those handles; strings and numbers are consumed by `gpuix.text(value)` and
 never share the child ABI. The token packs the current arena generation and
 slot into one 64-bit Lua integer, so it requires no Lua allocation or GC object.
+An event handler can pass a mounted handle to `gpuix.focus(handle)` to move
+native keyboard focus without allocating a ref object. This is how composed
+controls implement roving focus while keeping exactly one item in the tab order.
 
 `gpuix.h(Component, props)` invokes a function component and is the target used
 by the LuaX transform. Element helpers currently
@@ -114,6 +117,31 @@ For `components.sidebar`, the loader checks `components/sidebar.lua`,
 `package.loaded` cache still owns module identity, so module top-level code and
 static `gpuix.style` declarations execute once. Module names cannot contain
 path separators or escape the entry directory.
+
+The native runtime also bundles a reusable LuaX component package. These
+modules resolve before application-local files and require no JavaScript or
+extra search path:
+
+```lua
+local Button = require("gpuix.button")
+local Checkbox = require("gpuix.checkbox")
+local RadioGroup = require("gpuix.radio_group")
+local Select = require("gpuix.select")
+local Combobox = require("gpuix.combobox")
+local Tooltip = require("gpuix.tooltip")
+```
+
+Each control accepts controlled value props and matching change callbacks, or
+`default*` props for internal state. Select and Combobox accept option tables,
+state-aware style functions, disabled items, keyboard navigation, and anchored
+content. See `packages/lua/README.md` for the current API and limitations.
+
+`gpuix.button` has `tabIndex = 0` by default. GPUI owns the tab map, so `Tab`
+and `Shift+Tab` move through LuaX buttons, form controls, inputs, and textareas
+entirely in Rust. Set `tabIndex = -1` to keep click focus while
+removing a control from sequential keyboard navigation. The bundled controls
+use native `focusVisible` styles, so keyboard focus paints without a Lua state
+update or event round trip.
 
 Images use the same native element and props as React:
 
@@ -181,6 +209,49 @@ reported after commit and do not roll back an already-visible host tree.
 Live reload preserves state and refs, but deliberately refreshes memo,
 callback, and effect closures even when their dependency arrays are unchanged.
 This prevents closures from continuing to execute the previous module version.
+
+## Redux-style stores
+
+`gpuix.create_store(name, reducer, initial_state)` creates a named store whose
+state lives in Rust rather than in a reloaded Lua module. Recreating the same
+name during live reload preserves its state and replaces its reducer.
+
+```lua
+local store = gpuix.create_store("counter", function(state, action)
+    if action.type == "increment" then
+        return { count = state.count + 1 }
+    end
+    return state
+end, { count = 0 })
+
+return function()
+    local count = store.use_state(function(state) return state.count end)
+    return <div onClick={function()
+        store.dispatch({ type = "increment" })
+    end}>
+        <text>{count}</text>
+    </div>
+end
+```
+
+Store methods are bound functions and use dot syntax:
+
+- `store.get_state()` returns the current state.
+- `store.dispatch(action)` runs the latest reducer and returns the action.
+- `store.subscribe(listener)` returns an idempotent unsubscribe function.
+- `store.use_state(selector?, equality?)` subscribes the current component.
+
+Without a selector, `use_state` returns the whole state. The default comparison
+is shallow Lua equality, so tables compare by identity. A custom equality
+function receives the previous and next selected values. Dispatch recomputes
+every mounted selector before committing. A root render is scheduled only when
+at least one selected value changed, and memo subtrees are invalidated only
+when they contain a changed subscriber.
+
+Reducers should follow Redux's immutable-update rule. Mutating and returning a
+previously selected table keeps the same identity and therefore does not notify
+that selector. Store names must be stable and unique within one runtime. Failed
+live reloads restore the previous state, reducer, and listener set.
 
 The Node addon remains available through `loadLua()` and `loadLuax()`, but a Lua
 application does not need it. `gpuix-lua` reads the source in Rust, owns the
@@ -347,8 +418,9 @@ handwritten Lua and 2.03 ms for LuaX on Lua 5.4.
 
 - Lua 5.4 is the default; LuaJIT is an optional native build feature.
 - The hook set is `use_state`, `use_reducer`, `use_ref`, `use_memo`,
-  `use_callback`, and `use_effect`. There is no context, layout effect, error
-  boundary, asynchronous scheduler, transition, or concurrent rendering yet.
+  `use_callback`, `use_effect`, and selector subscriptions through
+  `store.use_state`. There is no context, layout effect, error boundary,
+  asynchronous scheduler, transition, or concurrent rendering yet.
 - Hook state belongs to a component instance. Instances are identified by their
   parent component plus an explicit `key`, or by component sibling position
   when no key exists. Hooks are then ordered only within that component.
@@ -375,8 +447,9 @@ Node addon integration.
 
 `examples/luax-workspace/main.luax` is the broader multi-file example. It uses
 imported Lua and LuaX modules, nested function components, root and
-component-local state, native input, SVG, Markdown, highlighted code, dynamic
-lists, and `memo_batch`:
+component-local state, a reload-safe Redux-style store, native input, SVG,
+Markdown, highlighted code, unified diffs, images, anchored layers, a virtual
+list, the bundled form controls, and `memo_batch`:
 
 ```bash
 cargo run --release --manifest-path packages/native/Cargo.toml \

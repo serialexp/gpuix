@@ -27,8 +27,9 @@ inside the native process, state is retained by Rust hook slots, and LuaX emits
 packed host handles directly into the render arena.
 
 - Click a conversation in the sidebar.
-- Switch this panel between Markdown and highlighted Rust.
-- Select activity rows to exercise `memo_batch`.
+- Focus the sidebar and use Up, Down, Home, or End to move its selection.
+- Switch among Markdown, highlighted Rust, a native diff, and image widgets.
+- Scroll and select activity rows to exercise `virtual-list` and `memo_batch`.
 - Edit the composer to exercise native input events.
 ]],
     code = [[
@@ -37,5 +38,21 @@ pub fn dispatch_event(payload: EventPayload) {
     runtime.dispatch_event(payload, &mut tree)?;
     view.notify();
 }
+]],
+    patch = [[
+diff --git a/src/runtime.rs b/src/runtime.rs
+--- a/src/runtime.rs
++++ b/src/runtime.rs
+@@ -41,8 +41,11 @@ impl Runtime {
+     pub fn render(&mut self) -> Result<()> {
+-        let snapshot = self.lua.to_value(&self.root)?;
+-        self.renderer.replace(snapshot)
++        let handles = self.lua.render_handles()?;
++        let mutations = self.reconciler.diff(handles);
++        self.renderer.apply(mutations)?;
++        self.view.notify();
++        Ok(())
+     }
+ }
 ]],
 }

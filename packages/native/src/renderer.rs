@@ -1465,16 +1465,20 @@ impl GpuixRenderer {
     /// reconciliation execute in Rust; only this fixed-size event crosses napi.
     #[napi]
     pub fn dispatch_lua_event(&self, payload: EventPayload) -> Result<bool> {
-        let changed = {
+        let (changed, focus_request) = {
             let mut runtime = self.lua_runtime.lock().unwrap();
             let runtime = runtime
                 .as_mut()
                 .ok_or_else(|| Error::from_reason("No Lua app is loaded"))?;
             let mut tree = self.tree.lock().unwrap();
-            runtime
+            let changed = runtime
                 .dispatch_event(payload, &mut tree)
-                .map_err(Error::from_reason)?
+                .map_err(Error::from_reason)?;
+            (changed, runtime.take_focus_request())
         };
+        if let Some(id) = focus_request {
+            self.focus_element(id as f64)?;
+        }
         if changed && *self.initialized.lock().unwrap() {
             self.request_invalidate()?;
         }
@@ -4276,8 +4280,10 @@ const KEYBOARD_FOCUS_DIM: f32 = 0.4;
 /// Keyboard focus look for a focusable element, applied right after
 /// `track_focus` (gpui applies focus refinements only to a tracked element).
 ///
-/// Two independent states. `focusVisible` styles the element while it has
-/// keyboard focus, like CSS `:focus-visible`. While another control has
+/// `focus` styles the element while it has focus by any input, like CSS
+/// `:focus`. Two further states are independent of it. `focusVisible` styles
+/// the element while it has keyboard focus, like CSS `:focus-visible`. While
+/// another control has
 /// keyboard focus, the element dims unless its style sets
 /// `keyboardFocusDim: false`; that also shows at a glance where Tab can go.
 pub(crate) fn apply_focus_visible<E: gpui::InteractiveElement + gpui::Styled>(
@@ -4287,6 +4293,9 @@ pub(crate) fn apply_focus_visible<E: gpui::InteractiveElement + gpui::Styled>(
     keyboard_focus: Option<&[u64]>,
 ) -> E {
     // gpui runs the refinement eagerly, so borrowing the style is fine.
+    if let Some(declared) = style.and_then(|style| style.focus.as_deref()) {
+        el = el.focus(|refinement| apply_styles(refinement, declared));
+    }
     if let Some(declared) = style.and_then(|style| style.focus_visible.as_deref()) {
         el = el.focus_visible(|refinement| apply_styles(refinement, declared));
     }
@@ -6160,12 +6169,12 @@ pub(crate) fn apply_height<E: gpui::Styled>(el: E, dim: &crate::style::Dimension
     }
 }
 
-/// Base styles plus gpui's `hover` and `active` refinements.
+/// Base styles plus gpui's interactive refinements.
 ///
 /// Every stateful GPUI root must go through this, never `apply_styles` alone.
-/// `StyleDesc` carries `hover` and `active` for every element type, so a custom
-/// element that only applied the base styles accepted the prop, serialized it,
-/// and dropped it. gpui reads both refinements from the element state behind the
+/// `StyleDesc` carries hover, active, and focus styles for every element type,
+/// so a custom element that only applied the base styles accepts the prop,
+/// serializes it, and drops it. gpui reads the refinements from state behind the
 /// element's `ElementId`, so the caller must have called `.id(..)` first.
 pub(crate) fn apply_interactive_styles<E>(mut el: E, style: &StyleDesc) -> E
 where
@@ -6178,8 +6187,8 @@ where
     if let Some(active_style) = style.active.as_deref() {
         el = el.active(|refinement| apply_styles(refinement, active_style));
     }
-    // `focusVisible` needs the focus handle, so `apply_focus_visible` applies
-    // it where the element calls track_focus.
+    // `focus` and `focusVisible` need the focus handle, so `apply_focus_visible`
+    // applies them where the element calls track_focus.
     el
 }
 

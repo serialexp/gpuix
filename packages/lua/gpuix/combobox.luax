@@ -1,0 +1,244 @@
+local util = require("gpuix._util")
+
+local root_style = { display = "flex", position = "relative", alignItems = "start" }
+local input_style = {
+    width = 220,
+    height = 36,
+    padding = 9,
+    borderRadius = 7,
+    borderWidth = 1,
+    borderColor = "#52525b",
+    background = "#18181b",
+    color = "#fafafa",
+    focusVisible = util.focus_ring,
+}
+local content_style = {
+    width = 220,
+    display = "flex",
+    flexDirection = "column",
+    padding = 5,
+    gap = 2,
+    borderRadius = 8,
+    borderWidth = 1,
+    borderColor = "#52525b",
+    background = "#27272a",
+}
+local item_style = {
+    display = "flex",
+    flexDirection = "row",
+    alignItems = "center",
+    width = "100%",
+    padding = 9,
+    borderRadius = 6,
+}
+
+local function normalize_options(items)
+    local options = {}
+    for index, item in ipairs(items or {}) do
+        if type(item) == "table" then
+            options[index] = item
+        else
+            options[index] = { value = item, label = tostring(item) }
+        end
+    end
+    return options
+end
+
+local function label_for(options, value)
+    local index = util.option_index(options, value)
+    if index == nil then return "" end
+    return options[index].label or tostring(options[index].value)
+end
+
+local function contains(values, value)
+    if type(values) ~= "table" then return false end
+    for _, candidate in ipairs(values) do
+        if candidate == value then return true end
+    end
+    return false
+end
+
+return function(props)
+    local options = normalize_options(props.items)
+    local default_value = props.defaultValue
+    if props.multiple and default_value == nil then default_value = {} end
+    local initial_query = props.defaultInputValue
+    if initial_query == nil and not props.multiple then initial_query = label_for(options, default_value) end
+
+    local internal_value, set_internal_value = gpuix.use_state(default_value)
+    local internal_query, set_internal_query = gpuix.use_state(initial_query or "")
+    local internal_open, set_internal_open = gpuix.use_state(props.defaultOpen == true)
+    local active_index, set_active_index = gpuix.use_state(0)
+
+    local controlled_value = props.value ~= nil
+    local controlled_query = props.inputValue ~= nil
+    local controlled_open = props.open ~= nil
+    local value = internal_value
+    local query = internal_query
+    local open = internal_open
+    if controlled_value then value = props.value end
+    if controlled_query then query = props.inputValue end
+    if controlled_open then open = props.open end
+    local disabled = props.disabled == true
+
+    local function set_value(next_value)
+        if not controlled_value then set_internal_value(next_value) end
+        util.call(props.onValueChange, next_value)
+    end
+
+    local function set_query(next_query)
+        if not controlled_query then set_internal_query(next_query) end
+        util.call(props.onInputValueChange, next_query)
+    end
+
+    local function set_open(next_open)
+        if next_open == open then return end
+        if not controlled_open then set_internal_open(next_open) end
+        util.call(props.onOpenChange, next_open)
+    end
+
+    local filtered = {}
+    local normalized_query = string.lower((query or ""):match("^%s*(.-)%s*$"))
+    for _, option in ipairs(options) do
+        local label = option.label or tostring(option.value)
+        local include
+        if props.filter == false or normalized_query == "" then
+            include = true
+        elseif type(props.filter) == "function" then
+            include = props.filter(option, query)
+        else
+            include = string.find(string.lower(label), normalized_query, 1, true) ~= nil
+        end
+        if include then filtered[#filtered + 1] = option end
+    end
+
+    local function first_enabled()
+        for index, option in ipairs(filtered) do
+            if not util.is_disabled(option) then return index end
+        end
+        return 0
+    end
+
+    local function move_active(direction)
+        if #filtered == 0 then return end
+        local start = active_index
+        if start == 0 then start = direction > 0 and 0 or 1 end
+        for offset = 1, #filtered do
+            local index = ((start - 1 + direction * offset) % #filtered) + 1
+            if not util.is_disabled(filtered[index]) then
+                set_active_index(index)
+                return
+            end
+        end
+    end
+
+    local function select_option(option)
+        if option == nil or disabled or util.is_disabled(option) then return end
+        if props.multiple then
+            local next_value = {}
+            for _, selected in ipairs(type(value) == "table" and value or {}) do
+                if selected ~= option.value then next_value[#next_value + 1] = selected end
+            end
+            if not contains(value, option.value) then next_value[#next_value + 1] = option.value end
+            set_value(next_value)
+            set_query("")
+        else
+            set_value(option.value)
+            set_query(option.label or tostring(option.value))
+            set_open(false)
+        end
+        set_active_index(0)
+    end
+
+    local function update_query(next_query)
+        set_query(next_query)
+        set_open(true)
+        if props.autoHighlight then
+            set_active_index(first_enabled())
+        else
+            set_active_index(0)
+        end
+    end
+
+    local function handle_key(event)
+        local ctrl = event.modifiers and event.modifiers.ctrl
+        if event.key == "escape" then
+            set_open(false)
+        elseif event.key == "down" or (event.key == "n" and ctrl) then
+            set_open(true)
+            move_active(1)
+        elseif event.key == "up" or (event.key == "p" and ctrl) then
+            set_open(true)
+            move_active(-1)
+        end
+    end
+
+    local root_state = { open = open, value = value, query = query, disabled = disabled }
+    local menu
+    if open then
+        local items = {}
+        for index, option in ipairs(filtered) do
+            local option_index = index
+            local state = {
+                selected = props.multiple and contains(value, option.value) or value == option.value,
+                highlighted = index == active_index,
+                disabled = util.is_disabled(option),
+                option = option,
+            }
+            local content = props.renderItem and props.renderItem(option, state)
+                or <text>{option.label or tostring(option.value)}</text>
+            items[index] = <div
+                key={option.value}
+                testId={util.test_id(props.testId, "-option-" .. option.value)}
+                onMouseEnter={function()
+                    if not state.disabled then set_active_index(option_index) end
+                end}
+                onClick={function() select_option(option) end}
+                style={util.resolve_style(props.itemStyle, state, item_style)}
+            >
+                {content}
+            </div>
+        end
+        if #items == 0 then
+            items[1] = <div
+                testId={util.test_id(props.testId, "-empty")}
+                style={util.resolve_style(props.emptyStyle, root_state, item_style)}
+            ><text>{props.emptyText or "No results"}</text></div>
+        end
+
+        menu = <anchored
+            side={props.side or "bottom"}
+            align={props.align or "start"}
+            gap={props.sideOffset or 5}
+            fit="snap"
+            snapMargin={props.collisionPadding or 8}
+            deferred
+            priority={props.priority or 1}
+        >
+            <div
+                testId={util.test_id(props.testId, "-content")}
+                onMouseDownOutside={function() set_open(false) end}
+                style={util.resolve_style(props.contentStyle, root_state, content_style)}
+                children={items}
+            />
+        </anchored>
+    end
+
+    return <div style={util.resolve_style(props.style, root_state, root_style)}>
+        <input
+            testId={props.testId}
+            value={query}
+            placeholder={props.placeholder}
+            readOnly={disabled or props.readOnly}
+            onClick={function() if not disabled then set_open(true) end end}
+            onFocus={function() if not disabled then set_open(true) end end}
+            onChange={function(event) if not disabled then update_query(event.value or "") end end}
+            onKeyDown={handle_key}
+            onSubmit={function()
+                if active_index > 0 then select_option(filtered[active_index]) end
+            end}
+            style={util.resolve_style(props.inputStyle, root_state, input_style)}
+        />
+        {menu}
+    </div>
+end
