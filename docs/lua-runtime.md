@@ -262,6 +262,7 @@ Run the worked LuaX app without Bun, Node, or JavaScript:
 
 ```bash
 cargo run --release --manifest-path packages/native/Cargo.toml \
+  --no-default-features --features lua54 \
   --bin gpuix-lua -- examples/luax-counter.luax
 ```
 
@@ -453,6 +454,7 @@ list, the bundled form controls, and `memo_batch`:
 
 ```bash
 cargo run --release --manifest-path packages/native/Cargo.toml \
+  --no-default-features --features lua54 \
   --bin gpuix-lua -- examples/luax-workspace/main.luax
 ```
 
