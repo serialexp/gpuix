@@ -2130,7 +2130,7 @@ CSS-like styling via the `style` prop:
 
 **Position:** `position` (`"relative"` | `"absolute"` | `"fixed"`), `top`, `right`, `bottom`, `left` — `"fixed"` lays out like `"absolute"`, because GPUI has no scrolling document to be fixed against
 
-**Visual:** `background`, `backgroundColor`, `color`, `opacity`, `cursor`, `pointerEvents`, `borderRadius`, `borderTopLeftRadius`, `borderTopRightRadius`, `borderBottomLeftRadius`, `borderBottomRightRadius`, `borderWidth`, `borderTopWidth`, `borderRightWidth`, `borderBottomWidth`, `borderLeftWidth`, `borderColor`, `boxShadow`
+**Visual:** `visibility` (`"visible"` | `"hidden"`), `background`, `backgroundColor`, `color`, `opacity`, `cursor`, `pointerEvents`, `borderRadius`, `borderTopLeftRadius`, `borderTopRightRadius`, `borderBottomLeftRadius`, `borderBottomRightRadius`, `borderWidth`, `borderTopWidth`, `borderRightWidth`, `borderBottomWidth`, `borderLeftWidth`, `borderColor`, `boxShadow`
 
 ### Cursors
 
@@ -2633,6 +2633,38 @@ Two things avoid the rebuild entirely:
   scale is a React re-render.
 
 The test renderer uses `VisualTestAppContext` with a `TestDispatcher` for deterministic scheduling. Event simulation goes through GPUI's coordinate-based hit testing and dispatch — not synthetic JS events.
+
+## Experimental LuaX runtime
+
+GPUIX also includes an experimental embedded Lua 5.4/LuaJIT renderer. LuaX
+components execute inside Rust and reconcile directly into the retained tree,
+without JavaScript or a napi mutation/snapshot transition:
+
+```bash
+just start
+```
+
+LuaX supports React-style function components and the hooks `use_state`,
+`use_reducer`, `use_ref`, `use_memo`, `use_callback`, `use_effect`, plus
+`store.use_state`. The compiler fingerprints hook call sites while the runtime
+also records hook kind and initializer Lua type. Live reload therefore keeps
+current hook values across unrelated line and same-type initializer edits,
+rejects same-type hook reorders, and resets only a component whose hook
+signature actually changed. Handwritten `.lua` files remain positional and
+cannot detect a swap of two same-kind, same-type hooks.
+
+The bundled `gpuix.drawer` component provides a resizable left, right, or bottom
+edge surface. `gpuix.dock_layout` adds Zed-style dock chrome: bottom status-bar
+buttons toggle panels, and each button's right-click menu moves its panel to the
+left, right, or bottom. One panel can be visible on each edge. Hidden panels
+remain mounted with GPUI `visibility: hidden`, so local hook values and memoized
+rows survive closing and re-docking. `just start` opens the workspace example
+with its activity panel in this dock layout.
+Its activity toggle imports a raw Phosphor SVG from `icons.lua`; standalone Lua
+apps can therefore use icon packs without loading a JavaScript icon component.
+
+See [`docs/lua-runtime.md`](./docs/lua-runtime.md) for syntax, runtime commands,
+the bundled controls, benchmarks, and current limitations.
 
 ## Status
 

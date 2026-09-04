@@ -1,12 +1,14 @@
 local ui = gpuix
 local theme = require("theme")
 local data = require("data")
+local icons = require("icons")
 local store = require("store")
 local Sidebar = require("components.sidebar")
 local Detail = require("components.detail")
 local ActivityList = require("components.activity_list")
 local Composer = require("components.composer")
 local Button = require("gpuix.button")
+local DockLayout = require("gpuix.dock_layout")
 
 local function title_for(id)
     for _, conversation in ipairs(data.conversations) do
@@ -35,8 +37,45 @@ return function()
     local mode = store.use_state(select_mode)
     local selected_activity = store.use_state(select_activity)
     local draft = store.use_state(select_draft)
+    local panels = {{
+        id = "activity",
+        label = "Activity",
+        buttonLabel = "ACT",
+        position = "right",
+        defaultOpen = true,
+        defaultSize = 340,
+        minSize = 260,
+        maxSize = 560,
+        style = {
+            background = theme.colors.sidebar,
+            borderColor = theme.colors.border,
+        },
+        renderButton = function(state)
+            return <svg
+                testId="activity-dock-icon"
+                source={icons.activity}
+                style={{
+                    width = 16,
+                    height = 16,
+                    color = state.active and theme.colors.text or theme.colors.muted,
+                }}
+            />
+        end,
+        render = function()
+            return <ActivityList
+                items={data.activities}
+                selectedId={selected_activity}
+                onSelect={set_selected_activity}
+            />
+        end,
+    }}
 
-    return <div testId="luax-workspace" style={theme.styles.root}>
+    return <DockLayout
+        testId="luax-workspace"
+        panels={panels}
+        style={theme.styles.dock_root}
+        statusBarStyle={theme.styles.status_bar}
+    >
         <Sidebar
             items={data.conversations}
             activeId={active_id}
@@ -83,11 +122,6 @@ return function()
                     code={data.code}
                     patch={data.patch}
                 />
-                <ActivityList
-                    items={data.activities}
-                    selectedId={selected_activity}
-                    onSelect={set_selected_activity}
-                />
             </div>
             <Composer
                 value={draft}
@@ -97,5 +131,5 @@ return function()
                 onClear={function() store.dispatch({ type = "set_draft", value = "" }) end}
             />
         </div>
-    </div>
+    </DockLayout>
 end

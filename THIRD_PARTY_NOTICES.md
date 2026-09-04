@@ -33,9 +33,10 @@ behavior reviewed at
 ## Example icons
 
 The chat example uses **[Lucide](https://github.com/lucide-icons/lucide)** SVG
-icons (ISC, Copyright (c) 2026 Lucide Icons and Contributors). The OpenAI mark
-is ported from **[Comet](https://github.com/zeronsh/comet)** (MIT, Copyright (c)
-2026 Wing).
+icons (ISC, Copyright (c) 2026 Lucide Icons and Contributors). The LuaX
+workspace uses **[Phosphor Icons](https://github.com/phosphor-icons/core)** SVG
+icons (MIT, Copyright (c) 2023 Phosphor Icons). The OpenAI mark is ported from
+**[Comet](https://github.com/zeronsh/comet)** (MIT, Copyright (c) 2026 Wing).
 
 ## Bundled syntax definitions
 

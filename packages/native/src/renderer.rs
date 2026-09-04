@@ -4793,6 +4793,11 @@ where
 }
 
 pub(crate) fn apply_styles<E: gpui::Styled>(mut el: E, style: &StyleDesc) -> E {
+    match style.visibility.as_deref() {
+        Some("hidden") => el = el.invisible(),
+        Some("visible") => el = el.visible(),
+        _ => {}
+    }
     match style.display.as_deref() {
         Some("flex") => el = el.flex(),
         Some("grid") => el = el.grid(),

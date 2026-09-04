@@ -1,9 +1,16 @@
+use std::collections::HashSet;
+
 pub(crate) fn transform(source: &str) -> Result<String, String> {
-    Transformer { source }.transform_range(0, source.len())
+    Transformer {
+        source,
+        gpuix_aliases: gpuix_aliases(source),
+    }
+    .transform_range(0, source.len())
 }
 
 struct Transformer<'a> {
     source: &'a str,
+    gpuix_aliases: HashSet<String>,
 }
 
 struct Element {
@@ -16,6 +23,12 @@ struct OpenTag {
     attributes: Vec<(String, String)>,
     self_closing: bool,
     end: usize,
+}
+
+struct HookCall {
+    open_paren: usize,
+    close_paren: usize,
+    site: u64,
 }
 
 enum Child {
@@ -40,6 +53,18 @@ impl Transformer<'_> {
                     cursor = element.end;
                     continue;
                 }
+            }
+            if let Some(call) = self.parse_hook_call(cursor, end)? {
+                output.push_str(&self.source[cursor..=call.open_paren]);
+                let arguments = self.transform_range(call.open_paren + 1, call.close_paren)?;
+                output.push_str(&arguments);
+                if !arguments.trim().is_empty() {
+                    output.push_str(", ");
+                }
+                output.push_str(&quote_lua(&format!("__gpuix_hook_site:{:016x}", call.site)));
+                output.push(')');
+                cursor = call.close_paren + 1;
+                continue;
             }
             let character = self.source[cursor..end].chars().next().unwrap();
             output.push(character);
@@ -282,6 +307,92 @@ impl Transformer<'_> {
         Err(self.error(start, "unclosed LuaX expression"))
     }
 
+    fn parse_hook_call(&self, start: usize, end: usize) -> Result<Option<HookCall>, String> {
+        if start > 0
+            && self
+                .byte(start - 1)
+                .is_some_and(|byte| is_lua_identifier_byte(byte) || byte == b'.')
+        {
+            return Ok(None);
+        }
+        let mut cursor = start;
+        while cursor < end && self.byte(cursor).is_some_and(is_lua_identifier_byte) {
+            cursor += 1;
+        }
+        if cursor == start || self.byte(cursor) != Some(b'.') {
+            return Ok(None);
+        }
+        let receiver = &self.source[start..cursor];
+        cursor += 1;
+        let method_start = cursor;
+        while cursor < end && self.byte(cursor).is_some_and(is_lua_identifier_byte) {
+            cursor += 1;
+        }
+        let method = &self.source[method_start..cursor];
+        let direct_hook = self.gpuix_aliases.contains(receiver)
+            && matches!(
+                method,
+                "use_state"
+                    | "use_reducer"
+                    | "use_ref"
+                    | "use_memo"
+                    | "use_callback"
+                    | "use_effect"
+            );
+        let store_hook = method == "use_state" && !self.gpuix_aliases.contains(receiver);
+        if !direct_hook && !store_hook {
+            return Ok(None);
+        }
+        cursor = self.skip_whitespace(cursor, end);
+        if self.byte(cursor) != Some(b'(') {
+            return Ok(None);
+        }
+        let close_paren = self.parenthesized_end(cursor, end)?;
+        let statement_start = self.source[..start]
+            .rfind(|character| matches!(character, '\n' | ';'))
+            .map_or(0, |index| index + 1);
+        let prefix = self.source[statement_start..start].trim();
+        if prefix.ends_with("function") {
+            return Ok(None);
+        }
+        let anchor = if prefix.contains('=') {
+            format!("{method}:{}", normalize_hook_source(prefix))
+        } else {
+            format!(
+                "{method}:{}",
+                normalize_hook_source(&self.source[start..=close_paren])
+            )
+        };
+        Ok(Some(HookCall {
+            open_paren: cursor,
+            close_paren,
+            site: stable_hook_hash(anchor.as_bytes()),
+        }))
+    }
+
+    fn parenthesized_end(&self, start: usize, end: usize) -> Result<usize, String> {
+        let mut depth = 1usize;
+        let mut cursor = start + 1;
+        while cursor < end {
+            if let Some(literal_end) = self.lua_literal_end(cursor, end) {
+                cursor = literal_end;
+                continue;
+            }
+            match self.byte(cursor) {
+                Some(b'(') => depth += 1,
+                Some(b')') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(cursor);
+                    }
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        Err(self.error(start, "unclosed Lua hook call"))
+    }
+
     fn lua_literal_end(&self, start: usize, end: usize) -> Option<usize> {
         if self.source[start..end].starts_with("--") {
             if let Some(close) = self.long_bracket_end(start + 2, end) {
@@ -496,6 +607,58 @@ fn is_lua_identifier(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '_'
 }
 
+fn is_lua_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn normalize_hook_source(source: &str) -> String {
+    source
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect()
+}
+
+fn stable_hook_hash(source: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in source {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn gpuix_aliases(source: &str) -> HashSet<String> {
+    let mut aliases = HashSet::from(["gpuix".to_string()]);
+    loop {
+        let mut changed = false;
+        for line in source.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("local ") else {
+                continue;
+            };
+            let Some((name, value)) = rest.split_once('=') else {
+                continue;
+            };
+            let name = name.trim();
+            let value = value.trim();
+            if is_plain_identifier(name) && aliases.contains(value) {
+                changed |= aliases.insert(name.to_string());
+            }
+        }
+        if !changed {
+            return aliases;
+        }
+    }
+}
+
+fn is_plain_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(is_lua_identifier_byte)
+}
+
 fn host_helper(name: &str) -> Option<&'static str> {
     Some(match name {
         "div" => "div",
@@ -515,6 +678,13 @@ fn host_helper(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hook_sites(output: &str) -> Vec<&str> {
+        output
+            .match_indices("__gpuix_hook_site:")
+            .map(|(index, marker)| &output[index + marker.len()..index + marker.len() + 16])
+            .collect()
+    }
 
     #[test]
     fn transforms_host_elements_attributes_and_text() {
@@ -552,11 +722,84 @@ mod tests {
     fn leaves_lua_strings_comments_and_comparisons_untouched() {
         let source = r#"
             local markup = "<div>not syntax</div>"
+            local hook = "gpuix.use_state(0)"
             -- <div>also not syntax</div>
+            -- gpuix.use_state(0)
             if left < right then return markup end
             if left<right then return markup end
             local compact = left<right and left or right
         "#;
+        assert_eq!(transform(source).unwrap(), source);
+    }
+
+    #[test]
+    fn adds_hook_sites_for_gpuix_aliases_and_stores() {
+        let output = transform(
+            r#"
+                local ui = gpuix
+                return function()
+                    local count = ui.use_state(0)
+                    local selected = store.use_state(function(state) return state.count end)
+                    ui.use_effect(function() end, {})
+                end
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(hook_sites(&output).len(), 3);
+    }
+
+    #[test]
+    fn hook_sites_survive_line_and_initializer_edits() {
+        let before = transform(
+            r#"
+                local ui = gpuix
+                return function()
+                    local count, set_count = ui.use_state(0)
+                end
+            "#,
+        )
+        .unwrap();
+        let after = transform(
+            r#"
+                local ui = gpuix
+
+                return function()
+
+                    local count, set_count = ui.use_state(100)
+                end
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(hook_sites(&before), hook_sites(&after));
+    }
+
+    #[test]
+    fn same_type_hook_reordering_changes_signature_order() {
+        let before = transform(
+            r#"
+                local first = gpuix.use_state(0)
+                local second = gpuix.use_state(0)
+            "#,
+        )
+        .unwrap();
+        let after = transform(
+            r#"
+                local second = gpuix.use_state(0)
+                local first = gpuix.use_state(0)
+            "#,
+        )
+        .unwrap();
+        let before = hook_sites(&before);
+        let after = hook_sites(&after);
+
+        assert_eq!(before, [after[1], after[0]]);
+    }
+
+    #[test]
+    fn leaves_hook_function_definitions_untouched() {
+        let source = "function store.use_state(selector) return selector end";
         assert_eq!(transform(source).unwrap(), source);
     }
 

@@ -129,6 +129,8 @@ local RadioGroup = require("gpuix.radio_group")
 local Select = require("gpuix.select")
 local Combobox = require("gpuix.combobox")
 local Tooltip = require("gpuix.tooltip")
+local Drawer = require("gpuix.drawer")
+local DockLayout = require("gpuix.dock_layout")
 ```
 
 Each control accepts controlled value props and matching change callbacks, or
@@ -142,6 +144,19 @@ entirely in Rust. Set `tabIndex = -1` to keep click focus while
 removing a control from sequential keyboard navigation. The bundled controls
 use native `focusVisible` styles, so keyboard focus paints without a Lua state
 update or event round trip.
+
+`gpuix.drawer` mirrors Zed's layout dock rather than a modal overlay. It docks
+left, right, or bottom, can own or receive its open and size state, and uses
+GPUIX pointer capture for resizing outside the handle. Its focusable handle
+also supports directional arrow resizing, Home reset, and double-click reset.
+`gpuix.dock_layout` composes stable drawer shells with a bottom status bar.
+Clicking a panel button toggles its edge; right-clicking opens an anchored menu
+for moving it left, right, or bottom. One panel is visible per edge, and hidden
+panel trees remain mounted with GPUI `visibility: hidden`, preserving local hook
+state and `gpuix.memo` entries. The worked workspace app uses this full dock for
+its activity panel. See `packages/lua/README.md` for all layout and panel props.
+The example's dock button also demonstrates importing raw Phosphor SVG source
+from a normal Lua module and tinting it with the native `<svg>` element.
 
 Images use the same native element and props as React:
 
@@ -209,6 +224,20 @@ reported after commit and do not roll back an already-visible host tree.
 Live reload preserves state and refs, but deliberately refreshes memo,
 callback, and effect closures even when their dependency arrays are unchanged.
 This prevents closures from continuing to execute the previous module version.
+
+LuaX assigns every hook call a compiler-generated site fingerprint. Assigned
+hooks are anchored to their left-hand binding, so adding unrelated lines or
+changing `use_state(0)` to `use_state(100)` keeps the existing state value on
+reload. The runtime compares that site together with the hook kind and, for
+state, reducer, and ref hooks, the initializer's Lua type. This also makes a
+reorder of two same-kind, same-type assigned hooks an explicit hook-order
+error instead of silently exchanging their values. Calls whose result is not
+assigned use the normalized call expression as their fingerprint, so editing
+that expression can reset the affected component during live reload.
+
+Handwritten `.lua` files have no compiler metadata and retain positional hook
+identity. They still detect hook-count, hook-kind, and differently typed
+state-like changes, but cannot distinguish two same-kind, same-type hooks.
 
 ## Redux-style stores
 
@@ -425,14 +454,15 @@ handwritten Lua and 2.03 ms for LuaX on Lua 5.4.
 - Hook state belongs to a component instance. Instances are identified by their
   parent component plus an explicit `key`, or by component sibling position
   when no key exists. Hooks are then ordered only within that component.
-- Every hook slot records the hook kind. State, reducer, and ref hooks also
-  record the initializer's Lua type. Changing a component's hook count,
-  swapping hook kinds, or swapping differently typed state-like hooks is
-  rejected during a normal render. Live reload resets only the affected
-  component and preserves state elsewhere. The initializer value itself is not
-  identity, so changing `use_state(0)` to `use_state(1)` preserves state.
-- Swapping two same-kind, same-type hooks is still ambiguous. Detecting that
-  requires compiler-generated call-site IDs.
+- Every hook slot records the hook kind, and state, reducer, and ref hooks also
+  record the initializer's Lua type. LuaX additionally records a compiler site
+  fingerprint, so it detects same-kind, same-type hook reorders. Changing a
+  component's hook signature is rejected during a normal render; live reload
+  resets only the affected component and preserves state elsewhere.
+- Hook identity never includes the initializer value. LuaX anchors assigned
+  hooks to their binding, so changing `use_state(0)` to `use_state(1)` keeps
+  the current value. Handwritten Lua remains positional and same-kind,
+  same-type swaps are therefore still ambiguous there.
 - Lua execution is desktop-only; the browser/WASM renderer has no embedded Lua.
 - The napi renderer still relays events through Node by design; `gpuix-lua`
   bypasses the Node renderer entirely.
