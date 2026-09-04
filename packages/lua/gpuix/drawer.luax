@@ -1,0 +1,209 @@
+local util = require("gpuix._util")
+
+local panel_defaults = {
+    display = "flex",
+    position = "relative",
+    flexShrink = 0,
+    overflow = "hidden",
+    background = "#18181b",
+    borderColor = "#3f3f46",
+}
+
+local content_defaults = {
+    width = "100%",
+    height = "100%",
+    minWidth = 0,
+    minHeight = 0,
+    display = "flex",
+    flexDirection = "column",
+    overflow = "hidden",
+}
+
+local handle_defaults = {
+    position = "absolute",
+    background = "transparent",
+    hover = { background = "#60a5fa66" },
+    active = { background = "#60a5fa" },
+    focusVisible = util.focus_ring,
+}
+
+local function resolved(style, state)
+    if type(style) == "function" then return style(state) end
+    return style
+end
+
+local function merged(base, override)
+    local result = {}
+    for key, value in pairs(base) do result[key] = value end
+    if override ~= nil then
+        for key, value in pairs(override) do result[key] = value end
+    end
+    return result
+end
+
+local function default_size(side)
+    if side == "bottom" then return 240 end
+    return 320
+end
+
+return function(props)
+    local side = props.side or "right"
+    if side ~= "left" and side ~= "right" and side ~= "bottom" then
+        error("gpuix.drawer side must be left, right, or bottom")
+    end
+
+    local initial_size = props.defaultSize or default_size(side)
+    local internal_open, set_internal_open = gpuix.use_state(props.defaultOpen ~= false)
+    local internal_size, set_internal_size = gpuix.use_state(initial_size)
+    local drag_position = gpuix.use_ref(nil)
+    local controlled_open = props.open ~= nil
+    local controlled_size = props.size ~= nil
+    local open = internal_open
+    local minimum = props.minSize or 160
+    local maximum = props.maxSize or 720
+    local size = internal_size
+    if controlled_open then open = props.open end
+    if controlled_size then size = props.size end
+
+    local function clamp(next_size)
+        next_size = tonumber(next_size) or initial_size
+        return math.max(minimum, math.min(maximum, next_size))
+    end
+
+    size = clamp(size)
+
+    local function set_open(next_open)
+        if next_open == open then return end
+        if not controlled_open then set_internal_open(next_open) end
+        util.call(props.onOpenChange, next_open)
+    end
+
+    local function set_size(next_size)
+        next_size = clamp(next_size)
+        if next_size == size then return end
+        if not controlled_size then set_internal_size(next_size) end
+        util.call(props.onSizeChange, next_size)
+    end
+
+    local function coordinate(event)
+        if side == "bottom" then return event.y end
+        return event.x
+    end
+
+    local function resize_delta(delta)
+        if side == "right" or side == "bottom" then delta = -delta end
+        set_size(size + delta)
+    end
+
+    local function on_mouse_down(event)
+        if event.button ~= 0 then return end
+        drag_position.current = coordinate(event)
+        util.call(props.onResizeStart, size)
+    end
+
+    local function on_mouse_move(event)
+        if event.pressedButton ~= 0 or drag_position.current == nil then return end
+        local next_position = coordinate(event)
+        if next_position == nil then return end
+        local delta = next_position - drag_position.current
+        drag_position.current = next_position
+        resize_delta(delta)
+    end
+
+    local function on_mouse_up(event)
+        if drag_position.current == nil then return end
+        drag_position.current = nil
+        local final_size = size
+        if event.clickCount == 2 then
+            final_size = clamp(initial_size)
+            set_size(final_size)
+        end
+        util.call(props.onResizeEnd, final_size)
+    end
+
+    local function on_key_down(event)
+        local step = event.modifiers and event.modifiers.shift and 32 or 8
+        if event.key == "home" then
+            set_size(initial_size)
+        elseif side == "left" and event.key == "right" then
+            set_size(size + step)
+        elseif side == "left" and event.key == "left" then
+            set_size(size - step)
+        elseif side == "right" and event.key == "left" then
+            set_size(size + step)
+        elseif side == "right" and event.key == "right" then
+            set_size(size - step)
+        elseif side == "bottom" and event.key == "up" then
+            set_size(size + step)
+        elseif side == "bottom" and event.key == "down" then
+            set_size(size - step)
+        end
+    end
+
+    local state = {
+        open = open,
+        side = side,
+        size = size,
+        close = function() set_open(false) end,
+        setOpen = set_open,
+        setSize = set_size,
+    }
+
+    if not open then
+        if props.renderTrigger ~= nil then return props.renderTrigger(state) end
+        return nil
+    end
+
+    local panel_style = merged(panel_defaults, resolved(props.style, state))
+    local content_style = merged(content_defaults, resolved(props.contentStyle, state))
+    local handle_style = merged(handle_defaults, resolved(props.resizeHandleStyle, state))
+
+    if side == "bottom" then
+        if panel_style.left ~= nil or panel_style.right ~= nil then
+            panel_style.width = nil
+        else
+            panel_style.width = "100%"
+        end
+        panel_style.height = size
+        panel_style.borderTopWidth = panel_style.borderTopWidth or 1
+        handle_style.left = 0
+        handle_style.top = 0
+        handle_style.width = "100%"
+        handle_style.height = props.resizeHandleSize or 6
+        handle_style.cursor = "row-resize"
+    else
+        panel_style.width = size
+        panel_style.height = "100%"
+        if side == "left" then
+            panel_style.borderRightWidth = panel_style.borderRightWidth or 1
+            handle_style.right = 0
+        else
+            panel_style.borderLeftWidth = panel_style.borderLeftWidth or 1
+            handle_style.left = 0
+        end
+        handle_style.top = 0
+        handle_style.width = props.resizeHandleSize or 6
+        handle_style.height = "100%"
+        handle_style.cursor = "col-resize"
+    end
+
+    local body = props
+    if props.renderContent ~= nil then body = props.renderContent(state) end
+    local resize_handle
+    if props.resizable ~= false then
+        resize_handle = <div
+            testId={util.test_id(props.testId, "-resize-handle")}
+            tabIndex={props.resizeTabIndex or 0}
+            onMouseDown={on_mouse_down}
+            onMouseMove={on_mouse_move}
+            onMouseUp={on_mouse_up}
+            onKeyDown={on_key_down}
+            style={handle_style}
+        />
+    end
+
+    return <div testId={props.testId} style={panel_style}>
+        <div style={content_style}>{body}</div>
+        {resize_handle}
+    </div>
+end

@@ -310,6 +310,36 @@ mod tests {
                 && element.test_id.as_deref() != Some("conversation-list")
                 && element.custom_props.contains_key("tabIndex")
         }));
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.test_id.as_deref() == Some("luax-workspace-panel-activity")));
+        assert!(tree.elements.values().any(|element| {
+            element.test_id.as_deref() == Some("activity-dock-icon")
+                && element.element_type == "svg"
+        }));
+        dispatch_test_id(
+            &mut runtime,
+            &mut tree,
+            "luax-workspace-button-activity",
+            "click",
+            None,
+        );
+        assert!(!tree
+            .elements
+            .values()
+            .any(|element| element.test_id.as_deref() == Some("luax-workspace-panel-activity")));
+        dispatch_test_id(
+            &mut runtime,
+            &mut tree,
+            "luax-workspace-button-activity",
+            "click",
+            None,
+        );
+        assert!(tree
+            .elements
+            .values()
+            .any(|element| element.test_id.as_deref() == Some("luax-workspace-panel-activity")));
 
         dispatch_key_test_id(&mut runtime, &mut tree, "conversation-list", "down");
         assert_eq!(content_count(&tree, "Binary protocol"), 2);

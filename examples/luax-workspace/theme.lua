@@ -25,6 +25,31 @@ local focus_visible = {
 }
 
 local styles = {
+    dock_root = ui.style {
+        width = "100%",
+        height = "100%",
+        minWidth = 0,
+        minHeight = 0,
+        display = "flex",
+        flexDirection = "column",
+        position = "relative",
+        background = colors.canvas,
+        color = colors.text,
+    },
+    status_bar = ui.style {
+        width = "100%",
+        height = 28,
+        flexShrink = 0,
+        display = "flex",
+        flexDirection = "row",
+        alignItems = "center",
+        paddingLeft = 4,
+        paddingRight = 4,
+        gap = 3,
+        borderTopWidth = 1,
+        borderColor = colors.border,
+        background = colors.sidebar,
+    },
     root = ui.style {
         width = "100%",
         height = "100%",
@@ -89,15 +114,14 @@ local styles = {
         overflow = "scroll",
     },
     activity = ui.style {
-        width = 340,
+        width = "100%",
+        height = "100%",
         flexShrink = 0,
         display = "flex",
         flexDirection = "column",
         minHeight = 0,
         padding = 14,
         gap = 8,
-        borderLeftWidth = 1,
-        borderColor = colors.border,
         background = colors.sidebar,
     },
     card = ui.style {

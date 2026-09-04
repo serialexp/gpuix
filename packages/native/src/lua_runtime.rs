@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use mlua::{Function, Lua, LuaSerdeExt, RegistryKey, Table, UserData, Value};
+use mlua::{
+    FromLuaMulti, Function, Lua, LuaSerdeExt, MultiValue, RegistryKey, Table, UserData, Value,
+};
 
 use crate::element_tree::EventPayload;
 use crate::retained_tree::RetainedTree;
@@ -19,6 +21,8 @@ const ELEMENT_HELPERS: &[(&str, &str)] = &[
     ("anchored", "anchored"),
     ("virtual_list", "virtual-list"),
 ];
+
+const HOOK_SITE_PREFIX: &str = "__gpuix_hook_site:";
 
 const BUILTIN_LUA_MODULES: &[(&str, &str, bool)] = &[
     (
@@ -49,6 +53,16 @@ const BUILTIN_LUA_MODULES: &[(&str, &str, bool)] = &[
     (
         "gpuix.combobox",
         include_str!("../../lua/gpuix/combobox.luax"),
+        true,
+    ),
+    (
+        "gpuix.drawer",
+        include_str!("../../lua/gpuix/drawer.luax"),
+        true,
+    ),
+    (
+        "gpuix.dock_layout",
+        include_str!("../../lua/gpuix/dock_layout.luax"),
         true,
     ),
     (
@@ -128,6 +142,31 @@ enum HookValueType {
 struct HookSignature {
     kind: HookKind,
     value_type: Option<HookValueType>,
+    site: Option<u64>,
+}
+
+struct HookArguments<T>(T, Option<u64>);
+
+type StateHookArguments = HookArguments<Value>;
+type ReducerHookArguments = HookArguments<(Function, Value)>;
+type DependencyHookArguments = HookArguments<(Function, Option<Table>)>;
+type StoreHookArguments = HookArguments<(Option<Function>, Option<Function>)>;
+
+impl<T: FromLuaMulti> FromLuaMulti for HookArguments<T> {
+    fn from_lua_multi(mut arguments: MultiValue, lua: &Lua) -> mlua::Result<Self> {
+        let site = arguments.back().and_then(|value| match value {
+            Value::String(value) => value.to_str().ok().and_then(|value| {
+                value
+                    .strip_prefix(HOOK_SITE_PREFIX)
+                    .and_then(|value| u64::from_str_radix(value, 16).ok())
+            }),
+            _ => None,
+        });
+        if site.is_some() {
+            arguments.pop_back();
+        }
+        Ok(Self(T::from_lua_multi(arguments, lua)?, site))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1517,23 +1556,29 @@ fn hook_signature_label(signature: HookSignature) -> String {
         HookKind::Effect => "use_effect",
         HookKind::Store => "store.use_state",
     };
-    let Some(value_type) = signature.value_type else {
-        return kind.to_string();
+    let mut label = match signature.value_type {
+        Some(value_type) => {
+            let value_type = match value_type {
+                HookValueType::Nil => "nil",
+                HookValueType::Boolean => "boolean",
+                HookValueType::Number => "number",
+                HookValueType::String => "string",
+                HookValueType::Table => "table",
+                HookValueType::Function => "function",
+                HookValueType::Thread => "thread",
+                HookValueType::UserData => "userdata",
+                HookValueType::LightUserData => "lightuserdata",
+                HookValueType::Error => "error",
+                HookValueType::Other => "other",
+            };
+            format!("{kind}({value_type})")
+        }
+        None => kind.to_string(),
     };
-    let value_type = match value_type {
-        HookValueType::Nil => "nil",
-        HookValueType::Boolean => "boolean",
-        HookValueType::Number => "number",
-        HookValueType::String => "string",
-        HookValueType::Table => "table",
-        HookValueType::Function => "function",
-        HookValueType::Thread => "thread",
-        HookValueType::UserData => "userdata",
-        HookValueType::LightUserData => "lightuserdata",
-        HookValueType::Error => "error",
-        HookValueType::Other => "other",
-    };
-    format!("{kind}({value_type})")
+    if let Some(site) = signature.site {
+        label.push_str(&format!(" at LuaX site {site:016x}"));
+    }
+    label
 }
 
 fn hook_value_type(value: &Value) -> HookValueType {
@@ -1844,57 +1889,57 @@ fn create_store_table(
     let hook_hooks = hooks;
     store.set(
         "use_state",
-        lua.create_function(
-            move |lua, (selector, equality): (Option<Function>, Option<Function>)| {
-                let state = hook_stores
+        lua.create_function(move |lua, arguments: StoreHookArguments| {
+            let HookArguments((selector, equality), site) = arguments;
+            let state = hook_stores
+                .lock()
+                .unwrap()
+                .entries
+                .get(&hook_name)
+                .map(|store| store.state.clone())
+                .ok_or_else(|| {
+                    mlua::Error::runtime(format!("store {hook_name:?} no longer exists"))
+                })?;
+            let state = lua.registry_value::<Value>(state.as_ref())?;
+            let selector = selector
+                .map(|selector| lua.create_registry_value(selector).map(Arc::new))
+                .transpose()?;
+            let equality = equality
+                .map(|equality| lua.create_registry_value(equality).map(Arc::new))
+                .transpose()?;
+            let selected = select_store_value(lua, &selector, state)?;
+            let signature = HookSignature {
+                kind: HookKind::Store,
+                value_type: None,
+                site,
+            };
+            let (id, existing) = hook_hooks
+                .lock()
+                .unwrap()
+                .next_hook(signature)
+                .map_err(mlua::Error::runtime)?;
+            if existing.is_some() && !matches!(&existing, Some(HookSlot::Store { .. })) {
+                return Err(mlua::Error::runtime(
+                    "store.use_state found an incompatible hook slot",
+                ));
+            }
+            let slot = HookSlot::Store {
+                store: hook_name.clone(),
+                selector,
+                equality,
+                selected: Arc::new(lua.create_registry_value(selected.clone())?),
+            };
+            if existing.is_some() {
+                hook_hooks
                     .lock()
                     .unwrap()
-                    .entries
-                    .get(&hook_name)
-                    .map(|store| store.state.clone())
-                    .ok_or_else(|| {
-                        mlua::Error::runtime(format!("store {hook_name:?} no longer exists"))
-                    })?;
-                let state = lua.registry_value::<Value>(state.as_ref())?;
-                let selector = selector
-                    .map(|selector| lua.create_registry_value(selector).map(Arc::new))
-                    .transpose()?;
-                let equality = equality
-                    .map(|equality| lua.create_registry_value(equality).map(Arc::new))
-                    .transpose()?;
-                let selected = select_store_value(lua, &selector, state)?;
-                let signature = HookSignature {
-                    kind: HookKind::Store,
-                    value_type: None,
-                };
-                let (id, existing) = hook_hooks
-                    .lock()
-                    .unwrap()
-                    .next_hook(signature)
+                    .replace_slot(&id, slot)
                     .map_err(mlua::Error::runtime)?;
-                if existing.is_some() && !matches!(&existing, Some(HookSlot::Store { .. })) {
-                    return Err(mlua::Error::runtime(
-                        "store.use_state found an incompatible hook slot",
-                    ));
-                }
-                let slot = HookSlot::Store {
-                    store: hook_name.clone(),
-                    selector,
-                    equality,
-                    selected: Arc::new(lua.create_registry_value(selected.clone())?),
-                };
-                if existing.is_some() {
-                    hook_hooks
-                        .lock()
-                        .unwrap()
-                        .replace_slot(&id, slot)
-                        .map_err(mlua::Error::runtime)?;
-                } else {
-                    hook_hooks.lock().unwrap().push_slot(&id, slot);
-                }
-                Ok(selected)
-            },
-        )?,
+            } else {
+                hook_hooks.lock().unwrap().push_slot(&id, slot);
+            }
+            Ok(selected)
+        })?,
     )?;
 
     Ok(store)
@@ -2029,10 +2074,12 @@ fn install_api(
 
     let state_hooks = hooks.clone();
     let state_memo = memo.clone();
-    let use_state = lua.create_function(move |lua, initial: Value| {
+    let use_state = lua.create_function(move |lua, arguments: StateHookArguments| {
+        let HookArguments(initial, site) = arguments;
         let signature = HookSignature {
             kind: HookKind::State,
             value_type: Some(hook_value_type(&initial)),
+            site,
         };
         let (id, existing) = state_hooks
             .lock()
@@ -2097,10 +2144,12 @@ fn install_api(
 
     let reducer_hooks = hooks.clone();
     let reducer_memo = memo.clone();
-    let use_reducer = lua.create_function(move |lua, (reducer, initial): (Function, Value)| {
+    let use_reducer = lua.create_function(move |lua, arguments: ReducerHookArguments| {
+        let HookArguments((reducer, initial), site) = arguments;
         let signature = HookSignature {
             kind: HookKind::Reducer,
             value_type: Some(hook_value_type(&initial)),
+            site,
         };
         let (id, existing) = reducer_hooks
             .lock()
@@ -2178,10 +2227,12 @@ fn install_api(
     api.set("use_reducer", use_reducer)?;
 
     let ref_hooks = hooks.clone();
-    let use_ref = lua.create_function(move |lua, initial: Value| {
+    let use_ref = lua.create_function(move |lua, arguments: StateHookArguments| {
+        let HookArguments(initial, site) = arguments;
         let signature = HookSignature {
             kind: HookKind::Ref,
             value_type: Some(hook_value_type(&initial)),
+            site,
         };
         let (id, existing) = ref_hooks
             .lock()
@@ -2211,135 +2262,135 @@ fn install_api(
     api.set("use_ref", use_ref)?;
 
     let memo_hooks = hooks.clone();
-    let use_memo = lua.create_function(
-        move |lua, (factory, dependencies): (Function, Option<Table>)| {
-            let dependencies = hook_dependencies(lua, dependencies)?;
-            let signature = HookSignature {
-                kind: HookKind::Memo,
-                value_type: None,
-            };
-            let (id, existing) = memo_hooks
+    let use_memo = lua.create_function(move |lua, arguments: DependencyHookArguments| {
+        let HookArguments((factory, dependencies), site) = arguments;
+        let dependencies = hook_dependencies(lua, dependencies)?;
+        let signature = HookSignature {
+            kind: HookKind::Memo,
+            value_type: None,
+            site,
+        };
+        let (id, existing) = memo_hooks
+            .lock()
+            .unwrap()
+            .next_hook(signature)
+            .map_err(mlua::Error::runtime)?;
+        let refreshing = memo_hooks.lock().unwrap().refreshing();
+        if let Some(HookSlot::Memo {
+            value,
+            dependencies: previous,
+        }) = existing
+        {
+            if !refreshing && hook_dependencies_equal(lua, &previous, &dependencies)? {
+                return lua.registry_value::<Value>(value.as_ref());
+            }
+        }
+        let value = factory.call::<Value>(())?;
+        let slot = Arc::new(lua.create_registry_value(value.clone())?);
+        let next = HookSlot::Memo {
+            value: slot,
+            dependencies,
+        };
+        if memo_hooks.lock().unwrap().slot(&id).is_some() {
+            memo_hooks
                 .lock()
                 .unwrap()
-                .next_hook(signature)
+                .replace_slot(&id, next)
                 .map_err(mlua::Error::runtime)?;
-            let refreshing = memo_hooks.lock().unwrap().refreshing();
-            if let Some(HookSlot::Memo {
-                value,
-                dependencies: previous,
-            }) = existing
-            {
-                if !refreshing && hook_dependencies_equal(lua, &previous, &dependencies)? {
-                    return lua.registry_value::<Value>(value.as_ref());
-                }
-            }
-            let value = factory.call::<Value>(())?;
-            let slot = Arc::new(lua.create_registry_value(value.clone())?);
-            let next = HookSlot::Memo {
-                value: slot,
-                dependencies,
-            };
-            if memo_hooks.lock().unwrap().slot(&id).is_some() {
-                memo_hooks
-                    .lock()
-                    .unwrap()
-                    .replace_slot(&id, next)
-                    .map_err(mlua::Error::runtime)?;
-            } else {
-                memo_hooks.lock().unwrap().push_slot(&id, next);
-            }
-            Ok(value)
-        },
-    )?;
+        } else {
+            memo_hooks.lock().unwrap().push_slot(&id, next);
+        }
+        Ok(value)
+    })?;
     api.set("use_memo", use_memo)?;
 
     let callback_hooks = hooks.clone();
-    let use_callback = lua.create_function(
-        move |lua, (callback, dependencies): (Function, Option<Table>)| {
-            let dependencies = hook_dependencies(lua, dependencies)?;
-            let signature = HookSignature {
-                kind: HookKind::Callback,
-                value_type: None,
-            };
-            let (id, existing) = callback_hooks
+    let use_callback = lua.create_function(move |lua, arguments: DependencyHookArguments| {
+        let HookArguments((callback, dependencies), site) = arguments;
+        let dependencies = hook_dependencies(lua, dependencies)?;
+        let signature = HookSignature {
+            kind: HookKind::Callback,
+            value_type: None,
+            site,
+        };
+        let (id, existing) = callback_hooks
+            .lock()
+            .unwrap()
+            .next_hook(signature)
+            .map_err(mlua::Error::runtime)?;
+        let refreshing = callback_hooks.lock().unwrap().refreshing();
+        if let Some(HookSlot::Memo {
+            value,
+            dependencies: previous,
+        }) = existing
+        {
+            if !refreshing && hook_dependencies_equal(lua, &previous, &dependencies)? {
+                return lua.registry_value::<Function>(value.as_ref());
+            }
+        }
+        let value = Arc::new(lua.create_registry_value(callback.clone())?);
+        let next = HookSlot::Memo {
+            value,
+            dependencies,
+        };
+        if callback_hooks.lock().unwrap().slot(&id).is_some() {
+            callback_hooks
                 .lock()
                 .unwrap()
-                .next_hook(signature)
+                .replace_slot(&id, next)
                 .map_err(mlua::Error::runtime)?;
-            let refreshing = callback_hooks.lock().unwrap().refreshing();
-            if let Some(HookSlot::Memo {
-                value,
-                dependencies: previous,
-            }) = existing
-            {
-                if !refreshing && hook_dependencies_equal(lua, &previous, &dependencies)? {
-                    return lua.registry_value::<Function>(value.as_ref());
-                }
-            }
-            let value = Arc::new(lua.create_registry_value(callback.clone())?);
-            let next = HookSlot::Memo {
-                value,
-                dependencies,
-            };
-            if callback_hooks.lock().unwrap().slot(&id).is_some() {
-                callback_hooks
-                    .lock()
-                    .unwrap()
-                    .replace_slot(&id, next)
-                    .map_err(mlua::Error::runtime)?;
-            } else {
-                callback_hooks.lock().unwrap().push_slot(&id, next);
-            }
-            Ok(callback)
-        },
-    )?;
+        } else {
+            callback_hooks.lock().unwrap().push_slot(&id, next);
+        }
+        Ok(callback)
+    })?;
     api.set("use_callback", use_callback)?;
 
     let effect_hooks = hooks.clone();
-    let use_effect = lua.create_function(
-        move |lua, (callback, dependencies): (Function, Option<Table>)| {
-            let dependencies = hook_dependencies(lua, dependencies)?;
-            let signature = HookSignature {
-                kind: HookKind::Effect,
-                value_type: None,
-            };
-            let (id, existing) = effect_hooks
-                .lock()
-                .unwrap()
-                .next_hook(signature)
-                .map_err(mlua::Error::runtime)?;
-            let refreshing = effect_hooks.lock().unwrap().refreshing();
-            let changed = match &existing {
-                Some(HookSlot::Effect {
-                    dependencies: previous,
-                    ..
-                }) => refreshing || !hook_dependencies_equal(lua, previous, &dependencies)?,
-                Some(_) => {
-                    return Err(mlua::Error::runtime(
-                        "gpuix.use_effect found an incompatible hook slot",
-                    ));
-                }
-                None => true,
-            };
-            if existing.is_none() {
-                effect_hooks.lock().unwrap().push_slot(
-                    &id,
-                    HookSlot::Effect {
-                        dependencies: None,
-                        cleanup: None,
-                    },
-                );
+    let use_effect = lua.create_function(move |lua, arguments: DependencyHookArguments| {
+        let HookArguments((callback, dependencies), site) = arguments;
+        let dependencies = hook_dependencies(lua, dependencies)?;
+        let signature = HookSignature {
+            kind: HookKind::Effect,
+            value_type: None,
+            site,
+        };
+        let (id, existing) = effect_hooks
+            .lock()
+            .unwrap()
+            .next_hook(signature)
+            .map_err(mlua::Error::runtime)?;
+        let refreshing = effect_hooks.lock().unwrap().refreshing();
+        let changed = match &existing {
+            Some(HookSlot::Effect {
+                dependencies: previous,
+                ..
+            }) => refreshing || !hook_dependencies_equal(lua, previous, &dependencies)?,
+            Some(_) => {
+                return Err(mlua::Error::runtime(
+                    "gpuix.use_effect found an incompatible hook slot",
+                ));
             }
-            if changed {
-                effect_hooks.lock().unwrap().queue_effect(
-                    id,
-                    Arc::new(lua.create_registry_value(callback)?),
-                    dependencies,
-                );
-            }
-            Ok(())
-        },
-    )?;
+            None => true,
+        };
+        if existing.is_none() {
+            effect_hooks.lock().unwrap().push_slot(
+                &id,
+                HookSlot::Effect {
+                    dependencies: None,
+                    cleanup: None,
+                },
+            );
+        }
+        if changed {
+            effect_hooks.lock().unwrap().queue_effect(
+                id,
+                Arc::new(lua.create_registry_value(callback)?),
+                dependencies,
+            );
+        }
+        Ok(())
+    })?;
     api.set("use_effect", use_effect)?;
 
     let memo_arena = arena.clone();
@@ -3859,6 +3910,45 @@ mod tests {
     }
 
     #[test]
+    fn luax_reload_preserves_hook_values_across_initializer_and_line_edits() {
+        let app = TempLuaApp::new();
+        let entry = app.write(
+            "main.luax",
+            r#"
+                local ui = gpuix
+                return function()
+                    local count, set_count = ui.use_state(0)
+                    return <div testId="increment" onClick={function() set_count(count + 1) end}>
+                        <text>{"Count: " .. count}</text>
+                    </div>
+                end
+            "#,
+        );
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_file(&entry, &mut tree).unwrap();
+        dispatch_by_test_id(&mut runtime, &mut tree, "increment").unwrap();
+
+        app.write(
+            "main.luax",
+            r#"
+                local ui = gpuix
+
+                return function()
+
+                    local count, set_count = ui.use_state(100)
+                    return <div testId="increment" onClick={function() set_count(count + 1) end}>
+                        <text>{"Updated: " .. count}</text>
+                    </div>
+                end
+            "#,
+        );
+        let outcome = runtime.reload_file(&entry, &mut tree).unwrap();
+
+        assert_eq!(outcome, ReloadOutcome::PreservedState);
+        assert!(has_text(&tree, "Updated: 1"));
+    }
+
+    #[test]
     fn failed_reload_keeps_the_previous_render_function() {
         let app = TempLuaApp::new();
         let entry = app.write(
@@ -3959,6 +4049,28 @@ mod tests {
             .elements
             .values()
             .any(|element| element.content.as_deref() == Some("Count: 1")));
+    }
+
+    #[test]
+    fn luax_store_hooks_accept_compiler_sites() {
+        let mut tree = RetainedTree::new();
+        LuaRuntime::load_luax(
+            r#"
+                local store = gpuix.create_store(
+                    "counter",
+                    function(state) return state end,
+                    { count = 7 }
+                )
+                return function()
+                    local count = store.use_state(function(state) return state.count end)
+                    return <text>{"Count: " .. count}</text>
+                end
+            "#,
+            &mut tree,
+        )
+        .unwrap();
+
+        assert!(has_text(&tree, "Count: 7"));
     }
 
     #[test]
@@ -4078,6 +4190,41 @@ mod tests {
         assert!(error.contains("use_state(number)"));
         assert!(error.contains("use_state(string)"));
         assert!(has_text(&tree, "0:name"));
+    }
+
+    #[test]
+    fn luax_rejects_swapping_same_type_hooks() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(
+            r#"
+                local ui = gpuix
+                return function()
+                    local reversed, set_reversed = ui.use_state(false)
+                    local first, second
+                    if reversed then
+                        second = ui.use_state(0)
+                        first = ui.use_state(0)
+                    else
+                        first = ui.use_state(0)
+                        second = ui.use_state(0)
+                    end
+                    return <div
+                        testId="reverse"
+                        onClick={function() set_reversed(not reversed) end}
+                    >
+                        <text>{first .. ":" .. second}</text>
+                    </div>
+                end
+            "#,
+            &mut tree,
+        )
+        .unwrap();
+
+        let error = dispatch_by_test_id(&mut runtime, &mut tree, "reverse").unwrap_err();
+
+        assert!(error.contains("Lua hook order changed:"));
+        assert!(error.contains("LuaX site"));
+        assert!(has_text(&tree, "0:0"));
     }
 
     #[test]
@@ -4722,6 +4869,164 @@ mod tests {
     }
 
     #[test]
+    fn bundled_drawer_resizes_with_pointer_and_keyboard() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(
+            r#"
+                local Drawer = require("gpuix.drawer")
+                return function()
+                    return <div style={{ width = 800, height = 600 }}>
+                        <Drawer
+                            testId="drawer"
+                            side="left"
+                            defaultSize={200}
+                            minSize={120}
+                            maxSize={300}
+                            renderContent={function(state)
+                                return <text>{string.format("Size: %.0f", state.size)}</text>
+                            end}
+                        />
+                    </div>
+                end
+            "#,
+            &mut tree,
+        )
+        .unwrap();
+
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "drawer-resize-handle",
+            EventPayload {
+                event_type: "mouseDown".to_string(),
+                x: Some(200.0),
+                button: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "drawer-resize-handle",
+            EventPayload {
+                event_type: "mouseMove".to_string(),
+                x: Some(260.0),
+                pressed_button: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(has_text(&tree, "Size: 260"));
+
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "drawer-resize-handle",
+            EventPayload {
+                event_type: "keyDown".to_string(),
+                key: Some("right".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(has_text(&tree, "Size: 268"));
+
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "drawer-resize-handle",
+            EventPayload {
+                event_type: "mouseMove".to_string(),
+                x: Some(1000.0),
+                pressed_button: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(has_text(&tree, "Size: 300"));
+
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "drawer-resize-handle",
+            EventPayload {
+                event_type: "mouseUp".to_string(),
+                click_count: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(has_text(&tree, "Size: 200"));
+    }
+
+    #[test]
+    fn bundled_dock_layout_toggles_and_moves_panels() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(
+            r#"
+                local DockLayout = require("gpuix.dock_layout")
+                local function ActivityPanel(props)
+                    local visits, set_visits = gpuix.use_state(0)
+                    return <div>
+                        <text>{"Activity " .. props.position}</text>
+                        <div testId="activity-increment" onClick={function()
+                            set_visits(visits + 1)
+                        end}><text>{"Visits " .. visits}</text></div>
+                    </div>
+                end
+                return function()
+                    local panels = {{
+                        id = "activity",
+                        label = "Activity",
+                        position = "right",
+                        defaultOpen = true,
+                        defaultSize = 240,
+                        render = function(state)
+                            return <ActivityPanel key="activity-content" position={state.position} />
+                        end,
+                    }}
+                    return <DockLayout testId="dock" panels={panels}>
+                        <text>Content</text>
+                    </DockLayout>
+                end
+            "#,
+            &mut tree,
+        )
+        .unwrap();
+
+        assert!(has_test_id(&tree, "dock-panel-activity"));
+        assert!(has_test_id(&tree, "dock-button-activity"));
+        assert!(has_text(&tree, "Activity right"));
+
+        dispatch_by_test_id(&mut runtime, &mut tree, "activity-increment").unwrap();
+        assert!(has_text(&tree, "Visits 1"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "dock-button-activity").unwrap();
+        assert!(!has_test_id(&tree, "dock-panel-activity"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "dock-button-activity").unwrap();
+        assert!(has_text(&tree, "Visits 1"));
+
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "dock-button-activity",
+            EventPayload {
+                event_type: "auxClick".to_string(),
+                x: Some(700.0),
+                y: Some(500.0),
+                is_right_click: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(has_test_id(&tree, "dock-button-menu"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "dock-button-activity-dock-left").unwrap();
+        assert!(has_text(&tree, "Activity left"));
+        assert!(has_text(&tree, "Visits 1"));
+        assert!(!has_test_id(&tree, "dock-button-menu"));
+    }
+
+    #[test]
     fn primitive_children_require_an_explicit_text_constructor() {
         let mut tree = RetainedTree::new();
         let error = LuaRuntime::load(
@@ -4744,25 +5049,41 @@ mod tests {
         tree: &mut RetainedTree,
         test_id: &str,
     ) -> Result<bool, String> {
-        let element_id = tree
+        dispatch_event_by_test_id(
+            runtime,
+            tree,
+            test_id,
+            EventPayload {
+                event_type: "click".to_string(),
+                ..Default::default()
+            },
+        )
+    }
+
+    fn dispatch_event_by_test_id(
+        runtime: &mut LuaRuntime,
+        tree: &mut RetainedTree,
+        test_id: &str,
+        mut payload: EventPayload,
+    ) -> Result<bool, String> {
+        payload.element_id = tree
             .elements
             .values()
             .find(|element| element.test_id.as_deref() == Some(test_id))
             .unwrap()
-            .id;
-        runtime.dispatch_event(
-            EventPayload {
-                element_id: element_id as f64,
-                event_type: "click".to_string(),
-                ..Default::default()
-            },
-            tree,
-        )
+            .id as f64;
+        runtime.dispatch_event(payload, tree)
     }
 
     fn has_text(tree: &RetainedTree, content: &str) -> bool {
         tree.elements
             .values()
             .any(|element| element.content.as_deref() == Some(content))
+    }
+
+    fn has_test_id(tree: &RetainedTree, test_id: &str) -> bool {
+        tree.elements
+            .values()
+            .any(|element| element.test_id.as_deref() == Some(test_id))
     }
 }

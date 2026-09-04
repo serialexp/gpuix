@@ -6535,8 +6535,11 @@ pub(crate) fn apply_styles<E: gpui::Styled>(mut el: E, style: &StyleDesc) -> E {
             offset: gpui::px(style.outline_offset.unwrap_or(0.0) as f32),
         });
     }
-    if style.visibility.as_deref() == Some("hidden") {
-        el = el.invisible();
+    // "visible" matters in a state style, to show a base that is hidden.
+    match style.visibility.as_deref() {
+        Some("hidden") => el = el.invisible(),
+        Some("visible") => el = el.visible(),
+        _ => {}
     }
     if let Some(opacity) = style.opacity {
         el = el.opacity(opacity as f32);

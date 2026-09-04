@@ -1,0 +1,476 @@
+local Drawer = require("gpuix.drawer")
+local util = require("gpuix._util")
+
+local root_style = {
+    width = "100%",
+    height = "100%",
+    minWidth = 0,
+    minHeight = 0,
+    display = "flex",
+    flexDirection = "column",
+    position = "relative",
+    background = "#18181b",
+}
+
+local workspace_style = {
+    display = "flex",
+    flexDirection = "row",
+    position = "relative",
+    flexGrow = 1,
+    minWidth = 0,
+    minHeight = 0,
+}
+
+local content_style = {
+    display = "flex",
+    flexDirection = "row",
+    flexGrow = 1,
+    minWidth = 0,
+    minHeight = 0,
+}
+
+local status_bar_style = {
+    width = "100%",
+    height = 28,
+    flexShrink = 0,
+    display = "flex",
+    flexDirection = "row",
+    alignItems = "center",
+    paddingLeft = 4,
+    paddingRight = 4,
+    gap = 3,
+    borderTopWidth = 1,
+    borderColor = "#3f3f46",
+    background = "#18181b",
+}
+
+local button_style = {
+    minWidth = 24,
+    height = 22,
+    display = "flex",
+    flexDirection = "row",
+    alignItems = "center",
+    justifyContent = "center",
+    paddingLeft = 6,
+    paddingRight = 6,
+    borderRadius = 4,
+    hover = { background = "#27272a" },
+    active = { background = "#3f3f46" },
+    focusVisible = util.focus_ring,
+}
+
+local active_button_style = {
+    minWidth = 24,
+    height = 22,
+    display = "flex",
+    flexDirection = "row",
+    alignItems = "center",
+    justifyContent = "center",
+    paddingLeft = 6,
+    paddingRight = 6,
+    borderRadius = 4,
+    background = "#3f3f46",
+    hover = { background = "#52525b" },
+    active = { background = "#52525b" },
+    focusVisible = util.focus_ring,
+}
+
+local menu_style = {
+    width = 150,
+    display = "flex",
+    flexDirection = "column",
+    padding = 5,
+    gap = 2,
+    borderRadius = 7,
+    borderWidth = 1,
+    borderColor = "#52525b",
+    background = "#27272a",
+    focusVisible = util.focus_ring,
+}
+
+local menu_item_style = {
+    width = "100%",
+    display = "flex",
+    flexDirection = "row",
+    alignItems = "center",
+    padding = 7,
+    borderRadius = 4,
+    hover = { background = "#3f3f46" },
+    focusVisible = util.focus_ring,
+}
+
+local function copy(source)
+    local result = {}
+    for key, value in pairs(source) do result[key] = value end
+    return result
+end
+
+local function resolved(style, state)
+    if type(style) == "function" then return style(state) end
+    return style
+end
+
+local function merge(base, override)
+    local result = copy(base)
+    if override ~= nil then
+        for key, value in pairs(override) do result[key] = value end
+    end
+    return result
+end
+
+local function valid_position(position)
+    return position == "left" or position == "right" or position == "bottom"
+end
+
+local function find_panel(panels, id)
+    for _, panel in ipairs(panels) do
+        if panel.id == id then return panel end
+    end
+    return nil
+end
+
+local function initial_active_panels(panels)
+    local active = {}
+    for _, panel in ipairs(panels) do
+        local position = panel.position or "right"
+        if panel.defaultOpen == true and active[position] == nil then
+            active[position] = panel.id
+        end
+    end
+    return active
+end
+
+local function panel_size(panel, sizes, position)
+    local fallback = position == "bottom" and 240 or 320
+    local size = tonumber(sizes[panel.id] or panel.defaultSize) or fallback
+    return math.max(panel.minSize or 160, math.min(panel.maxSize or 720, size))
+end
+
+return function(props)
+    local panels = props.panels or {}
+    local active_panels, set_active_panels = gpuix.use_state(initial_active_panels(panels))
+    local position_overrides, set_position_overrides = gpuix.use_state({})
+    local panel_sizes, set_panel_sizes = gpuix.use_state({})
+    local menu, set_menu = gpuix.use_state(nil)
+
+    local seen = {}
+    for _, panel in ipairs(panels) do
+        if panel.id == nil then error("gpuix.dock_layout panels require an id") end
+        if seen[panel.id] then error("gpuix.dock_layout panel ids must be unique") end
+        seen[panel.id] = true
+    end
+
+    local function position_of(panel)
+        local position = position_overrides[panel.id] or panel.position or "right"
+        if not valid_position(position) then
+            error("gpuix.dock_layout panel position must be left, right, or bottom")
+        end
+        return position
+    end
+
+    local function close_position(position)
+        local id = active_panels[position]
+        if id == nil then return end
+        local next_active = copy(active_panels)
+        next_active[position] = nil
+        set_active_panels(next_active)
+        util.call(props.onPanelToggle, { id = id, open = false, position = position })
+    end
+
+    local function toggle_panel(panel)
+        local position = position_of(panel)
+        local next_active = copy(active_panels)
+        local opening = next_active[position] ~= panel.id
+        next_active[position] = opening and panel.id or nil
+        set_active_panels(next_active)
+        util.call(props.onPanelToggle, {
+            id = panel.id,
+            open = opening,
+            position = position,
+        })
+    end
+
+    local function move_panel(panel, next_position)
+        if not valid_position(next_position) then return end
+        local previous_position = position_of(panel)
+        if previous_position == next_position then
+            set_menu(nil)
+            return
+        end
+
+        local was_open = active_panels[previous_position] == panel.id
+        local next_positions = copy(position_overrides)
+        local next_active = copy(active_panels)
+        next_positions[panel.id] = next_position
+        if was_open then
+            next_active[previous_position] = nil
+            next_active[next_position] = panel.id
+        end
+        set_position_overrides(next_positions)
+        set_active_panels(next_active)
+        set_menu(nil)
+        util.call(props.onPanelPositionChange, {
+            id = panel.id,
+            position = next_position,
+            previousPosition = previous_position,
+        })
+    end
+
+    local function set_panel_size(panel, size)
+        local next_sizes = copy(panel_sizes)
+        next_sizes[panel.id] = size
+        set_panel_sizes(next_sizes)
+        util.call(props.onPanelSizeChange, { id = panel.id, size = size })
+    end
+
+    local rendered_panels = {}
+    for _, panel in ipairs(panels) do
+        local current_panel = panel
+        local position = position_of(current_panel)
+        local state = {
+            id = current_panel.id,
+            open = active_panels[position] == current_panel.id,
+            position = position,
+            size = panel_size(current_panel, panel_sizes, position),
+            close = function() close_position(position) end,
+            toggle = function() toggle_panel(current_panel) end,
+        }
+        if current_panel.render ~= nil then
+            rendered_panels[current_panel.id] = current_panel.render(state)
+        end
+    end
+
+    local function open_menu(panel, event)
+        if event.isRightClick and event.x ~= nil and event.y ~= nil then
+            local active = 1
+            local position = position_of(panel)
+            if position == "right" then active = 2 end
+            if position == "bottom" then active = 3 end
+            set_menu({ id = panel.id, x = event.x, y = event.y, active = active })
+        end
+    end
+
+    local function render_buttons(position)
+        local buttons = {}
+        local start, finish, step = 1, #panels, 1
+        if position == "right" then start, finish, step = #panels, 1, -1 end
+        for index = start, finish, step do
+            local panel = panels[index]
+            if position_of(panel) == position and panel.hideButton ~= true then
+                local current_panel = panel
+                local active = active_panels[position] == panel.id
+                local state = { id = panel.id, active = active, position = position }
+                local content = panel.renderButton and panel.renderButton(state)
+                    or <text style={{
+                        color = active and "#fafafa" or "#a1a1aa",
+                        fontSize = 11,
+                    }}>{panel.buttonLabel or panel.label or tostring(panel.id)}</text>
+                local custom_style = active
+                    and (panel.activeButtonStyle or props.activeButtonStyle)
+                    or (panel.buttonStyle or props.buttonStyle)
+                buttons[#buttons + 1] = <div
+                    key={panel.id}
+                    testId={util.test_id(props.testId, "-button-" .. tostring(panel.id))}
+                    tabIndex={panel.tabIndex or 0}
+                    onClick={function() toggle_panel(current_panel) end}
+                    onAuxClick={function(event) open_menu(current_panel, event) end}
+                    style={util.resolve_style(
+                        custom_style,
+                        state,
+                        active and active_button_style or button_style
+                    )}
+                >
+                    {content}
+                </div>
+            end
+        end
+        if #buttons == 0 then return nil end
+        local group_style = {
+            display = "flex",
+            flexDirection = "row",
+            alignItems = "center",
+            gap = 2,
+        }
+        return <div style={group_style} children={buttons} />
+    end
+
+    local context_menu
+    if menu ~= nil then
+        local panel = find_panel(panels, menu.id)
+        if panel ~= nil then
+            local current_position = position_of(panel)
+            local positions = { "left", "right", "bottom" }
+            local items = {}
+            local function choose(index)
+                move_panel(panel, positions[index])
+            end
+            local function handle_menu_key(event)
+                if event.key == "escape" then
+                    set_menu(nil)
+                elseif event.key == "left" or event.key == "up" then
+                    set_menu({ id = menu.id, x = menu.x, y = menu.y, active = ((menu.active or 1) + 1) % 3 + 1 })
+                elseif event.key == "right" or event.key == "down" then
+                    set_menu({ id = menu.id, x = menu.x, y = menu.y, active = (menu.active or 0) % 3 + 1 })
+                elseif event.key == "enter" or event.key == "space" then
+                    choose(menu.active or 1)
+                end
+            end
+
+            for index, position in ipairs(positions) do
+                local item_index = index
+                local selected = position == current_position
+                local highlighted = index == (menu.active or 1)
+                local state = {
+                    panel = panel,
+                    position = position,
+                    selected = selected,
+                    highlighted = highlighted,
+                }
+                items[index] = <div
+                    key={position}
+                    testId={util.test_id(
+                        props.testId,
+                        "-button-" .. tostring(panel.id) .. "-dock-" .. position
+                    )}
+                    onMouseEnter={function()
+                        set_menu({ id = menu.id, x = menu.x, y = menu.y, active = item_index })
+                    end}
+                    onClick={function() choose(item_index) end}
+                    style={util.resolve_style(props.menuItemStyle, state, menu_item_style)}
+                >
+                    <text style={{ color = "#fafafa", fontSize = 12 }}>
+                        {(selected and "✓  " or "   ") .. "Dock " .. position}
+                    </text>
+                </div>
+            end
+
+            context_menu = <anchored
+                position={{ x = menu.x, y = menu.y }}
+                side="top"
+                align="end"
+                gap={4}
+                fit="snap"
+                snapMargin={8}
+                deferred
+                priority={10}
+            >
+                <div
+                    testId={util.test_id(props.testId, "-button-menu")}
+                    autoFocus
+                    tabIndex={0}
+                    onMouseDownOutside={function() set_menu(nil) end}
+                    onKeyDown={handle_menu_key}
+                    style={util.resolve_style(props.menuStyle, { panel = panel }, menu_style)}
+                    children={items}
+                />
+            </anchored>
+        end
+    end
+
+    local left_buttons = render_buttons("left")
+    local bottom_buttons = render_buttons("bottom")
+    local right_buttons = render_buttons("right")
+    local right_group_separator
+    if bottom_buttons ~= nil and right_buttons ~= nil then
+        right_group_separator = <div style={{
+            width = 1,
+            height = 16,
+            marginLeft = 3,
+            marginRight = 3,
+            background = "#3f3f46",
+        }} />
+    end
+
+    local edge_sizes = { left = 0, right = 0, bottom = 0 }
+    for position, id in pairs(active_panels) do
+        local panel = find_panel(panels, id)
+        if panel ~= nil and position_of(panel) == position then
+            edge_sizes[position] = panel_size(panel, panel_sizes, position)
+        end
+    end
+
+    local center_frame_style = {
+        display = "flex",
+        flexDirection = "column",
+        flexGrow = 1,
+        minWidth = 0,
+        minHeight = 0,
+        marginLeft = edge_sizes.left,
+        marginRight = edge_sizes.right,
+        marginBottom = edge_sizes.bottom,
+    }
+    local drawers = {}
+    for _, panel in ipairs(panels) do
+        local current_panel = panel
+        local position = position_of(panel)
+        local active = active_panels[position] == panel.id
+        local state = {
+            id = panel.id,
+            open = active,
+            position = position,
+            size = panel_size(panel, panel_sizes, position),
+        }
+        local drawer_style = merge({}, resolved(panel.style, state))
+        drawer_style.position = "absolute"
+        drawer_style.visibility = active and "visible" or "hidden"
+        drawer_style.top = nil
+        drawer_style.right = nil
+        drawer_style.bottom = nil
+        drawer_style.left = nil
+        if position == "left" then
+            drawer_style.top = 0
+            drawer_style.left = 0
+        elseif position == "right" then
+            drawer_style.top = 0
+            drawer_style.right = 0
+        else
+            drawer_style.left = edge_sizes.left
+            drawer_style.right = edge_sizes.right
+            drawer_style.bottom = 0
+        end
+        drawers[#drawers + 1] = <Drawer
+            key={panel.id}
+            testId={active and util.test_id(
+                props.testId,
+                "-panel-" .. tostring(panel.id)
+            ) or nil}
+            side={position}
+            open
+            size={state.size}
+            defaultSize={panel.defaultSize}
+            minSize={panel.minSize}
+            maxSize={panel.maxSize}
+            resizable={active and panel.resizable ~= false}
+            resizeHandleSize={panel.resizeHandleSize}
+            resizeTabIndex={panel.resizeTabIndex}
+            onSizeChange={function(size) set_panel_size(current_panel, size) end}
+            onResizeStart={panel.onResizeStart}
+            onResizeEnd={panel.onResizeEnd}
+            style={drawer_style}
+            contentStyle={panel.contentStyle}
+            resizeHandleStyle={panel.resizeHandleStyle}
+        >
+            {rendered_panels[panel.id]}
+        </Drawer>
+    end
+
+    return <div testId={props.testId} style={util.resolve_style(props.style, {}, root_style)}>
+        <div style={util.resolve_style(props.workspaceStyle, {}, workspace_style)}>
+            <div style={center_frame_style}>
+                <div
+                    style={util.resolve_style(props.contentStyle, {}, content_style)}
+                    children={props}
+                />
+            </div>
+            {drawers}
+        </div>
+        <div style={util.resolve_style(props.statusBarStyle, {}, status_bar_style)}>
+            {left_buttons}
+            <div style={{ flexGrow = 1 }} />
+            {bottom_buttons}
+            {right_group_separator}
+            {right_buttons}
+        </div>
+        {context_menu}
+    </div>
+end
