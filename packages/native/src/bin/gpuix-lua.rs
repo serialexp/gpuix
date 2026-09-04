@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use gpuix_native::{LuaAppOptions, check_lua_file, run_lua_file};
+use gpuix_native::{check_lua_file, run_lua_file, LuaAppOptions};
 
 struct Arguments {
     path: PathBuf,

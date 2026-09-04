@@ -255,6 +255,7 @@ impl TestGpuixRenderer {
         let mut next_tree = RetainedTree::new();
         let runtime = crate::lua_runtime::LuaRuntime::load(&source, &mut next_tree)
             .map_err(Error::from_reason)?;
+        self.enable_lua_focus_navigation()?;
         *self.tree.lock().unwrap() = next_tree;
         *self.lua_runtime.lock().unwrap() = Some(runtime);
         Ok(())
@@ -265,9 +266,25 @@ impl TestGpuixRenderer {
         let mut next_tree = RetainedTree::new();
         let runtime = crate::lua_runtime::LuaRuntime::load_luax(&source, &mut next_tree)
             .map_err(Error::from_reason)?;
+        self.enable_lua_focus_navigation()?;
         *self.tree.lock().unwrap() = next_tree;
         *self.lua_runtime.lock().unwrap() = Some(runtime);
         Ok(())
+    }
+
+    fn enable_lua_focus_navigation(&self) -> Result<()> {
+        if self.lua_runtime.lock().unwrap().is_some() {
+            return Ok(());
+        }
+        with_test_state(|cx, window, view| {
+            cx.update(crate::renderer::init_lua_focus_key_bindings);
+            let view = view.clone();
+            cx.update_window(window, |_, _window, app| {
+                view.update(app, |view, _cx| view.enable_native_tab_navigation());
+            })
+            .map_err(|error| Error::from_reason(error.to_string()))?;
+            Ok(())
+        })
     }
 
     #[napi]

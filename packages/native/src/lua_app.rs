@@ -56,7 +56,7 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<()
     gpui_platform::application()
         .with_quit_mode(gpui::QuitMode::LastWindowClosed)
         .run(move |cx| {
-            crate::renderer::init_key_bindings(cx);
+            crate::renderer::init_lua_focus_key_bindings(cx);
             crate::custom_elements::input::init(cx);
             #[cfg(target_os = "macos")]
             crate::app_menu::init(&app_name, cx);
@@ -80,7 +80,10 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<()
                     ..Default::default()
                 },
                 |_window, cx| {
-                    cx.new(|_| GpuixView::new(tree_for_view, Some(callback), title, selection))
+                    cx.new(|_| {
+                        GpuixView::new(tree_for_view, Some(callback), title, selection)
+                            .with_native_tab_navigation()
+                    })
                 },
             ) {
                 Ok(window) => window,
