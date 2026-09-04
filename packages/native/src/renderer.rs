@@ -45,6 +45,15 @@ use crate::style::StyleDesc;
 use crate::text::{selectable_text, selection_frame_reset, SharedSelection};
 use crate::theme::Theme;
 
+gpui::actions!(gpuix_lua_focus, [LuaFocusNext, LuaFocusPrevious]);
+
+pub(crate) fn init_lua_focus_key_bindings(cx: &mut gpui::App) {
+    cx.bind_keys([
+        gpui::KeyBinding::new("tab", LuaFocusNext, None),
+        gpui::KeyBinding::new("shift-tab", LuaFocusPrevious, None),
+    ]);
+}
+
 /// The Window menu items act on the focused window, and the root element is the
 /// only place in GPUIX that has one. `crate::app_menu` owns everything else.
 #[cfg(target_os = "macos")]
@@ -3550,6 +3559,7 @@ pub(crate) struct GpuixView {
     /// Last identity delivered through `selectionChange`. Only written once an
     /// event is really queued, so adding the listener later still reports.
     reported_selection: Option<u64>,
+    native_tab_navigation: bool,
     /// Persistent FocusHandles keyed by element ID.
     /// Created lazily for elements with keyboard or focus/blur listeners.
     /// Handles persist across renders so GPUI maintains focus state.
@@ -3868,6 +3878,7 @@ impl GpuixView {
             window_selection_change: false,
             window_selection_event_id: 0,
             reported_selection: None,
+            native_tab_navigation: false,
             focus_handles: HashMap::new(),
             pending_focus_element: None,
             focus_subscriptions: HashMap::new(),
@@ -4028,6 +4039,15 @@ impl GpuixView {
                 payload.value = value;
             },
         );
+    }
+
+    pub(crate) fn with_native_tab_navigation(mut self) -> Self {
+        self.native_tab_navigation = true;
+        self
+    }
+
+    pub(crate) fn enable_native_tab_navigation(&mut self) {
+        self.native_tab_navigation = true;
     }
 
     fn build_virtual_child(
@@ -5087,7 +5107,12 @@ impl gpui::Render for GpuixView {
             use gpui::prelude::*;
             let drag_move_view = cx.weak_entity();
             let drag_end_view = drag_move_view.clone();
-            let root = gpui::div().size_full();
+            let root = gpui::div()
+                .size_full()
+                .when(self.native_tab_navigation, |root| {
+                    root.on_action(|_: &LuaFocusNext, window, cx| window.focus_next(cx))
+                        .on_action(|_: &LuaFocusPrevious, window, cx| window.focus_prev(cx))
+                });
             with_window_menu_actions(root)
                 .child(window_key_events(
                     callback.clone(),
