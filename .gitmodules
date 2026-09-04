@@ -1,4 +1,4 @@
 [submodule "zed"]
 	path = zed
-	url = https://github.com/remorses/zed.git
+	url = https://github.com/Aeolun/zed.git
 	branch = gpuix
