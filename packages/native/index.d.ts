@@ -150,7 +150,7 @@ export declare class GpuixRenderer {
 
 /**
  * GPU-backed GPUI test renderer. Uses VisualTestAppContext with the native
- * Metal or DirectX renderer and TestDispatcher for deterministic scheduling.
+ * Metal, DirectX, or WGPU renderer and TestDispatcher for deterministic scheduling.
  * Same GpuixView and rendering pipeline as production.
  *
  * Usage from JS:
@@ -320,7 +320,7 @@ export declare class TestGpuixRenderer {
   getScrollOffset(elementId: number): Array<number> | null
   /**
    * Capture a screenshot of the current rendered state and save as PNG.
-   * Supported on macOS through Metal and Windows through DirectX.
+   * Uses Metal on macOS, DirectX on Windows, and WGPU on Linux.
    */
   captureScreenshot(path: string): void
   /**

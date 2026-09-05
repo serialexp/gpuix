@@ -155,7 +155,7 @@ export class TestRenderer implements NativeRenderer {
   constructor(options: TestRendererOptions = {}) {
     if (!NativeTestRenderer) {
       throw new Error(
-        "TestGpuixRenderer is macOS and Windows only. Linux builds have no test-support because wgpu cannot read a rendered image back yet. GpuixRenderer still works on Linux."
+        "TestGpuixRenderer requires a native @gpuix/native build with test support."
       )
     }
     this.native = new NativeTestRenderer(options.width, options.height)
@@ -577,7 +577,7 @@ export class TestRenderer implements NativeRenderer {
     return this.native.getDebugFrameOverlayStats()
   }
 
-  /** Capture the current Metal or DirectX frame and save it as a PNG. */
+  /** Capture the current native GPU frame and save it as a PNG. */
   captureScreenshot(path: string): void {
     this.native.flush()
     this.native.captureScreenshot(path)

@@ -1,6 +1,6 @@
 /// TestGpuixRenderer — GPU-backed GPUI test renderer exposed to Node.js via napi.
 ///
-/// Uses gpui::VisualTestAppContext with the native Metal or DirectX renderer
+/// Uses gpui::VisualTestAppContext with the native Metal, DirectX, or WGPU renderer
 /// and TestDispatcher for deterministic scheduling. Runs the SAME GpuixView,
 /// build_element(), apply_styles(), and event handlers as production.
 ///
@@ -34,10 +34,15 @@ use crate::retained_tree::RetainedTree;
 /// Field order is load-bearing: Rust drops fields in declaration order, and
 /// gpui panics at app teardown if an `Entity` handle outlives its `App`.
 /// `view` must therefore be declared before `cx`.
-struct VisualTestState {
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+type TestAppContext = gpui::HeadlessAppContext;
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+type TestAppContext = gpui::VisualTestAppContext;
+
+struct TestState {
     view: gpui::Entity<GpuixView>,
     window: gpui::AnyWindowHandle,
-    cx: gpui::VisualTestAppContext,
+    cx: TestAppContext,
 }
 
 /// Release every `Entity` handle the view is holding, while the `App` is alive.
@@ -51,7 +56,7 @@ struct VisualTestState {
 ///
 /// `drop` runs before the fields are dropped, so `view` and `cx` are both
 /// still usable here.
-impl Drop for VisualTestState {
+impl Drop for TestState {
     fn drop(&mut self) {
         let view = self.view.clone();
         // Unmount, exactly as React would: empty the tree, then paint one more
@@ -81,18 +86,14 @@ impl Drop for VisualTestState {
 }
 
 thread_local! {
-    static TEST_STATE: RefCell<Option<VisualTestState>> = const { RefCell::new(None) };
+    static TEST_STATE: RefCell<Option<TestState>> = const { RefCell::new(None) };
 }
 
-/// Access VisualTestAppContext + window + view mutably within thread_local.
+/// Access the test app context + window + view mutably within thread-local storage.
 /// The closure receives (&mut cx, window_handle, &view_entity).
 /// Returns Err if no TestGpuixRenderer has been created on this thread.
 fn with_test_state<R>(
-    f: impl FnOnce(
-        &mut gpui::VisualTestAppContext,
-        gpui::AnyWindowHandle,
-        &gpui::Entity<GpuixView>,
-    ) -> Result<R>,
+    f: impl FnOnce(&mut TestAppContext, gpui::AnyWindowHandle, &gpui::Entity<GpuixView>) -> Result<R>,
 ) -> Result<R> {
     TEST_STATE.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -141,7 +142,7 @@ fn u32_to_mouse_button(button: u32) -> gpui::MouseButton {
 // ── TestGpuixRenderer ────────────────────────────────────────────────
 
 /// GPU-backed GPUI test renderer. Uses VisualTestAppContext with the native
-/// Metal or DirectX renderer and TestDispatcher for deterministic scheduling.
+/// Metal, DirectX, or WGPU renderer and TestDispatcher for deterministic scheduling.
 /// Same GpuixView and rendering pipeline as production.
 ///
 /// Usage from JS:
@@ -183,26 +184,32 @@ impl TestGpuixRenderer {
         let selection = crate::text::SharedSelection::default();
         let selection_clone = selection.clone();
 
-        let platform = gpui_platform::current_platform(false);
-        let mut cx = gpui::VisualTestAppContext::new(platform);
-        cx.update(|cx| {
-            crate::custom_elements::input::init(cx);
-        });
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        let mut cx = gpui::HeadlessAppContext::with_platform(
+            gpui_platform::current_platform(true).text_system(),
+            Arc::new(()),
+            gpui_platform::current_headless_renderer,
+        );
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        let mut cx = gpui::VisualTestAppContext::new(gpui_platform::current_platform(false));
+        cx.update(crate::custom_elements::input::init);
 
-        // Open an offscreen window at (-10000, -10000) with the same GpuixView
-        // and native GPU renderer as production.
-        let window_handle = cx
-            .open_offscreen_window(window_size, |_window, app| {
-                app.new(|_cx| {
-                    GpuixView::new(
-                        tree_clone,
-                        callback_clone,
-                        "GPUIX Test".to_string(),
-                        selection_clone,
-                    )
-                })
+        let build_root = |_window: &mut gpui::Window, app: &mut gpui::App| {
+            app.new(|_cx| {
+                GpuixView::new(
+                    tree_clone,
+                    callback_clone,
+                    "GPUIX Test".to_string(),
+                    selection_clone,
+                )
             })
-            .map_err(|e| Error::from_reason(format!("Failed to open test window: {}", e)))?;
+        };
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        let window_handle = cx.open_window(window_size, build_root);
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        let window_handle = cx.open_offscreen_window(window_size, build_root);
+        let window_handle = window_handle
+            .map_err(|e| Error::from_reason(format!("Failed to open test window: {e}")))?;
 
         // Get the root entity (Entity<GpuixView>) from the window.
         let view = window_handle
@@ -214,7 +221,7 @@ impl TestGpuixRenderer {
 
         // Store !Send types on the JS main thread.
         TEST_STATE.with(|cell| {
-            *cell.borrow_mut() = Some(VisualTestState { cx, window, view });
+            *cell.borrow_mut() = Some(TestState { cx, window, view });
         });
 
         Ok(Self {
@@ -324,6 +331,9 @@ impl TestGpuixRenderer {
             .map_err(|e| Error::from_reason(e.to_string()))?;
 
             cx.run_until_parked();
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            cx.draw_window(window)
+                .map_err(|error| Error::from_reason(error.to_string()))?;
             Ok(())
         })
     }
@@ -437,12 +447,13 @@ impl TestGpuixRenderer {
         let modifiers = crate::automation::parse_modifiers(modifiers.as_deref());
         with_test_state(|cx, window, _view| {
             let button: Option<gpui::MouseButton> = pressed_button.map(u32_to_mouse_button);
-
-            cx.simulate_mouse_move(
+            cx.simulate_event(
                 window,
-                gpui::point(gpui::px(x as f32), gpui::px(y as f32)),
-                button,
-                modifiers,
+                gpui::MouseMoveEvent {
+                    position: gpui::point(gpui::px(x as f32), gpui::px(y as f32)),
+                    modifiers,
+                    pressed_button: button,
+                },
             );
 
             Ok(())
@@ -528,11 +539,15 @@ impl TestGpuixRenderer {
     ) -> Result<()> {
         let modifiers = crate::automation::parse_modifiers(modifiers.as_deref());
         with_test_state(|cx, window, _view| {
-            cx.simulate_mouse_down(
+            cx.simulate_event(
                 window,
-                gpui::point(gpui::px(x as f32), gpui::px(y as f32)),
-                u32_to_mouse_button(button.unwrap_or(0)),
-                modifiers,
+                gpui::MouseDownEvent {
+                    position: gpui::point(gpui::px(x as f32), gpui::px(y as f32)),
+                    modifiers,
+                    button: u32_to_mouse_button(button.unwrap_or(0)),
+                    click_count: 1,
+                    first_mouse: false,
+                },
             );
             Ok(())
         })
@@ -550,11 +565,14 @@ impl TestGpuixRenderer {
     ) -> Result<()> {
         let modifiers = crate::automation::parse_modifiers(modifiers.as_deref());
         with_test_state(|cx, window, _view| {
-            cx.simulate_mouse_up(
+            cx.simulate_event(
                 window,
-                gpui::point(gpui::px(x as f32), gpui::px(y as f32)),
-                u32_to_mouse_button(button.unwrap_or(0)),
-                modifiers,
+                gpui::MouseUpEvent {
+                    position: gpui::point(gpui::px(x as f32), gpui::px(y as f32)),
+                    modifiers,
+                    button: u32_to_mouse_button(button.unwrap_or(0)),
+                    click_count: 1,
+                },
             );
             Ok(())
         })
@@ -823,7 +841,7 @@ impl TestGpuixRenderer {
     }
 
     /// Capture a screenshot of the current rendered state and save as PNG.
-    /// Supported on macOS through Metal and Windows through DirectX.
+    /// Uses Metal on macOS, DirectX on Windows, and WGPU on Linux.
     #[napi]
     pub fn capture_screenshot(&self, path: String) -> Result<()> {
         with_test_state(|cx, window, view| {

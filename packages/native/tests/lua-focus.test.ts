@@ -4,9 +4,11 @@ import os from "node:os"
 import path from "node:path"
 import { describe, expect, it } from "vitest"
 
-const { TestGpuixRenderer } = createRequire(import.meta.url)("../index.js")
+const { TestGpuixRenderer, hasTestGpuixRenderer } = createRequire(import.meta.url)(
+  "../index.js"
+)
 
-describe("LuaX focus navigation", () => {
+describe.skipIf(!hasTestGpuixRenderer())("LuaX focus navigation", () => {
   it("cycles forward and backward through native tab stops", () => {
     const renderer = new TestGpuixRenderer(420, 180)
     const screenshotDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpuix-lua-focus-"))

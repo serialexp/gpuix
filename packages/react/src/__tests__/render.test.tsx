@@ -90,9 +90,7 @@ describe("TestGpuixRenderer availability", () => {
       const renderer = new native.TestGpuixRenderer!(1, 1)
       expect(renderer).toBeTruthy()
     } else {
-      expect(() => new native.TestGpuixRenderer!()).toThrow(
-        /macOS and Windows only.*wgpu cannot read a rendered image back yet.*GpuixRenderer still works/s
-      )
+      expect(() => new native.TestGpuixRenderer!()).toThrow(/native build with the test-support feature/)
     }
   })
 })

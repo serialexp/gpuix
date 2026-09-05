@@ -987,7 +987,7 @@ or a pointer update. If Git detaches it, immediately switch back to
 
 - macOS uses `MacPlatform::new_embedded()` and pumps AppKit on Node's main thread
 - Windows and Linux run `gpui_platform::application().run()` on a dedicated UI thread
-- `gpui_platform` selects Metal or DirectX for the GPU-backed test renderer
+- `gpui_platform` selects Metal, DirectX, or WGPU for the GPU-backed test renderer
 - `core-text = 21.0.0`, `core-graphics = 0.24.0` for macOS
 
 These avoid the core-graphics 0.24 vs 0.25 conflict between `core-text` and Zed's `font-kit` fork.
