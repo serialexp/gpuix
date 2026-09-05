@@ -162,7 +162,7 @@ return function(props)
 
     local function handle_key(event)
         local ctrl = event.modifiers and event.modifiers.ctrl
-        if event.key == "escape" then
+        if event.key == "escape" or event.key == "tab" then
             set_open(false)
         elseif event.key == "down" or (event.key == "n" and ctrl) then
             set_open(true)
@@ -232,6 +232,7 @@ return function(props)
             readOnly={disabled or props.readOnly}
             onClick={function() if not disabled then set_open(true) end end}
             onFocus={function() if not disabled then set_open(true) end end}
+            onBlur={function() set_open(false) end}
             onChange={function(event) if not disabled then update_query(event.value or "") end end}
             onKeyDown={handle_key}
             onSubmit={function()
