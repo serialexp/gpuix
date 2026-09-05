@@ -409,6 +409,17 @@ mod tests {
         assert!(tree.elements.values().any(|element| {
             element.test_id.as_deref() == Some("framework-combobox-option-Rust")
         }));
+        dispatch_key_test_id(&mut runtime, &mut tree, "framework-combobox", "tab");
+        assert!(!tree.elements.values().any(|element| {
+            element.test_id.as_deref() == Some("framework-combobox-option-Rust")
+        }));
+        dispatch_test_id(
+            &mut runtime,
+            &mut tree,
+            "framework-combobox",
+            "change",
+            Some("ru"),
+        );
         dispatch_test_id(
             &mut runtime,
             &mut tree,

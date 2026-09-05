@@ -324,6 +324,34 @@ describeNative("floating controls", () => {
     expect(testRoot.renderer.getAllText()).toContain("Selected: SvelteKit")
   })
 
+  it("closes the Combobox when its input loses tab focus", () => {
+    function Demo() {
+      return (
+        <div style={{ width: 400, height: 240, padding: 12 }}>
+          <Combobox items={["Alpha", "Beta"]}>
+            <ComboboxInput style={triggerStyle} />
+            <ComboboxContent sideOffset={4} style={contentStyle}>
+              <ComboboxList>
+                {(item) => <ComboboxItem key={item} value={item}>{item}</ComboboxItem>}
+              </ComboboxList>
+            </ComboboxContent>
+          </Combobox>
+          <div testId="after-combobox" tabIndex={0}>After</div>
+        </div>
+      )
+    }
+
+    testRoot.render(<Demo />)
+    testRoot.renderer.nativeSimulateClick(30, 25)
+    expect(testRoot.renderer.getAllText()).toContain("Alpha")
+
+    const input = testRoot.renderer.findByType("input")[0]
+    testRoot.renderer.nativeSimulateKeyDown(input.id, "tab")
+
+    expect(testRoot.renderer.getAllText()).not.toContain("Alpha")
+    expect(testRoot.renderer.getAllText()).toContain("After")
+  })
+
   it("renders ComboboxEmpty when filtering removes every item", () => {
     function Demo() {
       return (

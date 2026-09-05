@@ -224,7 +224,7 @@ export interface ComboboxInputProps extends InputProps {
 
 export const ComboboxInput = forwardRef<PublicInstance, ComboboxInputProps>(
   function ComboboxInput(
-    { onChange, onClick, onFocus, onKeyDown, onKeyUp, onSubmit, disabled: disabledProp, ...props },
+    { onBlur, onChange, onClick, onFocus, onKeyDown, onKeyUp, onSubmit, disabled: disabledProp, ...props },
     forwardedRef
   ) {
     const context = useComboboxContext("ComboboxInput")
@@ -248,6 +248,10 @@ export const ComboboxInput = forwardRef<PublicInstance, ComboboxInputProps>(
           onFocus?.(event)
           if (!disabled) context.setOpen(true)
         }}
+        onBlur={(event: EventPayload) => {
+          onBlur?.(event)
+          context.setOpen(false)
+        }}
         onChange={(event: EventPayload) => {
           onChange?.(event)
           context.setInputValue(event.value ?? "")
@@ -256,7 +260,7 @@ export const ComboboxInput = forwardRef<PublicInstance, ComboboxInputProps>(
         onKeyDown={(event: EventPayload) => {
           onKeyDown?.(event)
           if (disabled) return
-          if (event.key === "escape") {
+          if (event.key === "escape" || event.key === "tab") {
             context.setOpen(false)
           } else if (event.key === "down" || (event.key === "n" && event.modifiers?.ctrl)) {
             context.moveActive(1)
