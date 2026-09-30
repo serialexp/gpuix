@@ -1,12 +1,13 @@
 local util = {}
 
 util.focus_ring = {
-    boxShadow = {
+    foregroundBoxShadow = {
         offsetX = 0,
         offsetY = 0,
         blurRadius = 0,
         spreadRadius = 2,
         color = "#60a5fa",
+        inset = true,
     },
 }
 

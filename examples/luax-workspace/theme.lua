@@ -15,12 +15,13 @@ local colors = {
 }
 
 local focus_visible = {
-    boxShadow = {
+    foregroundBoxShadow = {
         offsetX = 0,
         offsetY = 0,
         blurRadius = 0,
         spreadRadius = 2,
         color = colors.blue,
+        inset = true,
     },
 }
 
@@ -60,6 +61,7 @@ local styles = {
     },
     sidebar = ui.style {
         width = 248,
+        flexShrink = 0,
         height = "100%",
         display = "flex",
         flexDirection = "column",
@@ -71,6 +73,7 @@ local styles = {
     },
     sidebar_compact = ui.style {
         width = 88,
+        flexShrink = 0,
         height = "100%",
         display = "flex",
         flexDirection = "column",
@@ -84,11 +87,13 @@ local styles = {
         display = "flex",
         flexDirection = "column",
         flexGrow = 1,
+        flexBasis = 0,
         minWidth = 0,
         height = "100%",
     },
     header = ui.style {
         height = 58,
+        flexShrink = 0,
         display = "flex",
         flexDirection = "row",
         alignItems = "center",
@@ -102,6 +107,8 @@ local styles = {
         display = "flex",
         flexDirection = "row",
         flexGrow = 1,
+        flexBasis = 0,
+        minWidth = 0,
         minHeight = 0,
     },
     detail = ui.style {
@@ -109,6 +116,7 @@ local styles = {
         flexDirection = "column",
         flexGrow = 1,
         minWidth = 0,
+        minHeight = 0,
         padding = 20,
         gap = 14,
         overflow = "scroll",
@@ -144,7 +152,7 @@ local styles = {
         paddingBottom = 7,
         borderRadius = 7,
         background = colors.raised,
-        focusVisible = focus_visible,
+        focus = focus_visible,
     },
     button_active = ui.style {
         display = "flex",
@@ -157,11 +165,39 @@ local styles = {
         borderRadius = 7,
         background = colors.accent,
         color = "#17181c",
-        focusVisible = focus_visible,
+        focus = focus_visible,
+    },
+    button_focused = ui.style {
+        display = "flex",
+        flexDirection = "row",
+        alignItems = "center",
+        paddingLeft = 11,
+        paddingRight = 11,
+        paddingTop = 7,
+        paddingBottom = 7,
+        borderRadius = 7,
+        background = colors.raised,
+        foregroundBoxShadow = focus_visible.foregroundBoxShadow,
+        focus = focus_visible,
+    },
+    button_active_focused = ui.style {
+        display = "flex",
+        flexDirection = "row",
+        alignItems = "center",
+        paddingLeft = 11,
+        paddingRight = 11,
+        paddingTop = 7,
+        paddingBottom = 7,
+        borderRadius = 7,
+        background = colors.accent,
+        color = "#17181c",
+        foregroundBoxShadow = focus_visible.foregroundBoxShadow,
+        focus = focus_visible,
     },
     composer = ui.style {
         display = "flex",
         flexDirection = "row",
+        flexShrink = 0,
         alignItems = "center",
         padding = 12,
         gap = 10,
@@ -175,7 +211,7 @@ local styles = {
         borderRadius = 8,
         background = colors.raised,
         color = colors.text,
-        focusVisible = focus_visible,
+        focus = focus_visible,
     },
 }
 

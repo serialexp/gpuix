@@ -52,6 +52,20 @@ pub(crate) fn init_lua_focus_key_bindings(cx: &mut gpui::App) {
         gpui::KeyBinding::new("tab", LuaFocusNext, None),
         gpui::KeyBinding::new("shift-tab", LuaFocusPrevious, None),
     ]);
+    cx.on_action(|_: &LuaFocusNext, cx| {
+        if let Some(window) = cx.active_window() {
+            window
+                .update(cx, |_, window, cx| window.focus_next(cx))
+                .ok();
+        }
+    });
+    cx.on_action(|_: &LuaFocusPrevious, cx| {
+        if let Some(window) = cx.active_window() {
+            window
+                .update(cx, |_, window, cx| window.focus_prev(cx))
+                .ok();
+        }
+    });
 }
 
 /// The Window menu items act on the focused window, and the root element is the
@@ -69,6 +83,32 @@ fn with_window_menu_actions(root: gpui::Div) -> gpui::Div {
 #[cfg(not(target_os = "macos"))]
 fn with_window_menu_actions(root: gpui::Div) -> gpui::Div {
     root
+}
+
+fn pointer_focus_boundary(root_focus: Option<gpui::FocusHandle>) -> impl gpui::IntoElement {
+    use gpui::prelude::*;
+
+    gpui::canvas(
+        |_, _, _| (),
+        move |_, _, window, _cx| {
+            let root_focus = root_focus.clone();
+            window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, window, cx| {
+                if phase == gpui::DispatchPhase::Bubble
+                    && event.button == gpui::MouseButton::Left
+                    && !window.default_prevented()
+                {
+                    if let Some(handle) = root_focus.as_ref() {
+                        handle.focus(window, cx);
+                    } else {
+                        window.blur();
+                    }
+                }
+            });
+        },
+    )
+    .absolute()
+    .w(gpui::px(0.0))
+    .h(gpui::px(0.0))
 }
 
 /// Parse a CSS font-weight value (string or number) into a GPUI FontWeight.
@@ -1485,8 +1525,8 @@ impl GpuixRenderer {
                 .map_err(Error::from_reason)?;
             (changed, runtime.take_focus_request())
         };
-        if let Some(id) = focus_request {
-            self.focus_element(id as f64)?;
+        if let Some(request) = focus_request {
+            self.focus_element(request.element_id as f64)?;
         }
         if changed && *self.initialized.lock().unwrap() {
             self.request_invalidate()?;
@@ -3551,6 +3591,7 @@ pub(crate) struct GpuixView {
     pub(crate) tree: Arc<Mutex<RetainedTree>>,
     pub(crate) event_callback: Option<EventCallback>,
     pub(crate) window_title: String,
+    native_window_id: Option<gpui::WindowId>,
     pub(crate) window_key_down: bool,
     pub(crate) window_key_up: bool,
     pub(crate) window_key_event_id: u64,
@@ -3560,6 +3601,7 @@ pub(crate) struct GpuixView {
     /// event is really queued, so adding the listener later still reports.
     reported_selection: Option<u64>,
     native_tab_navigation: bool,
+    native_tab_root_focus: Option<gpui::FocusHandle>,
     /// Persistent FocusHandles keyed by element ID.
     /// Created lazily for elements with keyboard or focus/blur listeners.
     /// Handles persist across renders so GPUI maintains focus state.
@@ -3872,6 +3914,7 @@ impl GpuixView {
             tree,
             event_callback,
             window_title,
+            native_window_id: None,
             window_key_down: false,
             window_key_up: false,
             window_key_event_id: 0,
@@ -3879,6 +3922,7 @@ impl GpuixView {
             window_selection_event_id: 0,
             reported_selection: None,
             native_tab_navigation: false,
+            native_tab_root_focus: None,
             focus_handles: HashMap::new(),
             pending_focus_element: None,
             focus_subscriptions: HashMap::new(),
@@ -4140,6 +4184,7 @@ impl GpuixView {
             paint_reports: &self.paint_reports,
             highlight_events: &mut highlight_events,
             keyboard_focus,
+            native_keyboard: self.native_tab_navigation,
         };
         let child = build_element(expected_child_id, &mut build_ctx, window, cx);
         emit_highlight_events(&callback, &highlight_events);
@@ -4272,6 +4317,27 @@ pub(crate) struct BuildCtx<'a> {
     highlight_events: &'a mut Vec<(u64, usize)>,
     /// See `GpuixView::keyboard_focus_path`.
     pub keyboard_focus: Option<Arc<[u64]>>,
+    /// Lua windows: Enter and Space click the focused element natively. React
+    /// and Solid do this in JavaScript.
+    pub native_keyboard: bool,
+}
+
+fn ancestor_focus_handle<'a>(
+    element: &crate::retained_tree::RetainedElement,
+    tree: &RetainedTree,
+    focus_handles: &'a HashMap<u64, gpui::FocusHandle>,
+) -> Option<&'a gpui::FocusHandle> {
+    let mut parent = element.parent;
+    while let Some(parent_id) = parent {
+        if let Some(handle) = focus_handles.get(&parent_id) {
+            return Some(handle);
+        }
+        parent = tree
+            .elements
+            .get(&parent_id)
+            .and_then(|element| element.parent);
+    }
+    None
 }
 
 /// Style properties that cascade into descendants.
@@ -4841,7 +4907,12 @@ impl GpuixView {
         }
 
         let before = entry.state.logical_scroll_top();
-        let selection_moved = crate::text::paint::update_drag_at(&self.selection, position);
+        let Some(window_id) = self.native_window_id else {
+            self.stop_selection_scroll();
+            return;
+        };
+        let selection_moved =
+            crate::text::paint::update_drag_at(window_id, &self.selection, position);
         entry.state.scroll_by(gpui::px(step));
         let after = entry.state.logical_scroll_top();
         let list_moved =
@@ -5010,6 +5081,7 @@ impl gpui::Render for GpuixView {
     ) -> impl gpui::IntoElement {
         use gpui::IntoElement;
 
+        self.native_window_id = Some(window.window_handle().window_id());
         window.set_window_title(&self.window_title);
 
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -5088,6 +5160,7 @@ impl gpui::Render for GpuixView {
                     paint_reports: &self.paint_reports,
                     highlight_events: &mut highlight_events,
                     keyboard_focus,
+                    native_keyboard: self.native_tab_navigation,
                 };
                 build_element(root_id, &mut ctx, window, cx)
             }
@@ -5107,8 +5180,15 @@ impl gpui::Render for GpuixView {
             use gpui::prelude::*;
             let drag_move_view = cx.weak_entity();
             let drag_end_view = drag_move_view.clone();
+            if self.native_tab_navigation && self.native_tab_root_focus.is_none() {
+                self.native_tab_root_focus = Some(cx.focus_handle().tab_stop(false));
+            }
+            let native_tab_root_focus = self.native_tab_root_focus.clone();
             let root = gpui::div()
                 .size_full()
+                .when_some(native_tab_root_focus.as_ref(), |root, handle| {
+                    root.track_focus(handle)
+                })
                 .when(self.native_tab_navigation, |root| {
                     root.on_action(|_: &LuaFocusNext, window, cx| window.focus_next(cx))
                         .on_action(|_: &LuaFocusPrevious, window, cx| window.focus_prev(cx))
@@ -5142,6 +5222,7 @@ impl gpui::Render for GpuixView {
                     },
                 ))
                 .child(crate::automation::bounds_frame_reset())
+                .child(pointer_focus_boundary(native_tab_root_focus))
                 .child(result)
                 .into_any_element()
         };
@@ -5257,12 +5338,21 @@ pub(crate) fn build_element(
                 .map(|child_id| build_element(child_id, ctx, window, cx))
                 .collect();
             let inherited = ctx.inherited.clone();
+            let ancestor_focus_handle = if style
+                .filter(|style| style.pointer_events.as_deref() == Some("none"))
+                .is_some()
+            {
+                None
+            } else {
+                ancestor_focus_handle(element, ctx.tree, ctx.focus_handles)
+            };
             let render_ctx = CustomRenderContext {
                 id,
                 events: element.events(),
                 event_callback: ctx.event_callback,
                 focus_handle: ctx.focus_handles.get(&id),
                 keyboard_focus: ctx.keyboard_focus.clone(),
+                ancestor_focus_handle,
                 style,
                 children: custom_children,
                 selection: ctx.selection.clone(),
@@ -5589,6 +5679,21 @@ pub(crate) fn build_host_container(
     if let Some(handle) = ctx.focus_handles.get(&element.id) {
         el = el.track_focus(handle);
         el = apply_focus_visible(el, element.id, style, ctx.keyboard_focus.as_deref());
+    } else if style
+        .filter(|style| style.pointer_events.as_deref() == Some("none"))
+        .is_none()
+    {
+        if let Some(handle) = ancestor_focus_handle(element, ctx.tree, ctx.focus_handles).cloned() {
+            // GPUI focuses a tracked hitbox automatically, but a painted child with
+            // BlockMouseExceptScroll excludes its focusable ancestor from hit testing.
+            // Route that descendant press to the nearest retained focus ancestor.
+            el = el.on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+                if event.is_focusing() && !window.default_prevented() {
+                    handle.focus(window, cx);
+                    window.prevent_default();
+                }
+            });
+        }
     }
     if let Some(tab_index) = element
         .custom_props()
@@ -5619,6 +5724,7 @@ pub(crate) fn build_host_container(
     if element.events().contains("click") {
         let id = element.id;
         let callback = ctx.event_callback.clone();
+        let keyboard_callback = callback.clone();
         // GPUI's higher-level on_click gesture is not finalized by the
         // embedded macOS pump. Bubble listeners run in reverse registration
         // order, so attach click first to keep onMouseUp ahead of onClick.
@@ -5634,6 +5740,26 @@ pub(crate) fn build_host_container(
             });
         });
         el = apply_a11y_click(el, element.events(), id, ctx.event_callback);
+        // Keep GPUI's keyboard click recognizer even though mouse clicks use
+        // the raw mouse-up fallback above. GPUI emits this only after a clean,
+        // unmodified Enter/Space press and release while focus stays here.
+        // React and Solid controls activate from Enter/Space in JavaScript, so
+        // only Lua windows get it; otherwise a Button would click twice.
+        if ctx.native_keyboard {
+            el = el.on_click(move |click_event, _window, _cx| {
+                if !click_event.is_keyboard() {
+                    return;
+                }
+                emit_event_full(&keyboard_callback, id, "click", |p| {
+                    let (x, y) = point_to_xy(click_event.position());
+                    p.x = Some(x);
+                    p.y = Some(y);
+                    p.modifiers = Some(click_event.modifiers().into());
+                    p.click_count = Some(click_event.click_count() as u32);
+                    p.is_right_click = Some(false);
+                });
+            });
+        }
     }
 
     for event_type in element.events() {
@@ -6194,6 +6320,26 @@ pub(crate) fn apply_height<E: gpui::Styled>(el: E, dim: &crate::style::Dimension
     }
 }
 
+fn build_box_shadows(shadows: &crate::style::BoxShadowValues) -> Vec<gpui::BoxShadow> {
+    // A shadow whose colour does not parse is dropped on its own, so one bad
+    // entry does not take the rest of a list with it.
+    shadows
+        .as_slice()
+        .iter()
+        .filter_map(|shadow| {
+            let color = crate::color::parse_color_rgba(&shadow.color)?;
+            let built = gpui::BoxShadow::new(
+                gpui::px(shadow.offset_x as f32),
+                gpui::px(shadow.offset_y as f32),
+                color.into(),
+            )
+            .blur_radius(gpui::px(shadow.blur_radius.max(0.0) as f32))
+            .spread_radius(gpui::px(shadow.spread_radius as f32));
+            Some(if shadow.inset { built.inset() } else { built })
+        })
+        .collect()
+}
+
 /// Base styles plus gpui's interactive refinements.
 ///
 /// Every stateful GPUI root must go through this, never `apply_styles` alone.
@@ -6501,26 +6647,14 @@ pub(crate) fn apply_styles<E: gpui::Styled>(mut el: E, style: &StyleDesc) -> E {
         Some("solid") => el.style().border_style = Some(gpui::BorderStyle::Solid),
         _ => {}
     }
-    if let Some(ref shadows) = style.box_shadow {
-        // A shadow whose colour does not parse is dropped on its own, so one
-        // bad entry does not take the rest of a list with it.
-        let shadows: Vec<gpui::BoxShadow> = shadows
-            .as_slice()
-            .iter()
-            .filter_map(|shadow| {
-                let color = crate::color::parse_color_rgba(&shadow.color)?;
-                let built = gpui::BoxShadow::new(
-                    gpui::px(shadow.offset_x as f32),
-                    gpui::px(shadow.offset_y as f32),
-                    color.into(),
-                )
-                .blur_radius(gpui::px(shadow.blur_radius.max(0.0) as f32))
-                .spread_radius(gpui::px(shadow.spread_radius as f32));
-                Some(if shadow.inset { built.inset() } else { built })
-            })
-            .collect();
+    if let Some(shadows) = style.box_shadow.as_ref().map(build_box_shadows) {
         if !shadows.is_empty() {
             el = el.shadow(shadows);
+        }
+    }
+    if let Some(shadows) = style.foreground_box_shadow.as_ref().map(build_box_shadows) {
+        if !shadows.is_empty() {
+            el = el.foreground_shadow(shadows);
         }
     }
     if style.outline_width.is_some() || style.outline_color.is_some() {

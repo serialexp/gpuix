@@ -4,7 +4,7 @@ local Button = require("gpuix.button")
 return function(props)
     local sent, set_sent = gpuix.use_state(0)
 
-    return <div style={theme.styles.composer}>
+    return <div testId="workspace-composer-row" style={theme.styles.composer}>
         <input
             testId="workspace-composer"
             value={props.value}

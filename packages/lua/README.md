@@ -11,6 +11,59 @@ local Drawer = require("gpuix.drawer")
 local DockLayout = require("gpuix.dock_layout")
 ```
 
+## Applications and windows
+
+A LuaX entry can return an application with multiple native windows. Window
+functions use an explicit app argument and never Lua's implicit receiver syntax:
+
+```lua
+local ui = gpuix
+local app = ui.create_app()
+
+ui.define_window(app, {
+    id = "main",
+    title = "Workspace",
+    width = 1280,
+    height = 800,
+    render = MainWindow,
+})
+ui.define_window(app, {
+    id = "inspector",
+    title = "Inspector",
+    width = 420,
+    height = 360,
+    open = false,
+    render = InspectorWindow,
+})
+
+local function InspectorButton()
+    local open = ui.use_window_open(app, "inspector")
+    return <div onClick={function()
+        if open then
+            ui.close_window(app, "inspector")
+        else
+            ui.open_window(app, "inspector")
+        end
+    end}><text>{open and "Close inspector" or "Open inspector"}</text></div>
+end
+
+local function focus_main() ui.focus_window(app, "main") end
+local function rename_main() ui.set_window_title(app, "main", "Edited workspace") end
+
+return app
+```
+
+`define_window` requires unique `id` and `render` fields. `title` defaults to
+the id; `width` and `height` default to 800 and 600; `open` and `focus` default
+to `true`; and `reposition` defaults to `false`. Reopening restores the last
+native position, size, and maximized/fullscreen restore state. Set
+`reposition = true` to recenter the declared size on every open. Windows have
+separate trees and local hooks but share one Lua VM and all named stores.
+Closing and reopening a window resets only its local state. Compatible live
+reload state is matched by stable window id.
+`use_window_open(app, id)` returns a reactive boolean for API-driven and native
+window lifecycle changes.
+
 The package currently provides `gpuix.button`, `gpuix.checkbox`, `gpuix.radio_group`,
 `gpuix.select`, `gpuix.combobox`, `gpuix.tooltip`, `gpuix.drawer`, and
 `gpuix.dock_layout`. They are headless LuaX components built from GPUIX host
@@ -19,9 +72,11 @@ elements, so applications own their styling.
 `gpuix.button` joins GPUI's native tab order by default. `Tab` and `Shift+Tab`
 cycle through controls with a non-negative `tabIndex`; inputs and textareas join
 that order automatically. Enter and Space activate a focused button through
-GPUI without executing Lua keyboard handlers. The bundled default styles paint
-a blue `focusVisible` ring during keyboard navigation; custom styles can supply
-their own `focusVisible` nested style object. Radio-group arrow keys use
+GPUI without executing Lua keyboard handlers. A pointer press on a control or
+one of its visual children focuses that control, while pressing elsewhere clears
+focus. The bundled default styles paint a blue `focus` ring for pointer and
+keyboard focus; custom styles can supply `focus` or keyboard-only `focusVisible`
+nested style objects. Radio-group arrow keys use
 `gpuix.focus(host_handle)` to move native focus together with the selected value.
 
 Select supports controlled and uncontrolled value/open state, disabled items,

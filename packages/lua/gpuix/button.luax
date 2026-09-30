@@ -4,7 +4,7 @@ local default_style = {
     display = "flex",
     flexDirection = "row",
     alignItems = "center",
-    focusVisible = util.focus_ring,
+    focus = util.focus_ring,
 }
 
 return function(props)

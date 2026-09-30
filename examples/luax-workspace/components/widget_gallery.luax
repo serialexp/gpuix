@@ -59,7 +59,7 @@ return function()
                     width = "100%",
                     height = 220,
                     borderRadius = 8,
-                    focusVisible = theme.focus_visible,
+                    focus = theme.focus_visible,
                 }}
             />
         </div>

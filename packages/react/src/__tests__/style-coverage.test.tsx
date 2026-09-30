@@ -201,6 +201,50 @@ describe("style props reach the renderer", () => {
     )
   })
 
+  it("paints foregroundBoxShadow over opaque descendants", () => {
+    const coveredContainer = (foregroundBoxShadow?: {
+      offsetX: number
+      offsetY: number
+      blurRadius: number
+      spreadRadius: number
+      color: string
+      inset: boolean
+    }) => (
+      <div style={{ display: "flex", padding: 80, backgroundColor: "#101010" }}>
+        <div
+          style={{
+            width: 300,
+            height: 140,
+            borderRadius: 16,
+            foregroundBoxShadow,
+          }}
+        >
+          <div
+            style={{
+              width: "100%",
+              height: "100%",
+              borderRadius: 16,
+              backgroundColor: "#ffffff",
+            }}
+          />
+        </div>
+      </div>
+    )
+
+    comparePixels(
+      "foreground-box-shadow",
+      coveredContainer(),
+      coveredContainer({
+        offsetX: 0,
+        offsetY: 0,
+        blurRadius: 0,
+        spreadRadius: 8,
+        color: "#60a5faff",
+        inset: true,
+      })
+    )
+  })
+
   it("applies a two-stop linear gradient", () => {
     const gradient = (angle: number) => (
       <div style={{ display: "flex", padding: 40, backgroundColor: "#101010", height: "100%" }}>

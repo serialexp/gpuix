@@ -529,6 +529,11 @@ State update triggers re-render → reconciler sends mutations back to Rust
 
 Event handlers are stored in a JS-side registry keyed by `(elementId, eventType)`. Rust only knows **whether** an element has a listener (via `setEventListener`), not the closure itself — the actual handler lives in JS.
 
+A focused element with `onClick` is activated by an unmodified Enter or Space
+press and release. GPUI cancels the click if focus moves or another key event
+intervenes, matching its native button behavior. Add `tabIndex={0}` when a host
+element should participate in keyboard focus order.
+
 ## Packages
 
 - **`@gpuix/native`**: Rust bindings plus the framework-neutral TypeScript host runtime. It owns host types, mutation batching, renderer state, event routing, observers, native testing, and automation.
@@ -1969,6 +1974,12 @@ it should participate in explicit focus traversal:
 | `tabIndex={-1}` | Skipped by focus traversal, but focusable by click or renderer API |
 | `autoFocus` | Takes focus once, when its native focus handle is created |
 
+A primary press on a focusable element, or any of its descendants, moves focus
+to that element before the click callback runs. A primary press outside every
+focusable subtree clears focus, so the next traversal starts at the first tab
+stop. Use `style.focus` for an indicator that appears after pointer and keyboard
+focus; use `style.focusVisible` when it should appear only for keyboard focus.
+
 ### Element keyboard callbacks
 
 `onKeyDown` fires for the focused element and then for ancestors that declare
@@ -3265,7 +3276,7 @@ CSS-like styling via the `style` prop:
 
 **Position:** `position` (`"relative"` | `"absolute"` | `"fixed"`), `top`, `right`, `bottom`, `left` — `"fixed"` lays out like `"absolute"`, because GPUI has no scrolling document to be fixed against
 
-**Visual:** `visibility` (`"visible"` | `"hidden"`), `background`, `backgroundColor`, `color`, `opacity`, `cursor`, `pointerEvents`, `borderRadius`, `borderTopLeftRadius`, `borderTopRightRadius`, `borderBottomLeftRadius`, `borderBottomRightRadius`, `borderWidth`, `borderTopWidth`, `borderRightWidth`, `borderBottomWidth`, `borderLeftWidth`, `borderColor`, `borderStyle` (`"solid"` | `"dashed"`), `boxShadow`, `outlineWidth`, `outlineColor`, `outlineOffset`
+**Visual:** `visibility` (`"visible"` | `"hidden"`), `background`, `backgroundColor`, `color`, `opacity`, `cursor`, `pointerEvents`, `borderRadius`, `borderTopLeftRadius`, `borderTopRightRadius`, `borderBottomLeftRadius`, `borderBottomRightRadius`, `borderWidth`, `borderTopWidth`, `borderRightWidth`, `borderBottomWidth`, `borderLeftWidth`, `borderColor`, `borderStyle` (`"solid"` | `"dashed"`), `boxShadow`, `foregroundBoxShadow`, `outlineWidth`, `outlineColor`, `outlineOffset`
 
 ### Cursors
 
@@ -3369,6 +3380,7 @@ order given. Its fields are `offsetX`, `offsetY`, `blurRadius`, `spreadRadius`,
       blurRadius: 12,
       spreadRadius: 0,
       color: '#00000033',
+      inset: false,
     },
   }}
 />
@@ -3382,6 +3394,10 @@ order given. Its fields are `offsetX`, `offsetY`, `blurRadius`, `spreadRadius`,
   }}
 />
 ```
+
+`foregroundBoxShadow` accepts the same shapes but paints after the element's
+descendants. It does not participate in layout, so an inset foreground shadow is
+appropriate for a focus ring around a container with opaque children.
 
 **Overflow:** `overflow`, `overflowX`, `overflowY` — `"hidden"` clips content, `"scroll"` creates a native scrollable container with persistent scroll state
 
@@ -3406,12 +3422,13 @@ JavaScript round trip.
     hover: { backgroundColor: '#45475a' },
     active: { backgroundColor: '#585b70' },
     focusVisible: {
-      boxShadow: {
+      foregroundBoxShadow: {
         offsetX: 0,
         offsetY: 0,
         blurRadius: 0,
         spreadRadius: 2,
         color: '#60a5fa',
+        inset: true,
       },
     },
   }}
@@ -3856,12 +3873,68 @@ just start
 
 LuaX supports React-style function components and the hooks `use_state`,
 `use_reducer`, `use_ref`, `use_memo`, `use_callback`, `use_effect`, plus
-`store.use_state`. The compiler fingerprints hook call sites while the runtime
-also records hook kind and initializer Lua type. Live reload therefore keeps
-current hook values across unrelated line and same-type initializer edits,
-rejects same-type hook reorders, and resets only a component whose hook
-signature actually changed. Handwritten `.lua` files remain positional and
-cannot detect a swap of two same-kind, same-type hooks.
+`use_window_open` and `store.use_state`. The compiler fingerprints hook call
+sites while the runtime also records hook kind and initializer Lua type. Live
+reload therefore keeps current hook values across unrelated line and same-type
+initializer edits, rejects same-type hook reorders, and resets only a component
+whose hook signature actually changed. Handwritten `.lua` files remain
+positional and cannot detect a swap of two same-kind, same-type hooks.
+
+A Lua entry may return an application instead of one render function. Each
+declared window is an independent retained root with its own component hooks,
+focus tree, and native GPUI window, while every root executes in one Lua VM and
+shares the same named stores:
+
+```lua
+local ui = gpuix
+local app = ui.create_app()
+
+ui.define_window(app, {
+    id = "main",
+    title = "Workspace",
+    width = 1280,
+    height = 800,
+    render = MainWindow,
+})
+ui.define_window(app, {
+    id = "inspector",
+    title = "Inspector",
+    width = 420,
+    height = 360,
+    open = false,
+    render = InspectorWindow,
+})
+
+local function InspectorButton()
+    local open = ui.use_window_open(app, "inspector")
+    return <div onClick={function()
+        if open then
+            ui.close_window(app, "inspector")
+        else
+            ui.open_window(app, "inspector")
+        end
+    end}><text>{open and "Close inspector" or "Open inspector"}</text></div>
+end
+
+local function focus_main() ui.focus_window(app, "main") end
+local function rename_main() ui.set_window_title(app, "main", "Edited workspace") end
+
+return app
+```
+
+`create_app()` may be called once by an entry. `define_window(app, options)`
+requires a unique non-empty `id` and a `render` function. `title` defaults to
+the id, `width`/`height` to 800/600, `open`/`focus` to `true`, and `reposition`
+to `false`. A reopened window restores GPUI's last native bounds, including its
+position, size, and maximized/fullscreen restore state. Set `reposition = true`
+to ignore remembered bounds and center the declared size on every open.
+Opening an already-open window activates it. Closing a window disposes that
+root's local hooks, effects, memo entries, and host handles; reopening starts
+fresh local state without disturbing shared stores or other windows. Live
+reload matches roots by window id and preserves compatible mounted state.
+`use_window_open(app, id)` returns a reactive boolean and rerenders its
+component when the window opens, closes through the API, or closes through the
+native window controls.
 
 The bundled `gpuix.drawer` component provides a resizable left, right, or bottom
 edge surface. `gpuix.dock_layout` adds Zed-style dock chrome: bottom status-bar
@@ -3909,7 +3982,8 @@ the bundled controls, benchmarks, and current limitations.
 - [x] Runtime errors keep the macOS window alive and show a stack overlay
 - [x] Debug frame overlay (`debugFrameOverlay` / `setDebugFrameOverlay`)
 - [ ] Canvas element
-- [ ] Multiple windows
+- [x] Multiple windows in the embedded Lua runtime
+- [ ] Multiple windows in the React renderer
 - [x] JS remount under `bun --hot` (`render()` keeps the native window)
 - [ ] React Refresh during `bun --hot` (needs a Bun runtime transform)
 - [ ] Hot reload of the native `.node` addon. `bun run dev` rebuilds and restarts. Native modules cannot unload.

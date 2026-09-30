@@ -9,6 +9,7 @@ local ActivityList = require("components.activity_list")
 local Composer = require("components.composer")
 local Button = require("gpuix.button")
 local DockLayout = require("gpuix.dock_layout")
+local app = ui.create_app()
 
 local function title_for(id)
     for _, conversation in ipairs(data.conversations) do
@@ -31,12 +32,13 @@ local function set_selected_activity(id)
     store.dispatch({ type = "select_activity", id = id })
 end
 
-return function()
+local function MainWindow()
     local active_id = store.use_state(select_active_id)
     local compact = store.use_state(select_compact)
     local mode = store.use_state(select_mode)
     local selected_activity = store.use_state(select_activity)
     local draft = store.use_state(select_draft)
+    local inspector_open = ui.use_window_open(app, "inspector")
     local panels = {{
         id = "activity",
         label = "Activity",
@@ -82,8 +84,8 @@ return function()
             compact={compact}
             onSelect={set_active_id}
         />
-        <div style={theme.styles.content}>
-            <div style={theme.styles.header}>
+        <div testId="workspace-content" style={theme.styles.content}>
+            <div testId="workspace-navbar" style={theme.styles.header}>
                 <Button
                     testId="toggle-sidebar"
                     style={theme.styles.button}
@@ -93,6 +95,17 @@ return function()
                 </Button>
                 <text style={{ color = theme.colors.muted }}>LuaX</text>
                 <div style={{ flexGrow = 1 }} />
+                <Button
+                    testId="open-inspector"
+                    style={inspector_open and theme.styles.button_active or theme.styles.button}
+                    onClick={function()
+                        if inspector_open then
+                            ui.close_window(app, "inspector")
+                        else
+                            ui.open_window(app, "inspector")
+                        end
+                    end}
+                ><text>Inspector</text></Button>
                 <Button
                     testId="show-markdown"
                     style={mode == "markdown" and theme.styles.button_active or theme.styles.button}
@@ -114,7 +127,7 @@ return function()
                     onClick={function() store.dispatch({ type = "set_mode", mode = "widgets" }) end}
                 ><text>Widgets</text></Button>
             </div>
-            <div style={theme.styles.body}>
+            <div testId="workspace-body" style={theme.styles.body}>
                 <Detail
                     title={title_for(active_id)}
                     mode={mode}
@@ -133,3 +146,58 @@ return function()
         </div>
     </DockLayout>
 end
+
+local function InspectorWindow()
+    local active_id = store.use_state(select_active_id)
+    local mode = store.use_state(select_mode)
+    local selected_activity = store.use_state(select_activity)
+    local draft = store.use_state(select_draft)
+
+    return <div style={{
+        display = "flex",
+        flexDirection = "column",
+        width = "100%",
+        height = "100%",
+        padding = 20,
+        gap = 14,
+        background = theme.colors.background,
+        color = theme.colors.text,
+    }}>
+        <div style={{ display = "flex", alignItems = "center", gap = 8 }}>
+            <text style={{ fontSize = 18, fontWeight = 700 }}>Shared inspector</text>
+            <div style={{ flexGrow = 1 }} />
+            <Button
+                testId="close-inspector"
+                style={theme.styles.button}
+                onClick={function() ui.close_window(app, "inspector") end}
+            ><text>Close</text></Button>
+        </div>
+        <text style={{ color = theme.colors.muted }}>
+            This is a separate GPUI window backed by the same Lua store.
+        </text>
+        <div style={{ height = 1, background = theme.colors.border }} />
+        <text>Conversation: {title_for(active_id)}</text>
+        <text>Mode: {mode}</text>
+        <text>Activity: {selected_activity}</text>
+        <text>Draft: {draft == "" and "(empty)" or draft}</text>
+    </div>
+end
+
+ui.define_window(app, {
+    id = "main",
+    title = "GPUIX Lua Workspace",
+    width = 1280,
+    height = 800,
+    render = MainWindow,
+})
+
+ui.define_window(app, {
+    id = "inspector",
+    title = "Workspace Inspector",
+    width = 420,
+    height = 360,
+    open = false,
+    render = InspectorWindow,
+})
+
+return app

@@ -218,6 +218,8 @@ pub struct StyleDesc {
     pub border_bottom_left_radius: Option<f64>,
     pub border_bottom_right_radius: Option<f64>,
     pub box_shadow: Option<BoxShadowValues>,
+    /// Like `box_shadow`, but painted over the element's descendants.
+    pub foreground_box_shadow: Option<BoxShadowValues>,
     /// `"solid"` or `"dashed"`, for every side.
     pub border_style: Option<String>,
     /// Width divided by height, applied to whichever axis is not definite.
@@ -439,7 +441,7 @@ mod tests {
     #[test]
     fn parses_focus_pseudo_styles() {
         let style: StyleDesc = serde_json::from_str(
-            r##"{"focus":{"borderColor":"#ffffff"},"focusVisible":{"boxShadow":{"offsetX":0,"offsetY":0,"blurRadius":0,"spreadRadius":2,"color":"#60a5fa"}}}"##,
+            r##"{"focus":{"borderColor":"#ffffff"},"focusVisible":{"foregroundBoxShadow":{"offsetX":0,"offsetY":0,"blurRadius":0,"spreadRadius":2,"color":"#60a5fa","inset":true}}}"##,
         )
         .unwrap();
 
@@ -454,10 +456,17 @@ mod tests {
             style
                 .focus_visible
                 .as_deref()
-                .and_then(|style| style.box_shadow.as_ref())
+                .and_then(|style| style.foreground_box_shadow.as_ref())
+                .and_then(|shadows| shadows.as_slice().first())
                 .map(|shadow| shadow.spread_radius),
             Some(2.0)
         );
+        assert!(style
+            .focus_visible
+            .as_deref()
+            .and_then(|style| style.foreground_box_shadow.as_ref())
+            .and_then(|shadows| shadows.as_slice().first())
+            .is_some_and(|shadow| shadow.inset));
     }
 
     #[test]

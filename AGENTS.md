@@ -10,6 +10,15 @@ Document every user-facing feature, element, prop, event, renderer option,
 public method, and behavior change in `README.md` in the same change. A
 changeset does not replace API documentation.
 
+## Keep Lua calls explicit
+
+Do not use Lua's colon syntax for method declarations or calls. `object:method(value)`
+implicitly passes `object` as `self`, which hides the actual function arguments.
+Use dot syntax instead: `object.method(object, value)`. A receiver-free function is fine
+when it genuinely needs no receiver, but do not implement one by capturing an object whose
+lifetime should remain explicit; that can retain application state and create a memory
+leak. This applies to runtime APIs, bundled components, examples, tests, and documentation.
+
 ## GPUIX is a thin layer on GPUI
 
 **Read the GPUI docs and the GPUI source before you write native code.** `zed/crates/gpui`

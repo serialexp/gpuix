@@ -181,6 +181,9 @@ export interface StyleDesc {
   borderBottomRightRadius?: number
   /** One shadow, or a list painted in the order given. */
   boxShadow?: BoxShadow | BoxShadow[]
+  /** Like `boxShadow`, but painted over the element's descendants. Takes no
+   *  layout space, so an inset one makes a focus ring over opaque children. */
+  foregroundBoxShadow?: BoxShadow | BoxShadow[]
   /** Applies to every side. */
   borderStyle?: "solid" | "dashed"
   /** Width divided by height. Fills in whichever axis has no definite size. */
@@ -428,7 +431,7 @@ export interface HostProps {
   /** Fires when user clicks OUTSIDE this element. Use for "click outside to close". */
   onMouseDownOutside?: (event: EventPayload) => void
 
-  // ── Keyboard events (need focus: autoFocus, or a click on the element) ──
+  // ── Keyboard events (need focus: autoFocus, or a click within the element) ──
   /** Fires on the focused element, then on ancestors that declare it. */
   onKeyDown?: (event: KeyEvent) => void
   onKeyUp?: (event: KeyEvent) => void

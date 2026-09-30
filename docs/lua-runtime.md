@@ -10,12 +10,12 @@ It includes a small native LuaX transform for React-like authoring syntax.
 
 ## Component model
 
-A Lua source file returns one render function. Host helpers accept ordinary Lua
-prop tables, immediately write a staged node into a Rust-owned render arena,
-and return a packed integer handle. `gpuix.text(value)` consumes strings and
-numbers into one native text node, event props are functions, and `key`
-preserves identity across reorders. Rust never walks a returned Lua VNode table
-tree.
+A Lua source file returns either one legacy render function or an application
+with one or more window render functions. Host helpers accept ordinary Lua prop
+tables, immediately write a staged node into a Rust-owned render arena, and
+return a packed integer handle. `gpuix.text(value)` consumes strings and numbers
+into one native text node, event props are functions, and `key` preserves
+identity across reorders. Rust never walks a returned Lua VNode table tree.
 
 ```lua
 local ui = gpuix
@@ -142,8 +142,9 @@ content. See `packages/lua/README.md` for the current API and limitations.
 and `Shift+Tab` move through LuaX buttons, form controls, inputs, and textareas
 entirely in Rust. Set `tabIndex = -1` to keep click focus while
 removing a control from sequential keyboard navigation. The bundled controls
-use native `focusVisible` styles, so keyboard focus paints without a Lua state
-update or event round trip.
+use native `focus` styles, so pointer and keyboard focus paint without a Lua
+state update or event round trip. Applications can use `focusVisible` instead
+when only keyboard focus should paint an indicator.
 
 `gpuix.drawer` mirrors Zed's layout dock rather than a modal overlay. It docks
 left, right, or bottom, can own or receive its open and size state, and uses
@@ -168,6 +169,94 @@ ui.img {
 }
 ```
 
+## Application windows
+
+Return a `gpuix.create_app()` handle when an application needs more than one
+native window. Definitions and lifecycle operations use ordinary functions
+with an explicit app argument; the API does not use Lua's implicit `self`
+syntax.
+
+```lua
+local ui = gpuix
+local app = ui.create_app()
+local store = ui.create_store("workspace", reducer, initial_state)
+
+local function MainWindow()
+    local state = store.use_state(function(value) return value end)
+    local inspector_open = ui.use_window_open(app, "inspector")
+    return <div>
+        <text>{state.title}</text>
+        <div onClick={function()
+            if inspector_open then
+                ui.close_window(app, "inspector")
+            else
+                ui.open_window(app, "inspector")
+            end
+        end}>
+            <text>{inspector_open and "Close inspector" or "Open inspector"}</text>
+        </div>
+    </div>
+end
+
+local function InspectorWindow()
+    local state = store.use_state(function(value) return value end)
+    return <div>
+        <text>{state.title}</text>
+        <div onClick={function() ui.close_window(app, "inspector") end}>
+            <text>Close</text>
+        </div>
+    </div>
+end
+
+ui.define_window(app, {
+    id = "main",
+    title = "Workspace",
+    width = 1280,
+    height = 800,
+    render = MainWindow,
+})
+ui.define_window(app, {
+    id = "inspector",
+    title = "Inspector",
+    width = 420,
+    height = 360,
+    open = false,
+    render = InspectorWindow,
+})
+
+return app
+```
+
+`gpuix.create_app()` may be called once while evaluating the entry.
+`gpuix.define_window(app, definition)` requires a unique, non-empty `id` and a
+`render` function. `title` defaults to the id, dimensions default to 800 by
+600, both `open` and `focus` default to `true`, and `reposition` defaults to
+`false`. Definitions open in source order. At least one window must have
+`open = true` when the native application starts.
+
+After a user moves, resizes, maximizes, or fullscreen-toggles a window, closing
+and reopening that id restores GPUI's last native `WindowBounds`. Set
+`reposition = true` on a definition to deliberately ignore those remembered
+bounds and center the declared width and height every time the window opens.
+Bounds are remembered for the lifetime of the application process.
+
+Event handlers can call `gpuix.open_window(app, id)`,
+`gpuix.close_window(app, id)`, `gpuix.focus_window(app, id)`, and
+`gpuix.set_window_title(app, id, title)`. Opening an existing window activates
+it. `gpuix.use_window_open(app, id)` returns whether the window is currently
+open and rerenders subscribed components after an API operation or native
+window close changes that value. Each open window has an independent retained
+tree, local hook namespace, focus state, and selection registry. All windows
+run in one Lua VM, so named stores and ordinary module state are shared directly
+without IPC.
+
+Closing a window unmounts its root and cleans up local hooks, effects, memo
+entries, event handlers, and host handles. Reopening it starts fresh local hook
+state while preserving shared stores and the state of other windows. Live
+reload matches mounted roots by stable window id, preserves compatible hook and
+store state in each, closes definitions that disappeared, and opens newly
+declared windows whose `open` option is true.
+
 ## Update path
 
 ```text
@@ -175,8 +264,8 @@ GPUI event
   -> in-process event channel (`gpuix-lua`)
      or the compatibility Node relay (`loadLua` / `loadLuax`)
   -> Lua handler inside Rust
-  -> state setter or reducer dispatch marks the runtime dirty
-  -> Lua render function
+  -> state setter or reducer dispatch marks affected roots dirty
+  -> each dirty Lua window render function
   -> host helpers populate a Rust-owned staging arena
   -> render returns one native node handle
   -> keyed reconciliation consumes the arena
@@ -200,10 +289,11 @@ local state, dispatch = gpuix.use_reducer(reducer, initial_state)
 local ref = gpuix.use_ref(initial_value)
 local result = gpuix.use_memo(factory, { dependency })
 local callback = gpuix.use_callback(function() ... end, { dependency })
+local inspector_open = gpuix.use_window_open(app, "inspector")
 
 gpuix.use_effect(function()
     local subscription = subscribe(value)
-    return function() subscription:close() end
+    return function() subscription.close(subscription) end
 end, { value })
 ```
 
@@ -295,8 +385,10 @@ cargo run --release --manifest-path packages/native/Cargo.toml \
   --bin gpuix-lua -- examples/luax-counter.luax
 ```
 
-Use `--check` to parse, execute the initial render, and exit without opening a
-window. `--title`, `--width`, and `--height` configure the native window.
+Use `--check` to parse, execute every declared initial render, and exit without
+opening windows. `--title`, `--width`, and `--height` configure the implicit
+window of a legacy single-function entry; application windows use their own
+definitions.
 
 ## Memoized subtrees
 
@@ -448,9 +540,9 @@ handwritten Lua and 2.03 ms for LuaX on Lua 5.4.
 
 - Lua 5.4 is the default; LuaJIT is an optional native build feature.
 - The hook set is `use_state`, `use_reducer`, `use_ref`, `use_memo`,
-  `use_callback`, `use_effect`, and selector subscriptions through
-  `store.use_state`. There is no context, layout effect, error boundary,
-  asynchronous scheduler, transition, or concurrent rendering yet.
+  `use_callback`, `use_effect`, `use_window_open`, and selector subscriptions
+  through `store.use_state`. There is no context, layout effect, error
+  boundary, asynchronous scheduler, transition, or concurrent rendering yet.
 - Hook state belongs to a component instance. Instances are identified by their
   parent component plus an explicit `key`, or by component sibling position
   when no key exists. Hooks are then ordered only within that component.
@@ -480,7 +572,8 @@ Node addon integration.
 imported Lua and LuaX modules, nested function components, root and
 component-local state, a reload-safe Redux-style store, native input, SVG,
 Markdown, highlighted code, unified diffs, images, anchored layers, a virtual
-list, the bundled form controls, and `memo_batch`:
+list, the bundled form controls, and `memo_batch`. Its Inspector button opens a
+second native window subscribed to the same store:
 
 ```bash
 cargo run --release --manifest-path packages/native/Cargo.toml \
