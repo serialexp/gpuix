@@ -338,6 +338,7 @@ impl Transformer<'_> {
                     | "use_memo"
                     | "use_callback"
                     | "use_effect"
+                    | "use_window_open"
             );
         let store_hook = method == "use_state" && !self.gpuix_aliases.contains(receiver);
         if !direct_hook && !store_hook {
@@ -740,13 +741,14 @@ mod tests {
                 return function()
                     local count = ui.use_state(0)
                     local selected = store.use_state(function(state) return state.count end)
+                    local inspector_open = ui.use_window_open(app, "inspector")
                     ui.use_effect(function() end, {})
                 end
             "#,
         )
         .unwrap();
 
-        assert_eq!(hook_sites(&output).len(), 3);
+        assert_eq!(hook_sites(&output).len(), 4);
     }
 
     #[test]

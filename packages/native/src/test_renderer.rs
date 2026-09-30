@@ -307,8 +307,8 @@ impl TestGpuixRenderer {
                 .map_err(Error::from_reason)?;
             (changed, runtime.take_focus_request())
         };
-        if let Some(id) = focus_request {
-            self.focus_element(id as f64)?;
+        if let Some(request) = focus_request {
+            self.focus_element(request.element_id as f64)?;
         }
         Ok(changed)
     }

@@ -24,7 +24,7 @@ local handle_defaults = {
     background = "transparent",
     hover = { background = "#60a5fa66" },
     active = { background = "#60a5fa" },
-    focusVisible = util.focus_ring,
+    focus = util.focus_ring,
 }
 
 local function resolved(style, state)

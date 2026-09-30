@@ -13,7 +13,7 @@ local trigger_style = {
     borderWidth = 1,
     borderColor = "#52525b",
     background = "#18181b",
-    focusVisible = util.focus_ring,
+    focus = util.focus_ring,
 }
 local content_style = {
     width = 200,
@@ -25,7 +25,7 @@ local content_style = {
     borderWidth = 1,
     borderColor = "#52525b",
     background = "#27272a",
-    focusVisible = util.focus_ring,
+    focus = util.focus_ring,
 }
 local item_style = {
     display = "flex",
@@ -112,6 +112,12 @@ return function(props)
         end
     end
 
+    local function handle_trigger_key(event)
+        if event.key ~= "enter" and event.key ~= "space" then
+            handle_key(event)
+        end
+    end
+
     local selected = options[selected_index()]
     local root_state = { open = open, value = value, disabled = disabled }
     local menu
@@ -173,7 +179,7 @@ return function(props)
                     if open then set_open(false) else open_menu() end
                 end
             end}
-            onKeyDown={handle_key}
+            onKeyDown={handle_trigger_key}
             style={util.resolve_style(props.triggerStyle, root_state, trigger_style)}
         >
             {value_content}

@@ -56,7 +56,7 @@ local button_style = {
     borderRadius = 4,
     hover = { background = "#27272a" },
     active = { background = "#3f3f46" },
-    focusVisible = util.focus_ring,
+    focus = util.focus_ring,
 }
 
 local active_button_style = {
@@ -72,7 +72,7 @@ local active_button_style = {
     background = "#3f3f46",
     hover = { background = "#52525b" },
     active = { background = "#52525b" },
-    focusVisible = util.focus_ring,
+    focus = util.focus_ring,
 }
 
 local menu_style = {
@@ -85,7 +85,7 @@ local menu_style = {
     borderWidth = 1,
     borderColor = "#52525b",
     background = "#27272a",
-    focusVisible = util.focus_ring,
+    focus = util.focus_ring,
 }
 
 local menu_item_style = {
@@ -96,7 +96,7 @@ local menu_item_style = {
     padding = 7,
     borderRadius = 4,
     hover = { background = "#3f3f46" },
-    focusVisible = util.focus_ring,
+    focus = util.focus_ring,
 }
 
 local function copy(source)

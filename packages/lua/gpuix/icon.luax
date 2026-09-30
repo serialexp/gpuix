@@ -1,0 +1,35 @@
+local util = require("gpuix._util")
+
+local default_style = {
+    width = 16,
+    height = 16,
+    flexShrink = 0,
+    color = "#a1a1aa",
+}
+
+return function(props)
+    if props.name == nil then error("gpuix.icon requires a name") end
+    local weight = props.weight or "regular"
+    local size = props.size or 16
+    local color = props.color or "#a1a1aa"
+    local state = { name = props.name, weight = weight, size = size, color = color }
+    local style = props.style
+    if style == nil then
+        style = {
+            width = size,
+            height = size,
+            flexShrink = 0,
+            color = color,
+        }
+    end
+
+    return <svg
+        testId={props.testId}
+        tabIndex={props.tabIndex}
+        source={gpuix._phosphor_icon(props.name, weight)}
+        onClick={props.onClick}
+        onMouseEnter={props.onMouseEnter}
+        onMouseLeave={props.onMouseLeave}
+        style={util.resolve_style(style, state, default_style)}
+    />
+end

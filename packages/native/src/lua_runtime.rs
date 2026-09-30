@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use mlua::{
-    FromLuaMulti, Function, Lua, LuaSerdeExt, MultiValue, RegistryKey, Table, UserData, Value,
+    AnyUserData, FromLuaMulti, Function, Lua, LuaSerdeExt, MultiValue, RegistryKey, Table,
+    UserData, Value,
 };
 
 use crate::element_tree::EventPayload;
@@ -79,6 +80,14 @@ const HANDLE_MAX_GENERATION: u64 = i32::MAX as u64;
 type StyleCache = HashMap<Vec<u8>, Arc<StyleDesc>>;
 type HostHandleMap = HashMap<i64, u64>;
 
+#[derive(Clone)]
+struct MountedHostHandle {
+    root: LuaRootId,
+    element_id: u64,
+}
+
+type MountedHostHandleMap = HashMap<i64, MountedHostHandle>;
+
 #[derive(Clone, Copy)]
 struct NodeHandle {
     generation: u64,
@@ -96,6 +105,62 @@ struct StyleHandle(Arc<StyleDesc>);
 
 impl UserData for StyleHandle {}
 
+#[derive(Clone, Copy)]
+struct LuaAppHandle;
+
+impl UserData for LuaAppHandle {}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LuaWindowOptions {
+    pub id: String,
+    pub title: String,
+    pub width: f32,
+    pub height: f32,
+    pub open: bool,
+    pub focus: bool,
+    pub reposition: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LuaAppCommand {
+    Open(String),
+    Close(String),
+    Focus(String),
+    SetTitle { id: String, title: String },
+}
+
+pub(crate) struct LuaFocusRequest {
+    pub root_id: String,
+    pub element_id: u64,
+}
+
+#[derive(Clone)]
+struct LuaWindowDefinition {
+    options: LuaWindowOptions,
+    render: Function,
+}
+
+#[derive(Clone, Default)]
+struct LuaApplicationRegistry {
+    created: bool,
+    definitions: Vec<LuaWindowDefinition>,
+    commands: VecDeque<LuaAppCommand>,
+}
+
+impl LuaApplicationRegistry {
+    fn begin_entry(&mut self) {
+        self.created = false;
+        self.definitions.clear();
+        self.commands.clear();
+    }
+
+    fn definition_exists(&self, id: &str) -> bool {
+        self.definitions
+            .iter()
+            .any(|definition| definition.options.id == id)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ComponentKey {
     Integer(i64),
@@ -109,8 +174,24 @@ enum ComponentSlot {
     Key(ComponentKey),
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-struct ComponentId(Vec<ComponentSlot>);
+type LuaRootId = Arc<str>;
+
+const DEFAULT_ROOT_ID: &str = "main";
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ComponentId {
+    root: LuaRootId,
+    path: Vec<ComponentSlot>,
+}
+
+impl ComponentId {
+    fn root(root: LuaRootId) -> Self {
+        Self {
+            root,
+            path: Vec::new(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HookKind {
@@ -121,6 +202,7 @@ enum HookKind {
     Callback,
     Effect,
     Store,
+    Window,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,6 +233,7 @@ type StateHookArguments = HookArguments<Value>;
 type ReducerHookArguments = HookArguments<(Function, Value)>;
 type DependencyHookArguments = HookArguments<(Function, Option<Table>)>;
 type StoreHookArguments = HookArguments<(Option<Function>, Option<Function>)>;
+type WindowHookArguments = HookArguments<(AnyUserData, String)>;
 
 impl<T: FromLuaMulti> FromLuaMulti for HookArguments<T> {
     fn from_lua_multi(mut arguments: MultiValue, lua: &Lua) -> mlua::Result<Self> {
@@ -203,6 +286,10 @@ enum HookSlot {
         selector: Option<Arc<RegistryKey>>,
         equality: Option<Arc<RegistryKey>>,
         selected: Arc<RegistryKey>,
+    },
+    Window {
+        id: String,
+        open: bool,
     },
 }
 
@@ -282,7 +369,7 @@ struct HookFrame {
 #[derive(Clone)]
 struct HookSnapshot {
     components: HashMap<ComponentId, ComponentHooks>,
-    dirty: bool,
+    dirty_roots: HashSet<LuaRootId>,
 }
 
 struct HookStore {
@@ -292,8 +379,9 @@ struct HookStore {
     visited: Vec<ComponentId>,
     mismatch: Option<ComponentId>,
     pending_effects: Vec<PendingEffect>,
+    active_root: Option<LuaRootId>,
     refreshing: bool,
-    dirty: bool,
+    dirty_roots: HashSet<LuaRootId>,
 }
 
 impl HookStore {
@@ -305,15 +393,16 @@ impl HookStore {
             visited: Vec::new(),
             mismatch: None,
             pending_effects: Vec::new(),
+            active_root: None,
             refreshing: false,
-            dirty: false,
+            dirty_roots: HashSet::new(),
         }
     }
 
     fn snapshot(&self) -> HookSnapshot {
         HookSnapshot {
             components: self.components.clone(),
-            dirty: self.dirty,
+            dirty_roots: self.dirty_roots.clone(),
         }
     }
 
@@ -324,26 +413,31 @@ impl HookStore {
         self.visited.clear();
         self.mismatch = None;
         self.pending_effects.clear();
+        self.active_root = None;
         self.refreshing = false;
-        self.dirty = snapshot.dirty;
+        self.dirty_roots = snapshot.dirty_roots;
     }
 
     fn rollback(&mut self, snapshot: HookSnapshot) {
         let mismatch = self.mismatch.take();
+        let root = self.active_root.clone();
         self.restore(snapshot);
         self.mismatch = mismatch;
-        self.dirty = false;
+        if let Some(root) = root {
+            self.dirty_roots.remove(&root);
+        }
     }
 
-    fn begin_render(&mut self, refreshing: bool) {
+    fn begin_render(&mut self, root: LuaRootId, refreshing: bool) {
         self.frames.clear();
         self.seen.clear();
         self.visited.clear();
         self.mismatch = None;
         self.pending_effects.clear();
+        self.active_root = Some(root.clone());
         self.refreshing = refreshing;
-        self.dirty = false;
-        let root = ComponentId::default();
+        self.dirty_roots.remove(&root);
+        let root = ComponentId::root(root);
         self.seen.insert(root.clone());
         self.visited.push(root.clone());
         self.frames.push(HookFrame {
@@ -375,7 +469,7 @@ impl HookStore {
         parent.next_child += 1;
         parent.child_slots.push(slot.clone());
         let mut id = parent.id.clone();
-        id.0.push(slot);
+        id.path.push(slot);
         if !self.seen.insert(id.clone()) {
             return Err(format!(
                 "Lua component instance {} rendered more than once",
@@ -500,7 +594,7 @@ impl HookStore {
             HookSlot::Reducer { state, .. } => *state = value,
             _ => return Err("Lua state setter refers to a non-state hook".to_string()),
         }
-        self.dirty = true;
+        self.dirty_roots.insert(id.component.root.clone());
         Ok(())
     }
 
@@ -549,10 +643,24 @@ impl HookStore {
             *selected = next;
             changed_components.insert(id.component);
         }
-        if !changed_components.is_empty() {
-            self.dirty = true;
+        for component in &changed_components {
+            self.dirty_roots.insert(component.root.clone());
         }
         changed_components
+    }
+
+    fn set_window_open(&mut self, window_id: &str, open: bool) {
+        for (component_id, component) in &mut self.components {
+            for slot in &mut component.slots {
+                let HookSlot::Window { id, open: current } = slot else {
+                    continue;
+                };
+                if id == window_id && *current != open {
+                    *current = open;
+                    self.dirty_roots.insert(component_id.root.clone());
+                }
+            }
+        }
     }
 
     fn queue_effect(
@@ -586,7 +694,7 @@ impl HookStore {
         self.frames.clear();
         self.mismatch = None;
         self.pending_effects.clear();
-        self.dirty = false;
+        self.dirty_roots.remove(&id.root);
         jobs
     }
 
@@ -653,9 +761,13 @@ impl HookStore {
     }
 
     fn commit_render(&mut self) -> Vec<EffectJob> {
+        let root = self
+            .active_root
+            .take()
+            .expect("Lua hook render has an active root");
         let removed = self
             .components
-            .extract_if(|component, _| !self.seen.contains(component))
+            .extract_if(|component, _| component.root == root && !self.seen.contains(component))
             .map(|(_, hooks)| hooks)
             .collect::<Vec<_>>();
         let mut jobs = removed
@@ -682,6 +794,7 @@ impl HookStore {
         }
         self.frames.clear();
         self.visited.clear();
+        self.active_root = None;
         self.refreshing = false;
         jobs
     }
@@ -711,6 +824,29 @@ impl HookStore {
             .into_values()
             .flat_map(component_cleanup_jobs)
             .collect()
+    }
+
+    fn take_root_cleanup_jobs(&mut self, root: &str) -> Vec<EffectJob> {
+        self.dirty_roots.remove(root);
+        self.components
+            .extract_if(|component, _| component.root.as_ref() == root)
+            .map(|(_, hooks)| hooks)
+            .flat_map(component_cleanup_jobs)
+            .collect()
+    }
+
+    fn root_is_dirty(&self, root: &str) -> bool {
+        self.dirty_roots.contains(root)
+    }
+
+    fn dirty_root_ids(&self) -> Vec<LuaRootId> {
+        self.dirty_roots.iter().cloned().collect()
+    }
+
+    fn current_root(&self) -> Result<LuaRootId, String> {
+        self.active_root
+            .clone()
+            .ok_or_else(|| "Lua operation requires an active render root".to_string())
     }
 
     #[cfg(test)]
@@ -749,6 +885,12 @@ enum MemoKey {
     String(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ScopedMemoKey {
+    root: LuaRootId,
+    key: MemoKey,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum MemoDependencyKey {
     Boolean(bool),
@@ -783,8 +925,8 @@ struct MemoHit {
 
 #[derive(Default)]
 struct MemoStore {
-    entries: HashMap<MemoKey, MemoEntry>,
-    seen: HashSet<MemoKey>,
+    entries: HashMap<ScopedMemoKey, MemoEntry>,
+    seen: HashSet<ScopedMemoKey>,
 }
 
 struct PendingNode {
@@ -1005,6 +1147,26 @@ struct LuaNode {
     memo_key: Option<MemoKey>,
 }
 
+struct LuaRoot {
+    options: LuaWindowOptions,
+    render: Function,
+    node: Option<LuaNode>,
+    handlers: HashMap<(u64, String), Function>,
+    host_tokens: Vec<i64>,
+}
+
+impl LuaRoot {
+    fn new(options: LuaWindowOptions, render: Function) -> Self {
+        Self {
+            options,
+            render,
+            node: None,
+            handlers: HashMap::new(),
+            host_tokens: Vec::new(),
+        }
+    }
+}
+
 impl LuaNode {
     fn identity_matches(&self, element_type: &str, key: Option<&str>) -> bool {
         self.element_type == element_type && self.key.as_deref() == key
@@ -1013,15 +1175,16 @@ impl LuaNode {
 
 pub(crate) struct LuaRuntime {
     lua: Lua,
-    render: Function,
+    roots: HashMap<LuaRootId, LuaRoot>,
     hooks: Arc<Mutex<HookStore>>,
     stores: Arc<Mutex<StoreRegistry>>,
     memo: Arc<Mutex<MemoStore>>,
     arena: Arc<Mutex<RenderArena>>,
-    host_handles: Arc<Mutex<HostHandleMap>>,
-    focus_request: Arc<Mutex<Option<u64>>>,
-    root: Option<LuaNode>,
-    handlers: HashMap<(u64, String), Function>,
+    host_handles: Arc<Mutex<MountedHostHandleMap>>,
+    focus_request: Arc<Mutex<Option<LuaFocusRequest>>>,
+    open_windows: Arc<Mutex<HashSet<String>>>,
+    application: Arc<Mutex<LuaApplicationRegistry>>,
+    application_entry: bool,
     loaded_modules: Arc<Mutex<HashSet<String>>>,
     next_id: u64,
 }
@@ -1032,8 +1195,64 @@ pub(crate) enum ReloadOutcome {
     ResetState,
 }
 
+pub(crate) struct LuaApplicationReload {
+    pub windows: Vec<LuaWindowOptions>,
+    pub removed: Vec<String>,
+}
+
 struct ModuleSnapshot {
     values: Vec<(String, Value)>,
+}
+
+fn roots_from_entry(
+    entry: Value,
+    application: &Arc<Mutex<LuaApplicationRegistry>>,
+) -> Result<(HashMap<LuaRootId, LuaRoot>, bool), String> {
+    match entry {
+        Value::Function(render) => {
+            let options = LuaWindowOptions {
+                id: DEFAULT_ROOT_ID.to_string(),
+                title: "GPUIX".to_string(),
+                width: 800.0,
+                height: 600.0,
+                open: true,
+                focus: true,
+                reposition: false,
+            };
+            Ok((
+                HashMap::from([(Arc::from(DEFAULT_ROOT_ID), LuaRoot::new(options, render))]),
+                false,
+            ))
+        }
+        Value::UserData(handle) => {
+            validate_app_handle(&handle).map_err(lua_error)?;
+            let application = application.lock().unwrap();
+            if !application.created {
+                return Err("Lua entry returned an inactive application".to_string());
+            }
+            if application.definitions.is_empty() {
+                return Err("Lua application must define at least one window".to_string());
+            }
+            Ok((
+                application
+                    .definitions
+                    .iter()
+                    .cloned()
+                    .map(|definition| {
+                        (
+                            Arc::from(definition.options.id.as_str()),
+                            LuaRoot::new(definition.options, definition.render),
+                        )
+                    })
+                    .collect(),
+                true,
+            ))
+        }
+        value => Err(format!(
+            "Lua entry must return a render function or gpuix application, got {}",
+            value.type_name()
+        )),
+    }
 }
 
 impl LuaRuntime {
@@ -1046,13 +1265,25 @@ impl LuaRuntime {
     }
 
     pub(crate) fn load_file(path: &Path, tree: &mut RetainedTree) -> Result<Self, String> {
+        let mut runtime = Self::load_application_file(path)?;
+        if runtime.roots.len() != 1 || !runtime.roots.contains_key(DEFAULT_ROOT_ID) {
+            return Err(
+                "A multiwindow Lua application cannot be mounted in a single test renderer"
+                    .to_string(),
+            );
+        }
+        runtime.render(tree, false)?;
+        Ok(runtime)
+    }
+
+    pub(crate) fn load_application_file(path: &Path) -> Result<Self, String> {
         let source = std::fs::read_to_string(path)
             .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
         let luax = path
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| extension.eq_ignore_ascii_case("luax"));
-        Self::load_source(&source, Some(path), luax, tree)
+        Self::load_source_unrendered(&source, Some(path), luax)
     }
 
     fn load_source(
@@ -1061,13 +1292,30 @@ impl LuaRuntime {
         luax: bool,
         tree: &mut RetainedTree,
     ) -> Result<Self, String> {
+        let mut runtime = Self::load_source_unrendered(source, path, luax)?;
+        if runtime.roots.len() != 1 || !runtime.roots.contains_key(DEFAULT_ROOT_ID) {
+            return Err(
+                "A multiwindow Lua application cannot be mounted in a single renderer".to_string(),
+            );
+        }
+        runtime.render(tree, false)?;
+        Ok(runtime)
+    }
+
+    fn load_source_unrendered(
+        source: &str,
+        path: Option<&Path>,
+        luax: bool,
+    ) -> Result<Self, String> {
         let lua = Lua::new();
         let hooks = Arc::new(Mutex::new(HookStore::new()));
         let stores = Arc::new(Mutex::new(StoreRegistry::default()));
         let memo = Arc::new(Mutex::new(MemoStore::default()));
         let arena = Arc::new(Mutex::new(RenderArena::default()));
-        let host_handles = Arc::new(Mutex::new(HostHandleMap::new()));
+        let host_handles = Arc::new(Mutex::new(MountedHostHandleMap::new()));
         let focus_request = Arc::new(Mutex::new(None));
+        let open_windows = Arc::new(Mutex::new(HashSet::new()));
+        let application = Arc::new(Mutex::new(LuaApplicationRegistry::default()));
         let styles = Arc::new(Mutex::new(StyleCache::new()));
         let loaded_modules = Arc::new(Mutex::new(HashSet::new()));
         install_api(
@@ -1078,6 +1326,8 @@ impl LuaRuntime {
             arena.clone(),
             host_handles.clone(),
             focus_request.clone(),
+            open_windows.clone(),
+            application.clone(),
             styles,
         )
         .map_err(lua_error)?;
@@ -1085,25 +1335,109 @@ impl LuaRuntime {
         if let Some(root) = path.and_then(Path::parent) {
             install_module_searcher(&lua, root, loaded_modules.clone()).map_err(lua_error)?;
         }
-        let render = compile_entry(&lua, source, path, luax)?
-            .call::<Function>(())
+        application.lock().unwrap().begin_entry();
+        let entry = compile_entry(&lua, source, path, luax)?
+            .call::<Value>(())
             .map_err(lua_error)?;
-        let mut runtime = Self {
+        let (roots, application_entry) = roots_from_entry(entry, &application)?;
+        open_windows.lock().unwrap().extend(
+            roots
+                .values()
+                .filter(|root| root.options.open)
+                .map(|root| root.options.id.clone()),
+        );
+        Ok(Self {
             lua,
-            render,
+            roots,
             hooks,
             stores,
             memo,
             arena,
             host_handles,
             focus_request,
-            root: None,
-            handlers: HashMap::new(),
+            open_windows,
+            application,
+            application_entry,
             loaded_modules,
             next_id: 1,
+        })
+    }
+
+    pub(crate) fn window_options(&self) -> Vec<LuaWindowOptions> {
+        if self.application_entry {
+            return self
+                .application
+                .lock()
+                .unwrap()
+                .definitions
+                .iter()
+                .map(|definition| definition.options.clone())
+                .collect();
+        }
+        self.roots
+            .values()
+            .map(|root| root.options.clone())
+            .collect()
+    }
+
+    pub(crate) fn is_application_entry(&self) -> bool {
+        self.application_entry
+    }
+
+    pub(crate) fn mount_window(&mut self, id: &str, tree: &mut RetainedTree) -> Result<(), String> {
+        self.render_root(id, tree, false)
+    }
+
+    pub(crate) fn unmount_window(&mut self, id: &str) {
+        let jobs = self.hooks.lock().unwrap().take_root_cleanup_jobs(id);
+        run_effect_cleanups(&self.lua, &jobs);
+        if let Some(root) = self.roots.get_mut(id) {
+            root.node = None;
+            root.handlers.clear();
+            let mut handles = self.host_handles.lock().unwrap();
+            for token in root.host_tokens.drain(..) {
+                handles.remove(&token);
+            }
+        }
+        self.memo
+            .lock()
+            .unwrap()
+            .entries
+            .retain(|key, _| key.root.as_ref() != id);
+        self.set_window_open(id, false);
+    }
+
+    pub(crate) fn set_window_open(&self, id: &str, open: bool) {
+        let changed = {
+            let mut windows = self.open_windows.lock().unwrap();
+            if open {
+                windows.insert(id.to_string())
+            } else {
+                windows.remove(id)
+            }
         };
-        runtime.render(tree, false)?;
-        Ok(runtime)
+        if changed {
+            self.hooks.lock().unwrap().set_window_open(id, open);
+        }
+    }
+
+    pub(crate) fn dirty_window_ids(&self) -> Vec<String> {
+        self.hooks
+            .lock()
+            .unwrap()
+            .dirty_root_ids()
+            .into_iter()
+            .map(|root| root.to_string())
+            .collect()
+    }
+
+    pub(crate) fn take_app_commands(&self) -> Vec<LuaAppCommand> {
+        self.application
+            .lock()
+            .unwrap()
+            .commands
+            .drain(..)
+            .collect()
     }
 
     pub(crate) fn reload_file(
@@ -1130,7 +1464,13 @@ impl LuaRuntime {
                 return Err(lua_error(error));
             }
         };
-        let previous_render = std::mem::replace(&mut self.render, render);
+        let previous_render = {
+            let root = self
+                .roots
+                .get_mut(DEFAULT_ROOT_ID)
+                .ok_or_else(|| "Lua main root is missing".to_string())?;
+            std::mem::replace(&mut root.render, render)
+        };
         self.memo.lock().unwrap().entries.clear();
 
         let mut reset_components = HashSet::new();
@@ -1143,14 +1483,14 @@ impl LuaRuntime {
                 Err(error) if is_hook_order_error(&error) => {
                     let mismatch = self.hooks.lock().unwrap().take_mismatch();
                     let Some(mismatch) = mismatch else {
-                        self.render = previous_render;
+                        self.roots.get_mut(DEFAULT_ROOT_ID).unwrap().render = previous_render;
                         self.hooks.lock().unwrap().restore(hook_snapshot);
                         self.stores.lock().unwrap().restore(store_snapshot);
                         self.restore_modules(module_snapshot).map_err(lua_error)?;
                         return Err(error);
                     };
                     if !reset_components.insert(mismatch.clone()) {
-                        self.render = previous_render;
+                        self.roots.get_mut(DEFAULT_ROOT_ID).unwrap().render = previous_render;
                         self.hooks.lock().unwrap().restore(hook_snapshot);
                         self.stores.lock().unwrap().restore(store_snapshot);
                         self.restore_modules(module_snapshot).map_err(lua_error)?;
@@ -1161,7 +1501,7 @@ impl LuaRuntime {
                     self.memo.lock().unwrap().entries.clear();
                 }
                 Err(error) => {
-                    self.render = previous_render;
+                    self.roots.get_mut(DEFAULT_ROOT_ID).unwrap().render = previous_render;
                     self.hooks.lock().unwrap().restore(hook_snapshot);
                     self.stores.lock().unwrap().restore(store_snapshot);
                     self.restore_modules(module_snapshot).map_err(lua_error)?;
@@ -1171,54 +1511,216 @@ impl LuaRuntime {
         }
     }
 
+    pub(crate) fn reload_application_file(
+        &mut self,
+        path: &Path,
+    ) -> Result<LuaApplicationReload, String> {
+        let source = std::fs::read_to_string(path)
+            .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
+        let luax = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("luax"));
+        let entry = compile_entry(&self.lua, &source, Some(path), luax)?;
+        let store_snapshot = self.stores.lock().unwrap().snapshot();
+        let application_snapshot = self.application.lock().unwrap().clone();
+        let module_snapshot = self.unload_modules().map_err(lua_error)?;
+        self.stores.lock().unwrap().begin_reload();
+        self.application.lock().unwrap().begin_entry();
+        let value = match entry.call::<Value>(()) {
+            Ok(value) => value,
+            Err(error) => {
+                self.stores.lock().unwrap().restore(store_snapshot);
+                *self.application.lock().unwrap() = application_snapshot;
+                self.restore_modules(module_snapshot).map_err(lua_error)?;
+                return Err(lua_error(error));
+            }
+        };
+        let (mut next_roots, application_entry) = match roots_from_entry(value, &self.application) {
+            Ok(roots) => roots,
+            Err(error) => {
+                self.stores.lock().unwrap().restore(store_snapshot);
+                *self.application.lock().unwrap() = application_snapshot;
+                self.restore_modules(module_snapshot).map_err(lua_error)?;
+                return Err(error);
+            }
+        };
+        if !application_entry {
+            self.stores.lock().unwrap().restore(store_snapshot);
+            *self.application.lock().unwrap() = application_snapshot;
+            self.restore_modules(module_snapshot).map_err(lua_error)?;
+            return Err(
+                "A multiwindow application cannot reload as a single render function".to_string(),
+            );
+        }
+
+        let previous_ids = self.roots.keys().cloned().collect::<HashSet<_>>();
+        {
+            let mut open_windows = self.open_windows.lock().unwrap();
+            open_windows.retain(|id| next_roots.contains_key(id.as_str()));
+            for (id, root) in &next_roots {
+                if !previous_ids.contains(id) && root.options.open {
+                    open_windows.insert(id.to_string());
+                }
+            }
+        }
+
+        let mut previous_roots = std::mem::take(&mut self.roots);
+        for (id, next) in &mut next_roots {
+            let Some(previous) = previous_roots.remove(id.as_ref()) else {
+                continue;
+            };
+            next.node = previous.node;
+            next.handlers = previous.handlers;
+            next.host_tokens = previous.host_tokens;
+        }
+        let mut removed = Vec::with_capacity(previous_roots.len());
+        for (id, root) in previous_roots {
+            let id = id.to_string();
+            {
+                let mut handles = self.host_handles.lock().unwrap();
+                for token in root.host_tokens {
+                    handles.remove(&token);
+                }
+            }
+            let jobs = self.hooks.lock().unwrap().take_root_cleanup_jobs(&id);
+            run_effect_cleanups(&self.lua, &jobs);
+            self.memo
+                .lock()
+                .unwrap()
+                .entries
+                .retain(|key, _| key.root.as_ref() != id.as_str());
+            removed.push(id);
+        }
+        self.roots = next_roots;
+        self.application_entry = true;
+        self.memo.lock().unwrap().entries.clear();
+        Ok(LuaApplicationReload {
+            windows: self.window_options(),
+            removed,
+        })
+    }
+
+    pub(crate) fn refresh_window(
+        &mut self,
+        id: &str,
+        tree: &mut RetainedTree,
+    ) -> Result<ReloadOutcome, String> {
+        let mut reset_components = HashSet::new();
+        loop {
+            match self.render_root(id, tree, true) {
+                Ok(()) if reset_components.is_empty() => {
+                    return Ok(ReloadOutcome::PreservedState);
+                }
+                Ok(()) => return Ok(ReloadOutcome::ResetState),
+                Err(error) if is_hook_order_error(&error) => {
+                    let mismatch = self.hooks.lock().unwrap().take_mismatch();
+                    let Some(mismatch) = mismatch else {
+                        return Err(error);
+                    };
+                    if mismatch.root.as_ref() != id || !reset_components.insert(mismatch.clone()) {
+                        return Err(error);
+                    }
+                    let cleanup = self.hooks.lock().unwrap().reset_component(&mismatch);
+                    run_effect_cleanups(&self.lua, &cleanup);
+                    self.memo
+                        .lock()
+                        .unwrap()
+                        .entries
+                        .retain(|key, _| key.root.as_ref() != id);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     pub(crate) fn dispatch_event(
         &mut self,
         payload: EventPayload,
         tree: &mut RetainedTree,
     ) -> Result<bool, String> {
-        *self.focus_request.lock().unwrap() = None;
-        let id = payload.element_id as u64;
-        let Some(handler) = self
-            .handlers
-            .get(&(id, payload.event_type.clone()))
-            .cloned()
-        else {
-            return Ok(false);
-        };
-        let event = event_table(&self.lua, &payload).map_err(lua_error)?;
-        handler.call::<()>(event).map_err(lua_error)?;
-        let dirty = self.hooks.lock().unwrap().dirty;
+        let dirty_roots = self.dispatch_window_event(DEFAULT_ROOT_ID, payload)?;
+        let dirty = dirty_roots.iter().any(|root| root == DEFAULT_ROOT_ID);
         if dirty {
             self.render(tree, false)?;
         }
         Ok(dirty)
     }
 
-    pub(crate) fn take_focus_request(&self) -> Option<u64> {
+    pub(crate) fn dispatch_window_event(
+        &mut self,
+        root_id: &str,
+        payload: EventPayload,
+    ) -> Result<Vec<String>, String> {
+        *self.focus_request.lock().unwrap() = None;
+        let id = payload.element_id as u64;
+        let Some(handler) = self
+            .roots
+            .get(root_id)
+            .and_then(|root| root.handlers.get(&(id, payload.event_type.clone())))
+            .cloned()
+        else {
+            return Ok(Vec::new());
+        };
+        let event = event_table(&self.lua, &payload).map_err(lua_error)?;
+        handler.call::<()>(event).map_err(lua_error)?;
+        Ok(self
+            .hooks
+            .lock()
+            .unwrap()
+            .dirty_root_ids()
+            .into_iter()
+            .map(|root| root.to_string())
+            .collect())
+    }
+
+    pub(crate) fn take_focus_request(&self) -> Option<LuaFocusRequest> {
         self.focus_request.lock().unwrap().take()
     }
 
     fn render(&mut self, tree: &mut RetainedTree, refreshing: bool) -> Result<(), String> {
+        self.render_root(DEFAULT_ROOT_ID, tree, refreshing)
+    }
+
+    fn render_root(
+        &mut self,
+        root_id: &str,
+        tree: &mut RetainedTree,
+        refreshing: bool,
+    ) -> Result<(), String> {
         for pass in 0..25 {
-            self.render_once(tree, refreshing && pass == 0)?;
-            if !self.hooks.lock().unwrap().dirty {
+            self.render_root_once(root_id, tree, refreshing && pass == 0)?;
+            if !self.hooks.lock().unwrap().root_is_dirty(root_id) {
                 return Ok(());
             }
         }
-        Err("Lua hooks scheduled too many consecutive renders".to_string())
+        Err(format!(
+            "Lua hooks scheduled too many consecutive renders in window {root_id:?}"
+        ))
     }
 
-    fn render_once(&mut self, tree: &mut RetainedTree, refreshing: bool) -> Result<(), String> {
+    fn render_root_once(
+        &mut self,
+        root_id: &str,
+        tree: &mut RetainedTree,
+        refreshing: bool,
+    ) -> Result<(), String> {
+        let root_key: LuaRootId = self
+            .roots
+            .get_key_value(root_id)
+            .map(|(id, _)| id.clone())
+            .ok_or_else(|| format!("Lua window {root_id:?} is not defined"))?;
+        let render = self.roots[root_id].render.clone();
         let hook_snapshot = {
             let mut hooks = self.hooks.lock().unwrap();
             let snapshot = hooks.snapshot();
-            hooks.begin_render(refreshing);
+            hooks.begin_render(root_key.clone(), refreshing);
             snapshot
         };
         self.memo.lock().unwrap().seen.clear();
         self.arena.lock().unwrap().begin_render();
 
-        let value = match self.render.call::<Value>(()) {
+        let value = match render.call::<Value>(()) {
             Ok(value) => value,
             Err(error) => {
                 self.memo.lock().unwrap().entries.clear();
@@ -1255,10 +1757,13 @@ impl LuaRuntime {
         {
             let mut memo = self.memo.lock().unwrap();
             let MemoStore { entries, seen } = &mut *memo;
-            entries.retain(|key, _| seen.contains(key));
+            entries.retain(|key, _| key.root != root_key || seen.contains(key));
         }
 
-        let old = self.root.take();
+        let (old, old_host_tokens) = {
+            let root = self.roots.get_mut(root_id).unwrap();
+            (root.node.take(), std::mem::take(&mut root.host_tokens))
+        };
         let arena = self.arena.clone();
         let mut arena = arena.lock().unwrap();
         let mut handle_aliases = HostHandleMap::new();
@@ -1280,10 +1785,28 @@ impl LuaRuntime {
         drop(arena);
         tree.set_root(Some(root.id));
         collect_host_handles(&root, &mut handle_aliases);
-        *self.host_handles.lock().unwrap() = handle_aliases;
-        self.handlers.clear();
-        collect_handlers(&root, &mut self.handlers);
-        self.root = Some(root);
+        let host_tokens = handle_aliases.keys().copied().collect();
+        {
+            let mut handles = self.host_handles.lock().unwrap();
+            for token in old_host_tokens {
+                handles.remove(&token);
+            }
+            handles.extend(handle_aliases.into_iter().map(|(token, element_id)| {
+                (
+                    token,
+                    MountedHostHandle {
+                        root: root_key.clone(),
+                        element_id,
+                    },
+                )
+            }));
+        }
+        let mut handlers = HashMap::new();
+        collect_handlers(&root, &mut handlers);
+        let root_state = self.roots.get_mut(root_id).unwrap();
+        root_state.node = Some(root);
+        root_state.handlers = handlers;
+        root_state.host_tokens = host_tokens;
         let effects = self.hooks.lock().unwrap().commit_render();
         self.run_effect_jobs(effects);
         Ok(())
@@ -1525,11 +2048,11 @@ fn hook_signature_error(
 }
 
 fn component_label(component: &ComponentId) -> String {
-    if component.0.is_empty() {
-        return "root".to_string();
+    let mut label = format!("window:{}", component.root);
+    if component.path.is_empty() {
+        return label;
     }
-    let mut label = String::from("root");
-    for slot in &component.0 {
+    for slot in &component.path {
         match slot {
             ComponentSlot::Position(position) => label.push_str(&format!("/#{position}")),
             ComponentSlot::Key(ComponentKey::Integer(key)) => {
@@ -1555,6 +2078,7 @@ fn hook_signature_label(signature: HookSignature) -> String {
         HookKind::Callback => "use_callback",
         HookKind::Effect => "use_effect",
         HookKind::Store => "store.use_state",
+        HookKind::Window => "use_window_open",
     };
     let mut label = match signature.value_type {
         Some(value_type) => {
@@ -1945,17 +2469,212 @@ fn create_store_table(
     Ok(store)
 }
 
+fn validate_app_handle(handle: &AnyUserData) -> mlua::Result<()> {
+    handle.borrow::<LuaAppHandle>().map(|_| ()).map_err(|_| {
+        mlua::Error::runtime("gpuix application function expects a value from gpuix.create_app")
+    })
+}
+
+fn positive_window_dimension(value: Option<f32>, default: f32, name: &str) -> mlua::Result<f32> {
+    let value = value.unwrap_or(default);
+    if !value.is_finite() || value <= 0.0 {
+        return Err(mlua::Error::runtime(format!(
+            "window {name} must be greater than zero"
+        )));
+    }
+    Ok(value)
+}
+
+fn parse_window_definition(table: Table) -> mlua::Result<LuaWindowDefinition> {
+    let id = table.get::<String>("id")?;
+    if id.trim().is_empty() {
+        return Err(mlua::Error::runtime("window id cannot be empty"));
+    }
+    let render = table.get::<Function>("render")?;
+    let title = table
+        .get::<Option<String>>("title")?
+        .unwrap_or_else(|| id.clone());
+    let width = positive_window_dimension(table.get("width")?, 800.0, "width")?;
+    let height = positive_window_dimension(table.get("height")?, 600.0, "height")?;
+    let open = table.get::<Option<bool>>("open")?.unwrap_or(true);
+    let focus = table.get::<Option<bool>>("focus")?.unwrap_or(true);
+    let reposition = table.get::<Option<bool>>("reposition")?.unwrap_or(false);
+    Ok(LuaWindowDefinition {
+        options: LuaWindowOptions {
+            id,
+            title,
+            width,
+            height,
+            open,
+            focus,
+            reposition,
+        },
+        render,
+    })
+}
+
+fn queue_app_command(
+    handle: AnyUserData,
+    id: String,
+    application: &Arc<Mutex<LuaApplicationRegistry>>,
+    command: impl FnOnce(String) -> LuaAppCommand,
+) -> mlua::Result<()> {
+    validate_app_handle(&handle)?;
+    let mut application = application.lock().unwrap();
+    if !application.definition_exists(&id) {
+        return Err(mlua::Error::runtime(format!(
+            "Lua window {id:?} is not defined"
+        )));
+    }
+    application.commands.push_back(command(id));
+    Ok(())
+}
+
 fn install_api(
     lua: &Lua,
     hooks: Arc<Mutex<HookStore>>,
     stores: Arc<Mutex<StoreRegistry>>,
     memo: Arc<Mutex<MemoStore>>,
     arena: Arc<Mutex<RenderArena>>,
-    host_handles: Arc<Mutex<HostHandleMap>>,
-    focus_request: Arc<Mutex<Option<u64>>>,
+    host_handles: Arc<Mutex<MountedHostHandleMap>>,
+    focus_request: Arc<Mutex<Option<LuaFocusRequest>>>,
+    open_windows: Arc<Mutex<HashSet<String>>>,
+    application: Arc<Mutex<LuaApplicationRegistry>>,
     styles: Arc<Mutex<StyleCache>>,
 ) -> mlua::Result<()> {
     let api = lua.create_table()?;
+
+    let create_app_registry = application.clone();
+    api.set(
+        "create_app",
+        lua.create_function(move |lua, ()| {
+            let mut application = create_app_registry.lock().unwrap();
+            if application.created {
+                return Err(mlua::Error::runtime(
+                    "gpuix.create_app may only be called once per entry",
+                ));
+            }
+            application.created = true;
+            lua.create_userdata(LuaAppHandle)
+        })?,
+    )?;
+
+    let define_window_registry = application.clone();
+    api.set(
+        "define_window",
+        lua.create_function(move |_, (handle, definition): (AnyUserData, Table)| {
+            validate_app_handle(&handle)?;
+            let definition = parse_window_definition(definition)?;
+            let mut application = define_window_registry.lock().unwrap();
+            if !application.created {
+                return Err(mlua::Error::runtime(
+                    "gpuix.define_window requires an active application",
+                ));
+            }
+            if application.definition_exists(&definition.options.id) {
+                return Err(mlua::Error::runtime(format!(
+                    "duplicate Lua window id {:?}",
+                    definition.options.id
+                )));
+            }
+            application.definitions.push(definition);
+            Ok(())
+        })?,
+    )?;
+
+    let open_window_registry = application.clone();
+    api.set(
+        "open_window",
+        lua.create_function(move |_, (handle, id): (AnyUserData, String)| {
+            queue_app_command(handle, id, &open_window_registry, LuaAppCommand::Open)
+        })?,
+    )?;
+
+    let close_window_registry = application.clone();
+    api.set(
+        "close_window",
+        lua.create_function(move |_, (handle, id): (AnyUserData, String)| {
+            queue_app_command(handle, id, &close_window_registry, LuaAppCommand::Close)
+        })?,
+    )?;
+
+    let focus_window_registry = application.clone();
+    api.set(
+        "focus_window",
+        lua.create_function(move |_, (handle, id): (AnyUserData, String)| {
+            queue_app_command(handle, id, &focus_window_registry, LuaAppCommand::Focus)
+        })?,
+    )?;
+
+    let title_window_registry = application.clone();
+    api.set(
+        "set_window_title",
+        lua.create_function(
+            move |_, (handle, id, title): (AnyUserData, String, String)| {
+                validate_app_handle(&handle)?;
+                let mut application = title_window_registry.lock().unwrap();
+                if !application.definition_exists(&id) {
+                    return Err(mlua::Error::runtime(format!(
+                        "Lua window {id:?} is not defined"
+                    )));
+                }
+                application
+                    .commands
+                    .push_back(LuaAppCommand::SetTitle { id, title });
+                Ok(())
+            },
+        )?,
+    )?;
+
+    let window_hook_application = application.clone();
+    let window_hook_windows = open_windows.clone();
+    let window_hook_hooks = hooks.clone();
+    api.set(
+        "use_window_open",
+        lua.create_function(move |_, arguments: WindowHookArguments| {
+            let HookArguments((handle, window_id), site) = arguments;
+            validate_app_handle(&handle)?;
+            if !window_hook_application
+                .lock()
+                .unwrap()
+                .definition_exists(&window_id)
+            {
+                return Err(mlua::Error::runtime(format!(
+                    "Lua window {window_id:?} is not defined"
+                )));
+            }
+            let open = window_hook_windows.lock().unwrap().contains(&window_id);
+            let signature = HookSignature {
+                kind: HookKind::Window,
+                value_type: None,
+                site,
+            };
+            let (hook_id, existing) = window_hook_hooks
+                .lock()
+                .unwrap()
+                .next_hook(signature)
+                .map_err(mlua::Error::runtime)?;
+            if existing.is_some() && !matches!(&existing, Some(HookSlot::Window { .. })) {
+                return Err(mlua::Error::runtime(
+                    "gpuix.use_window_open found an incompatible hook slot",
+                ));
+            }
+            let slot = HookSlot::Window {
+                id: window_id,
+                open,
+            };
+            if existing.is_some() {
+                window_hook_hooks
+                    .lock()
+                    .unwrap()
+                    .replace_slot(&hook_id, slot)
+                    .map_err(mlua::Error::runtime)?;
+            } else {
+                window_hook_hooks.lock().unwrap().push_slot(&hook_id, slot);
+            }
+            Ok(open)
+        })?,
+    )?;
 
     let h_arena = arena.clone();
     let h_styles = styles.clone();
@@ -2006,13 +2725,16 @@ fn install_api(
     api.set("text", text)?;
 
     let focus = lua.create_function(move |_, handle: i64| {
-        let id = host_handles
+        let handle = host_handles
             .lock()
             .unwrap()
             .get(&handle)
-            .copied()
+            .cloned()
             .ok_or_else(|| mlua::Error::runtime("gpuix.focus expects a mounted host handle"))?;
-        *focus_request.lock().unwrap() = Some(id);
+        *focus_request.lock().unwrap() = Some(LuaFocusRequest {
+            root_id: handle.root.to_string(),
+            element_id: handle.element_id,
+        });
         Ok(())
     })?;
     api.set("focus", focus)?;
@@ -2400,7 +3122,12 @@ fn install_api(
         move |_, (key, dependencies, render): (Value, Value, Function)| {
             let key = memo_key(&key)?;
             let dependencies = memo_dependency(&dependencies)?;
-            if let Some(cached) = memo_lookup(&memo_store, &key, &dependencies)? {
+            let root = memo_hooks
+                .lock()
+                .unwrap()
+                .current_root()
+                .map_err(mlua::Error::runtime)?;
+            if let Some(cached) = memo_lookup(&memo_store, root.clone(), &key, &dependencies)? {
                 if !cached.component_slots.is_empty() {
                     memo_hooks
                         .lock()
@@ -2432,6 +3159,7 @@ fn install_api(
             memo_commit(
                 &memo_store,
                 &memo_arena,
+                root,
                 key,
                 dependencies,
                 component_slots,
@@ -2475,7 +3203,14 @@ fn install_api(
                     ));
                 };
                 let key = memo_key(&raw_key)?;
-                let handle = if let Some(cached) = memo_lookup(&memo, &key, &dependency)? {
+                let root = batch_hooks
+                    .lock()
+                    .unwrap()
+                    .current_root()
+                    .map_err(mlua::Error::runtime)?;
+                let handle = if let Some(cached) =
+                    memo_lookup(&memo, root.clone(), &key, &dependency)?
+                {
                     if !cached.component_slots.is_empty() {
                         batch_hooks
                             .lock()
@@ -2506,6 +3241,7 @@ fn install_api(
                     memo_commit(
                         &memo,
                         &batch_arena,
+                        root,
                         key,
                         dependency.clone(),
                         component_slots,
@@ -2531,18 +3267,23 @@ fn install_api(
 
 fn memo_lookup(
     memo: &Arc<Mutex<MemoStore>>,
+    root: LuaRootId,
     key: &MemoKey,
     dependencies: &MemoDependency,
 ) -> mlua::Result<Option<MemoHit>> {
     let mut memo = memo.lock().unwrap();
-    if !memo.seen.insert(key.clone()) {
+    let scoped_key = ScopedMemoKey {
+        root,
+        key: key.clone(),
+    };
+    if !memo.seen.insert(scoped_key.clone()) {
         return Err(mlua::Error::runtime(format!(
             "duplicate gpuix.memo key {key:?}"
         )));
     }
     Ok(memo
         .entries
-        .get(key)
+        .get(&scoped_key)
         .filter(|entry| entry.dependencies == *dependencies)
         .map(|entry| MemoHit {
             node: CachedNode {
@@ -2558,6 +3299,7 @@ fn memo_lookup(
 fn memo_commit(
     memo: &Arc<Mutex<MemoStore>>,
     arena: &Arc<Mutex<RenderArena>>,
+    root: LuaRootId,
     key: MemoKey,
     dependencies: MemoDependency,
     component_slots: Vec<ComponentSlot>,
@@ -2573,7 +3315,7 @@ fn memo_commit(
         identity
     };
     memo.lock().unwrap().entries.insert(
-        key,
+        ScopedMemoKey { root, key },
         MemoEntry {
             dependencies,
             element_type: Arc::from(element_type),
@@ -5042,6 +5784,395 @@ mod tests {
         .unwrap();
 
         assert!(error.contains("wrap text with gpuix.text(value)"));
+    }
+
+    #[test]
+    fn application_windows_share_stores_and_keep_local_hooks_isolated() {
+        let mut runtime = LuaRuntime::load_source_unrendered(
+            r#"
+                local ui = gpuix
+                local app = ui.create_app()
+                local store = ui.create_store("counter", function(state, action)
+                    if action.type == "increment" then
+                        return { count = state.count + 1 }
+                    end
+                    return state
+                end, { count = 0 })
+
+                ui.define_window(app, {
+                    id = "main",
+                    title = "Main",
+                    render = function()
+                        local local_count, set_local_count = ui.use_state(0)
+                        local count = store.use_state(function(state) return state.count end)
+                        return ui.div {
+                            testId = "main-button",
+                            onClick = function()
+                                set_local_count(local_count + 1)
+                                store.dispatch({ type = "increment" })
+                            end,
+                            ui.text("main " .. local_count .. " shared " .. count),
+                        }
+                    end,
+                })
+                ui.define_window(app, {
+                    id = "inspector",
+                    title = "Inspector",
+                    open = false,
+                    render = function()
+                        local local_count = ui.use_state(0)
+                        local count = store.use_state(function(state) return state.count end)
+                        return ui.div { ui.text("inspector " .. local_count .. " shared " .. count) }
+                    end,
+                })
+                return app
+            "#,
+            None,
+            false,
+        )
+        .unwrap();
+        let mut main = RetainedTree::new();
+        let mut inspector = RetainedTree::new();
+        runtime.mount_window("main", &mut main).unwrap();
+        runtime.mount_window("inspector", &mut inspector).unwrap();
+        assert!(has_text(&main, "main 0 shared 0"));
+        assert!(has_text(&inspector, "inspector 0 shared 0"));
+
+        let element_id = main
+            .elements
+            .values()
+            .find(|element| element.test_id.as_deref() == Some("main-button"))
+            .unwrap()
+            .id;
+        let dirty = runtime
+            .dispatch_window_event(
+                "main",
+                EventPayload {
+                    element_id: element_id as f64,
+                    event_type: "click".to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(dirty.len(), 2);
+        assert!(dirty.iter().any(|root| root == "main"));
+        assert!(dirty.iter().any(|root| root == "inspector"));
+        runtime.mount_window("main", &mut main).unwrap();
+        runtime.mount_window("inspector", &mut inspector).unwrap();
+        assert!(has_text(&main, "main 1 shared 1"));
+        assert!(has_text(&inspector, "inspector 0 shared 1"));
+
+        runtime.unmount_window("main");
+        main = RetainedTree::new();
+        runtime.mount_window("main", &mut main).unwrap();
+        assert!(has_text(&main, "main 0 shared 1"));
+        assert!(has_text(&inspector, "inspector 0 shared 1"));
+    }
+
+    #[test]
+    fn application_window_commands_use_explicit_app_handles() {
+        let mut runtime = LuaRuntime::load_source_unrendered(
+            r#"
+                local ui = gpuix
+                local app = ui.create_app()
+                ui.define_window(app, {
+                    id = "main",
+                    render = function()
+                        return ui.div {
+                            testId = "open",
+                            onClick = function() ui.open_window(app, "inspector") end,
+                        }
+                    end,
+                })
+                ui.define_window(app, {
+                    id = "inspector",
+                    open = false,
+                    render = function() return ui.div {} end,
+                })
+                return app
+            "#,
+            None,
+            false,
+        )
+        .unwrap();
+        let mut main = RetainedTree::new();
+        runtime.mount_window("main", &mut main).unwrap();
+        let element_id = main
+            .elements
+            .values()
+            .find(|element| element.test_id.as_deref() == Some("open"))
+            .unwrap()
+            .id;
+        runtime
+            .dispatch_window_event(
+                "main",
+                EventPayload {
+                    element_id: element_id as f64,
+                    event_type: "click".to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.take_app_commands(),
+            vec![LuaAppCommand::Open("inspector".to_string())]
+        );
+    }
+
+    #[test]
+    fn application_window_reposition_option_defaults_off() {
+        let runtime = LuaRuntime::load_source_unrendered(
+            r#"
+                local ui = gpuix
+                local app = ui.create_app()
+                ui.define_window(app, {
+                    id = "main",
+                    render = function() return ui.div {} end,
+                })
+                ui.define_window(app, {
+                    id = "centered",
+                    reposition = true,
+                    render = function() return ui.div {} end,
+                })
+                return app
+            "#,
+            None,
+            false,
+        )
+        .unwrap();
+        let windows = runtime.window_options();
+        assert!(!windows[0].reposition);
+        assert!(windows[1].reposition);
+    }
+
+    #[test]
+    fn focus_requests_follow_the_host_handle_to_its_window() {
+        let mut runtime = LuaRuntime::load_source_unrendered(
+            r#"
+                local ui = gpuix
+                local app = ui.create_app()
+                local inspector_target = nil
+                ui.define_window(app, {
+                    id = "main",
+                    render = function()
+                        return ui.div {
+                            testId = "focus-inspector",
+                            onClick = function() ui.focus(inspector_target) end,
+                        }
+                    end,
+                })
+                ui.define_window(app, {
+                    id = "inspector",
+                    open = false,
+                    render = function()
+                        inspector_target = ui.div { testId = "inspector-target", tabIndex = 0 }
+                        return inspector_target
+                    end,
+                })
+                return app
+            "#,
+            None,
+            false,
+        )
+        .unwrap();
+        let mut main = RetainedTree::new();
+        let mut inspector = RetainedTree::new();
+        runtime.mount_window("main", &mut main).unwrap();
+        runtime.mount_window("inspector", &mut inspector).unwrap();
+        let element_id = main
+            .elements
+            .values()
+            .find(|element| element.test_id.as_deref() == Some("focus-inspector"))
+            .unwrap()
+            .id;
+        runtime
+            .dispatch_window_event(
+                "main",
+                EventPayload {
+                    element_id: element_id as f64,
+                    event_type: "click".to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let request = runtime.take_focus_request().unwrap();
+        assert_eq!(request.root_id, "inspector");
+        assert_eq!(
+            inspector.elements[&request.element_id].test_id.as_deref(),
+            Some("inspector-target")
+        );
+    }
+
+    #[test]
+    fn window_open_hook_reacts_to_open_and_unmount() {
+        let mut runtime = LuaRuntime::load_source_unrendered(
+            r#"
+                local ui = gpuix
+                local app = ui.create_app()
+                ui.define_window(app, {
+                    id = "main",
+                    render = function()
+                        local inspector_open = ui.use_window_open(app, "inspector")
+                        return ui.div {
+                            ui.text(inspector_open and "inspector open" or "inspector closed"),
+                        }
+                    end,
+                })
+                ui.define_window(app, {
+                    id = "inspector",
+                    open = false,
+                    render = function() return ui.div {} end,
+                })
+                return app
+            "#,
+            None,
+            false,
+        )
+        .unwrap();
+        let mut main = RetainedTree::new();
+        let mut inspector = RetainedTree::new();
+        runtime.mount_window("main", &mut main).unwrap();
+        assert!(has_text(&main, "inspector closed"));
+
+        runtime.set_window_open("inspector", true);
+        assert_eq!(runtime.dirty_window_ids(), vec!["main"]);
+        runtime.mount_window("main", &mut main).unwrap();
+        runtime.mount_window("inspector", &mut inspector).unwrap();
+        assert!(has_text(&main, "inspector open"));
+
+        runtime.unmount_window("inspector");
+        assert_eq!(runtime.dirty_window_ids(), vec!["main"]);
+        runtime.mount_window("main", &mut main).unwrap();
+        assert!(has_text(&main, "inspector closed"));
+    }
+
+    #[test]
+    fn application_reload_preserves_each_window_and_shared_store_state() {
+        let app = TempLuaApp::new();
+        let initial = app.write(
+            "main.lua",
+            r#"
+                local ui = gpuix
+                local app = ui.create_app()
+                local store = ui.create_store("reload-counter", function(state, action)
+                    if action.type == "increment" then
+                        return { count = state.count + 1 }
+                    end
+                    return state
+                end, { count = 0 })
+
+                ui.define_window(app, {
+                    id = "main",
+                    render = function()
+                        local local_count, set_local_count = ui.use_state(0)
+                        local count = store.use_state(function(state) return state.count end)
+                        return ui.div {
+                            testId = "increment",
+                            onClick = function()
+                                set_local_count(local_count + 1)
+                                store.dispatch({ type = "increment" })
+                            end,
+                            ui.text("initial main " .. local_count .. " shared " .. count),
+                        }
+                    end,
+                })
+                ui.define_window(app, {
+                    id = "inspector",
+                    open = false,
+                    render = function()
+                        local local_count = ui.use_state(0)
+                        local count = store.use_state(function(state) return state.count end)
+                        return ui.div {
+                            ui.text("initial inspector " .. local_count .. " shared " .. count),
+                        }
+                    end,
+                })
+                return app
+            "#,
+        );
+        let mut runtime = LuaRuntime::load_application_file(&initial).unwrap();
+        let mut main = RetainedTree::new();
+        let mut inspector = RetainedTree::new();
+        runtime.mount_window("main", &mut main).unwrap();
+        runtime.mount_window("inspector", &mut inspector).unwrap();
+
+        let element_id = main
+            .elements
+            .values()
+            .find(|element| element.test_id.as_deref() == Some("increment"))
+            .unwrap()
+            .id;
+        runtime
+            .dispatch_window_event(
+                "main",
+                EventPayload {
+                    element_id: element_id as f64,
+                    event_type: "click".to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        runtime.mount_window("main", &mut main).unwrap();
+        runtime.mount_window("inspector", &mut inspector).unwrap();
+
+        app.write(
+            "main.lua",
+            r#"
+                local ui = gpuix
+                local app = ui.create_app()
+                local store = ui.create_store("reload-counter", function(state, action)
+                    if action.type == "increment" then
+                        return { count = state.count + 1 }
+                    end
+                    return state
+                end, { count = 0 })
+
+                ui.define_window(app, {
+                    id = "main",
+                    render = function()
+                        local local_count = ui.use_state(0)
+                        local count = store.use_state(function(state) return state.count end)
+                        return ui.div {
+                            ui.text("reloaded main " .. local_count .. " shared " .. count),
+                        }
+                    end,
+                })
+                ui.define_window(app, {
+                    id = "inspector",
+                    open = false,
+                    render = function()
+                        local local_count = ui.use_state(0)
+                        local count = store.use_state(function(state) return state.count end)
+                        return ui.div {
+                            ui.text("reloaded inspector " .. local_count .. " shared " .. count),
+                        }
+                    end,
+                })
+                return app
+            "#,
+        );
+
+        let reload = runtime.reload_application_file(&initial).unwrap();
+        assert!(reload.removed.is_empty());
+        assert_eq!(
+            reload
+                .windows
+                .iter()
+                .map(|window| window.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["main", "inspector"]
+        );
+        assert_eq!(
+            runtime.refresh_window("main", &mut main).unwrap(),
+            ReloadOutcome::PreservedState
+        );
+        assert_eq!(
+            runtime.refresh_window("inspector", &mut inspector).unwrap(),
+            ReloadOutcome::PreservedState
+        );
+        assert!(has_text(&main, "reloaded main 1 shared 1"));
+        assert!(has_text(&inspector, "reloaded inspector 0 shared 1"));
     }
 
     fn dispatch_by_test_id(

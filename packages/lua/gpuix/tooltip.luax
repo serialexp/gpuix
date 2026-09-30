@@ -4,7 +4,7 @@ local root_style = { display = "flex", position = "relative", alignItems = "star
 local trigger_style = {
     display = "flex",
     alignItems = "center",
-    focusVisible = util.focus_ring,
+    focus = util.focus_ring,
 }
 local content_style = {
     maxWidth = 280,

@@ -12,7 +12,7 @@ local item_style = {
     flexDirection = "row",
     alignItems = "center",
     gap = 6,
-    focusVisible = util.focus_ring,
+    focus = util.focus_ring,
 }
 
 local indicator_style = {

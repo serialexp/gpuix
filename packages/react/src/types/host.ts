@@ -76,6 +76,7 @@ export interface BoxShadow {
   blurRadius: number
   spreadRadius: number
   color: string
+  inset?: boolean
 }
 
 export interface LinearGradientStop {
@@ -154,6 +155,7 @@ export interface StyleDesc {
   borderBottomLeftRadius?: number
   borderBottomRightRadius?: number
   boxShadow?: BoxShadow
+  foregroundBoxShadow?: BoxShadow
 
   fontSize?: number
   fontFamily?: string
@@ -393,7 +395,7 @@ export interface Props {
   /** Fires when user clicks OUTSIDE this element. Use for "click outside to close". */
   onMouseDownOutside?: (event: EventPayload) => void
 
-  // ── Keyboard events (need focus: autoFocus, or a click on the element) ──
+  // ── Keyboard events (need focus: autoFocus, or a click within the element) ──
   onKeyDown?: (event: EventPayload) => void
   onKeyUp?: (event: EventPayload) => void
 

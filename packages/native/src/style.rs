@@ -17,6 +17,8 @@ pub struct BoxShadowValue {
     pub blur_radius: f64,
     pub spread_radius: f64,
     pub color: String,
+    #[serde(default)]
+    pub inset: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -198,6 +200,7 @@ pub struct StyleDesc {
     pub border_bottom_left_radius: Option<f64>,
     pub border_bottom_right_radius: Option<f64>,
     pub box_shadow: Option<BoxShadowValue>,
+    pub foreground_box_shadow: Option<BoxShadowValue>,
 
     // Text
     pub font_size: Option<f64>,
@@ -399,7 +402,7 @@ mod tests {
     #[test]
     fn parses_focus_pseudo_styles() {
         let style: StyleDesc = serde_json::from_str(
-            r##"{"focus":{"borderColor":"#ffffff"},"focusVisible":{"boxShadow":{"offsetX":0,"offsetY":0,"blurRadius":0,"spreadRadius":2,"color":"#60a5fa"}}}"##,
+            r##"{"focus":{"borderColor":"#ffffff"},"focusVisible":{"foregroundBoxShadow":{"offsetX":0,"offsetY":0,"blurRadius":0,"spreadRadius":2,"color":"#60a5fa","inset":true}}}"##,
         )
         .unwrap();
 
@@ -414,10 +417,15 @@ mod tests {
             style
                 .focus_visible
                 .as_deref()
-                .and_then(|style| style.box_shadow.as_ref())
+                .and_then(|style| style.foreground_box_shadow.as_ref())
                 .map(|shadow| shadow.spread_radius),
             Some(2.0)
         );
+        assert!(style
+            .focus_visible
+            .as_deref()
+            .and_then(|style| style.foreground_box_shadow.as_ref())
+            .is_some_and(|shadow| shadow.inset));
     }
 
     #[test]

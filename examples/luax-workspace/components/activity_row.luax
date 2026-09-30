@@ -13,7 +13,7 @@ local base = gpuix.style {
     borderWidth = 1,
     borderColor = "#2d323d",
     marginBottom = 8,
-    focusVisible = theme.focus_visible,
+    focus = theme.focus_visible,
 }
 local active_style = gpuix.style {
     display = "flex",
@@ -26,7 +26,7 @@ local active_style = gpuix.style {
     borderWidth = 1,
     borderColor = "#e2795b",
     marginBottom = 8,
-    focusVisible = theme.focus_visible,
+    focus = theme.focus_visible,
 }
 
 return function(props)

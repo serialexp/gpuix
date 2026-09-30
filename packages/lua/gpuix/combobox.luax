@@ -10,7 +10,7 @@ local input_style = {
     borderColor = "#52525b",
     background = "#18181b",
     color = "#fafafa",
-    focusVisible = util.focus_ring,
+    focus = util.focus_ring,
 }
 local content_style = {
     width = 220,
@@ -98,7 +98,7 @@ return function(props)
     end
 
     local filtered = {}
-    local normalized_query = string.lower((query or ""):match("^%s*(.-)%s*$"))
+    local normalized_query = string.lower(string.match(query or "", "^%s*(.-)%s*$"))
     for _, option in ipairs(options) do
         local label = option.label or tostring(option.value)
         local include

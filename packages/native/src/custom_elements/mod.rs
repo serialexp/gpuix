@@ -31,8 +31,10 @@ pub struct CustomRenderContext<'a> {
     pub events: &'a HashSet<String>,
     /// Callback for emitting events back to JS.
     pub event_callback: &'a Option<EventCallback>,
-    /// Pre-created FocusHandle for this element (if it has keyboard/focus listeners).
+    /// Pre-created FocusHandle for this element.
     pub focus_handle: Option<&'a gpui::FocusHandle>,
+    /// Nearest focusable retained ancestor for descendant pointer focus.
+    pub ancestor_focus_handle: Option<&'a gpui::FocusHandle>,
     /// Style object from the retained element for layout and appearance.
     pub style: Option<&'a crate::style::StyleDesc>,
     /// Built child elements from the retained tree for this custom node.
@@ -139,6 +141,17 @@ pub(crate) fn wire_standard_events<E: gpui::StatefulInteractiveElement>(
     mut el: E,
     ctx: &CustomRenderContext,
 ) -> E {
+    if let Some(handle) = ctx.focus_handle {
+        el = el.track_focus(handle);
+    } else if let Some(handle) = ctx.ancestor_focus_handle.cloned() {
+        el = el.on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+            if event.is_focusing() && !window.default_prevented() {
+                handle.focus(window, cx);
+                window.prevent_default();
+            }
+        });
+    }
+
     let id = ctx.id;
     for event in ctx.events {
         let callback = ctx.event_callback.clone();

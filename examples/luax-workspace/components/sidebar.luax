@@ -4,24 +4,32 @@ local styles = theme.styles
 local colors = theme.colors
 
 return function(props)
-    local function active_index()
+    local list_focused, set_list_focused = gpuix.use_state(false)
+    local focused_id, set_focused_id = gpuix.use_state(props.activeId)
+
+    local function item_index(item_id)
         for index, conversation in ipairs(props.items) do
-            if conversation.id == props.activeId then return index end
+            if conversation.id == item_id then return index end
         end
         return 1
     end
 
-    local function select_index(index)
+    local function move(direction)
+        if #props.items == 0 then return end
+        local index = math.max(1, math.min(#props.items, item_index(focused_id) + direction))
+        set_focused_id(props.items[index].id)
+    end
+
+    local function focus_index(index)
         local conversation = props.items[index]
+        if conversation ~= nil then set_focused_id(conversation.id) end
+    end
+
+    local function activate_focused()
+        local conversation = props.items[item_index(focused_id)]
         if conversation ~= nil and conversation.id ~= props.activeId then
             props.onSelect(conversation.id)
         end
-    end
-
-    local function move(direction)
-        if #props.items == 0 then return end
-        local index = math.max(1, math.min(#props.items, active_index() + direction))
-        select_index(index)
     end
 
     local function handle_key(event)
@@ -30,20 +38,30 @@ return function(props)
         elseif event.key == "up" then
             move(-1)
         elseif event.key == "home" then
-            select_index(1)
+            focus_index(1)
         elseif event.key == "end" then
-            select_index(#props.items)
+            focus_index(#props.items)
+        elseif event.key == "enter" or event.key == "space" then
+            activate_focused()
         end
     end
 
     local rows = {}
     for index, conversation in ipairs(props.items) do
         local active = conversation.id == props.activeId
+        local focused = list_focused and conversation.id == focused_id
+        local style = focused and styles.button_focused or styles.button
+        if active then
+            style = focused and styles.button_active_focused or styles.button_active
+        end
         rows[index] = <div
             key={conversation.id}
             testId={"conversation-" .. conversation.id}
-            style={active and styles.button_active or styles.button}
-            onClick={function() props.onSelect(conversation.id) end}
+            style={style}
+            onClick={function()
+                set_focused_id(conversation.id)
+                props.onSelect(conversation.id)
+            end}
         >
             <text style={{
                 minWidth = 0,
@@ -51,11 +69,11 @@ return function(props)
                 whiteSpace = "nowrap",
                 overflow = "hidden",
                 textOverflow = "ellipsis",
-            }}>{props.compact and conversation.title:sub(1, 2) or conversation.title}</text>
+            }}>{props.compact and string.sub(conversation.title, 1, 2) or conversation.title}</text>
         </div>
     end
 
-    return <div style={props.compact and styles.sidebar_compact or styles.sidebar}>
+    return <div testId="workspace-sidebar" style={props.compact and styles.sidebar_compact or styles.sidebar}>
         <div style={{ display = "flex", flexDirection = "row", alignItems = "center", gap = 10 }}>
             <svg source={icons.logo} style={{ width = 28, height = 28 }} />
             {not props.compact and <text style={{ fontSize = 17, color = colors.text }}>GPUIX Lua</text> or nil}
@@ -64,13 +82,17 @@ return function(props)
         <div
             testId="conversation-list"
             tabIndex={0}
+            onFocus={function()
+                set_focused_id(props.activeId)
+                set_list_focused(true)
+            end}
+            onBlur={function() set_list_focused(false) end}
             onKeyDown={handle_key}
             style={{
                 display = "flex",
                 flexDirection = "column",
                 gap = 7,
                 borderRadius = 8,
-                focusVisible = theme.focus_visible,
             }}
             children={rows}
         />

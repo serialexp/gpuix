@@ -87,10 +87,14 @@ pub fn all_bounds() -> HashMap<u64, ElementBounds> {
 pub fn bounds_tracker(id: u64, selection_start: Option<bool>) -> impl IntoElement {
     canvas(
         |bounds, _, _| bounds,
-        move |bounds, _, _, _| {
+        move |bounds, _, window, _| {
             record_bounds(id, bounds);
             if let Some(selectable) = selection_start {
-                crate::text::record_start_region(bounds, selectable);
+                crate::text::record_start_region(
+                    window.window_handle().window_id(),
+                    bounds,
+                    selectable,
+                );
             }
         },
     )
