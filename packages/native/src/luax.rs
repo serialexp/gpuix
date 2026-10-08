@@ -4,6 +4,10 @@ pub(crate) fn transform(source: &str) -> Result<String, String> {
     Transformer {
         source,
         gpuix_aliases: gpuix_aliases(source),
+        solid: source
+            .lines()
+            .next()
+            .is_some_and(|line| line.trim() == "--!gpuix solid"),
     }
     .transform_range(0, source.len())
 }
@@ -11,6 +15,7 @@ pub(crate) fn transform(source: &str) -> Result<String, String> {
 struct Transformer<'a> {
     source: &'a str,
     gpuix_aliases: HashSet<String>,
+    solid: bool,
 }
 
 struct Element {
@@ -238,11 +243,30 @@ impl Transformer<'_> {
         start: usize,
     ) -> Result<String, String> {
         let is_text = name == "text";
+        let is_host = name.as_bytes()[0].is_ascii_lowercase();
         let has_attributes = !attributes.is_empty();
         let has_content_attribute = attributes.iter().any(|(name, _)| name == "content");
+        let reactive_text = self.solid
+            && children
+                .iter()
+                .any(|child| matches!(child, Child::Expression(_)));
         let mut entries = attributes
             .into_iter()
-            .map(|(name, value)| format!("[{}] = {value}", quote_lua(&name)))
+            .map(|(name, value)| {
+                if self.solid
+                    && is_host
+                    && !name.starts_with("on")
+                    && !matches!(
+                        name.as_str(),
+                        "key" | "children" | "autoFocus" | "testId" | "ref" | "className"
+                    )
+                    && (name != "content" || is_text)
+                {
+                    format!("[{}] = function() return {value} end", quote_lua(&name))
+                } else {
+                    format!("[{}] = {value}", quote_lua(&name))
+                }
+            })
             .collect::<Vec<_>>();
 
         if is_text {
@@ -251,9 +275,18 @@ impl Transformer<'_> {
             }
             if let Some(content) = emit_text_content(children, self, start)? {
                 if !has_attributes {
+                    if reactive_text {
+                        return Ok(format!(
+                            "(require(\"gpuix.solid\").text(function() return {content} end))"
+                        ));
+                    }
                     return Ok(format!("(gpuix.text({content}))"));
                 }
-                entries.push(format!("[\"content\"] = {content}"));
+                entries.push(if reactive_text {
+                    format!("[\"content\"] = function() return {content} end")
+                } else {
+                    format!("[\"content\"] = {content}")
+                });
             }
         } else {
             for child in children {
@@ -273,7 +306,11 @@ impl Transformer<'_> {
         }
 
         let props = format!("{{{}}}", entries.join(", "));
-        let expression = if let Some(helper) = host_helper(name) {
+        let expression = if self.solid && name.as_bytes()[0].is_ascii_lowercase() {
+            format!("require(\"gpuix.solid\").h({}, {props})", quote_lua(name))
+        } else if self.solid {
+            format!("require(\"gpuix.solid\").h({name}, {props})")
+        } else if let Some(helper) = host_helper(name) {
             format!("gpuix.{helper}({props})")
         } else if name.as_bytes()[0].is_ascii_lowercase() {
             format!("gpuix.h({}, {props})", quote_lua(name))
@@ -679,6 +716,18 @@ fn host_helper(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solid_mode_is_explicit_and_keeps_event_handlers_eager() {
+        let markup = "return <div style={{ width = count() }} onClick={function() increment() end}><text>{count()}</text></div>";
+        let eager = transform(markup).unwrap();
+        assert!(!eager.contains("gpuix.solid"));
+        let reactive = transform(&format!("--!gpuix solid\n{markup}")).unwrap();
+        assert!(reactive.contains("require(\"gpuix.solid\").h(\"div\""));
+        assert!(reactive.contains("[\"style\"] = function() return"));
+        assert!(reactive.contains("[\"onClick\"] = (function() increment() end)"));
+        assert!(reactive.contains("require(\"gpuix.solid\").text(function() return"));
+    }
 
     fn hook_sites(output: &str) -> Vec<&str> {
         output

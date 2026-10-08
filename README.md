@@ -331,6 +331,264 @@ element should participate in keyboard focus order.
 
 ## Packages
 
+### Experimental Lua signal core
+
+`solid.use_store(store, selector?, equality?)` connects an existing
+`gpuix.create_store` store to Solid. Call it inside a mounted owner; it returns
+a signal accessor, subscribes once, and unsubscribes when that owner is disposed
+(including removed Show branches/list rows and closed windows).
+Without a selector it reads the whole state. Equality defaults to Lua `==`;
+an optional `equality(previous, next)` skips unchanged selections and preserves
+the previous selected value. Reducers should replace state rather than mutate
+the same table in place.
+
+```lua
+local count = solid.use_store(store, function(state) return state.count end)
+-- Inside a Solid LuaX mount:
+<text>Count: {count()}</text>
+-- Existing dispatch API is unchanged:
+store.dispatch({ type = "increment" })
+```
+
+Multiple windows can subscribe to the same store; only dependent bindings
+update, without rerunning Solid component factories. React-style
+`store.use_state` subscriptions can coexist with Solid subscriptions.
+
+`require("gpuix.solid")` provides independent fine-grained reactivity:
+`create_signal(initial)` returns read/write functions; `create_root(callback)`
+passes an explicit owner and returns the callback result and owner;
+`create_effect(callback)` tracks signal reads and requires an owner;
+`batch(callback)` coalesces updates; `untrack(callback)` reads without subscribing;
+`on_cleanup(callback)` runs before an effect reruns or its owner is disposed;
+and `dispose(owner)` recursively releases subscriptions and cleanup callbacks.
+Writes are synchronous, skip equal values, and accept updater functions.
+Dependencies are replaced on each effect run. Owners require explicit disposal.
+
+`create_memo(callback)` requires an owner and returns a read-only accessor.
+It computes immediately, caches the result, and tracks/replaces dependencies
+on each recomputation. Multiple readers share that cached result. Equal results
+(Lua `==`) do not notify dependent effects. Memos update before effects, including
+chained/diamond dependencies; reading an invalidated memo inside `batch`
+recomputes it immediately. Disposal releases dependencies and freezes its last
+cached value. Callbacks should derive values without writing signals.
+Function and nil results are supported.
+
+```lua
+local doubled = solid.create_memo(function() return count() * 2 end)
+-- Inside a Solid LuaX mount:
+<text>Doubled: {doubled()}</text>
+```
+
+The experimental native binding path supports `solid.mount(component)`,
+`solid.text(read)` and `solid.bind_style(handle, read)`. Use `mount` inside the
+entry render function: it constructs an owned subtree and disposes its effects
+when the window unmounts, the runtime drops, or the subtree is rebuilt.
+Text/style bindings update existing native nodes after event handling without
+rerunning the component or reconciling the tree. Styles replace the complete
+base style rather than merging a patch. Keep hooks out of these experimental
+subtrees; hook-driven renders still rebuild them.
+
+```lua
+local solid = require("gpuix.solid")
+local count, set_count = solid.create_signal(0)
+
+return function()
+    return solid.mount(function()
+        local label = solid.text(function() return "Count: " .. count() end)
+        local button = gpuix.div {
+            children = { label },
+            tabIndex = 0,
+            onClick = function() set_count(function(value) return value + 1 end) end,
+        }
+        solid.bind_style(button, function()
+            return { width = 120 + count(), height = 40 }
+        end)
+        return button
+    end)
+end
+```
+
+`require("gpuix.host")` is the shared Lua host facade, exposing `text(value)`,
+`set_text(handle, value)`, `set_style(handle, style)` and `on_root_cleanup(callback)`.
+It contains no signal or hook semantics and retains no application receiver.
+The underlying bridge exposes `gpuix.set_text(handle, value)` and
+`gpuix.set_style(handle, style)` as queued updates, flushed at mount/event
+boundaries; `gpuix.on_root_cleanup(callback)` registers root lifecycle cleanup.
+Updates targeting removed handles are discarded. Setters invoked outside those
+boundaries do not schedule an independent native frame yet.
+
+For automatic text/style bindings, put `--!gpuix solid` on the **first line** of
+each `.luax` module. Inside `solid.mount`, `<text>Count: {count()}</text>` tracks
+its interpolations; host `style={...}` and `<text content={...}>` expressions are
+tracked too. Event handlers remain ordinary functions. Modules without the
+directive keep the React-style eager behavior. Imported modules opt in separately.
+Component props, ordinary conditional children, and lists are still
+eager; use `solid.Show` for reactive branches and `solid.For` for keyed lists.
+The complete shared/React/Solid library split remains pending.
+
+`solid.Show { when = accessor, render = factory, fallback = optional_factory,
+testId = optional_id, style = optional_style }` creates a stable **div slot**.
+In Solid LuaX, import `local Show = solid.Show` and use
+`<Show when={visible} render={function() return <text>Visible</text> end} />`.
+Factories are lazy and return one fresh host subtree (or nil); eager children
+are not supported. Lua truthiness decides which factory runs. Changes that keep
+the same truthiness preserve branch nodes, effects and local signals. Switching
+branches disposes the old owner, removes its native nodes and event handlers,
+and creates a new owner. Re-showing starts with fresh branch-local state.
+Nested Show slots are supported. The slot is a real layout element, not a fragment.
+Solid-mode function components execute directly, without the React hook wrapper;
+they must not use React-style hooks.
+
+`solid.For { each = accessor, key = key_function, render = factory,
+testId = optional_id, style = optional_style }` creates a stable div slot.
+`each()` returns a dense array; keys must be unique strings or numbers.
+The factory receives **item and 1-based index accessors**, not plain values:
+
+```lua
+local For = solid.For
+<For each={items} key={function(item) return item.id end}
+    render={function(item, index)
+        return <text>{index()}: {item().title}</text>
+    end} />
+```
+
+Each factory returns one fresh host subtree. Matching keys preserve native
+node IDs, effects and row-local signals across reorder and item replacement;
+item/index bindings update without rerunning the factory. Removed rows are
+disposed, and re-added keys start fresh. Empty arrays render an empty slot.
+Other row props remain eager unless explicitly bound.
+
+`solid.Index { each = accessor, render = factory, testId = optional_id,
+style = optional_style }` uses the same div slot and dense-array contract,
+but identity belongs to the **position**, with no key function. Its factory
+receives a reactive item accessor and a fixed **1-based index number**:
+
+```lua
+local Index = solid.Index
+<Index each={values} render={function(item, index)
+    return <text>{index}: {item()}</text>
+end} />
+```
+
+Replacing or reordering values updates item bindings without rerunning
+factories; node IDs and row-local state stay at their positions. Growing the
+array mounts new tail rows; shrinking disposes removed tail rows. Regrowing
+starts those rows with fresh state. Duplicate values are allowed, and an empty
+array disposes all rows. Like For, factories return one fresh host subtree and
+other row props remain eager unless explicitly bound. Use For when state
+should follow an item, and Index when it should stay with a slot.
+
+The shared host API provides `set_children(slot, handles)` (also
+`gpuix.set_children`) for ordered child replacement. It accepts fresh subtrees
+or handles already mounted directly in that slot, never another parent's
+children; duplicate handles are rejected when the batch is applied.
+Only newly added rows are materialized; retained rows are moved, not rebuilt.
+
+The shared host API also provides `set_child(slot, child)` (and
+`gpuix.set_child`) to queue replacement with a fresh subtree or nil. Existing
+mounted handles cannot be reused as fresh children. Removal discards updates to
+the old handles; only the replacement subtree is materialized, not the parent.
+
+Run the explicit-binding demo from the repository root:
+
+```sh
+cargo run --release --manifest-path packages/native/Cargo.toml --bin gpuix-lua -- examples/solid-counter.lua
+```
+
+Use `examples/solid-counter.luax` instead to try automatic bindings and compare
+For/Index local-state behavior while adding and reversing rows.
+
+Run `just start-solid` for `examples/solid-workspace/main.luax`: a separate
+workspace with a keyed sidebar, memo-derived details, an Index activity list,
+a disposable Show panel, a native input and a shared-store inspector window.
+Reversing rows preserves their visit counters; hiding/reopening activity resets
+its panel-local counter. The React-style workspace remains available via
+`just start`. This is not a full port of its hook-based dock/widget components.
+The input is controlled: sending clears both the store draft and native input.
+Existing watch behavior applies; saving rebuilds Solid
+owners rather than preserving their local signals.
+
+Solid LuaX host custom props such as `value`, `placeholder`, `readOnly`,
+`tabIndex` and `source` track their expressions automatically. Outside LuaX,
+`solid.bind_prop(handle, name, accessor)` installs an owner-scoped binding;
+`host.set_prop(handle, name, value)` and `gpuix.set_prop` queue individual
+custom-prop updates. Nil removes the prop. Updates preserve node identity and
+unrelated props, flush at existing mount/event boundaries, and stop on disposal.
+This does not add new native prop support: for example, `checked` or `disabled`
+only work where the receiving element already supports them. Component props
+remain eager, so bundled hook-based widgets still need a Solid adaptation.
+Events and structural props (`key`, `children`, `autoFocus`, `testId`, `ref`,
+`className`) stay eager; `set_prop` rejects them, style and content.
+Input value echoes retain the existing caret/selection behavior; a deliberate
+external replacement uses the existing input reset behavior.
+
+#### Solid controls
+
+The first Solid-native controls are `gpuix.solid.button`,
+`gpuix.solid.checkbox`, `gpuix.solid.radio_group` and `gpuix.solid.select`.
+Alternatively, `require("gpuix.solid.controls")` exports `Button`, `Checkbox`,
+`RadioGroup` and `Select`. These require a mounted Solid owner and use signals,
+not hooks; the original `gpuix.*` components are unchanged.
+
+Component props are eager in LuaX, so pass **accessors**, not accessor results,
+for reactive controlled values:
+
+```lua
+local Checkbox = require("gpuix.solid.checkbox")
+<Checkbox checked={checked} onCheckedChange={set_checked} label="Enabled" />
+```
+
+Button supports reactive `disabled`/`tabIndex`, `style(state)`, eager children,
+`testId`/`autoFocus`, and click/focus/blur/key/mouse-enter/mouse-leave callbacks.
+Disabled buttons leave tab order and suppress clicks. Checkbox supports
+reactive `checked`, `disabled`, `label` and `tabIndex`, `defaultChecked`,
+`onCheckedChange(boolean)`, `style(state)`, `indicatorStyle(state)` and `testId`.
+Both its label/root and indicator activate it.
+
+RadioGroup supports reactive `options`, `value`, `disabled`, `defaultValue`,
+`onValueChange(value)`, `style({value})`, `itemStyle(state)`,
+`indicatorStyle(state)` and `testId`. Options have unique string/number
+`value` keys, optional `label` and `disabled`. Rows retain identity on reorder;
+the selected (or first enabled) row is the tab stop. Arrow keys select/focus
+the next enabled row; Enter/Space use normal native click activation.
+
+Select supports reactive `options`, `value`, `open`, `disabled`, `placeholder`,
+`tabIndex`, `side`, `align`, `sideOffset`, `collisionPadding`, `priority`;
+`defaultValue`/`defaultOpen`, `onValueChange(value)`/`onOpenChange(boolean)`,
+`testId`, and `style`/`triggerStyle`/`contentStyle`/`itemStyle` state callbacks.
+Its anchored menu uses keyed rows; Up/Down highlight enabled options,
+Enter/Space choose, Escape/outside press close. Choosing or closing restores
+trigger focus (outside presses do not steal focus back). Controlled props emit callbacks; uncontrolled props retain
+signal-local state. Style states expose `disabled` and control-specific
+`checked`, `selected`, `option`, `value`, `open` or `highlighted`.
+Custom Select render callbacks are not yet supported in this Solid version.
+Combobox, Tooltip, Drawer and DockLayout remain hook-based and are not ported
+yet. The Solid workspace showcases all four new controls.
+
+#### Package the Solid workspace (macOS)
+
+Run `just package-solid` on macOS with Rust and Xcode command-line tools
+installed. It builds a release runner with vendored Lua 5.4, copies the example's
+Lua/LuaX modules and assets into `Contents/Resources/app`, and produces:
+
+- `dist/GPUIX Solid.app`
+- `dist/GPUIX-Solid-macos-arm64.zip` (or `x86_64` on an Intel build host)
+
+Drag the app to Applications and launch it normally. Users do not need Rust,
+Node, Bun or Lua installed; the bundle is independent of the repository and
+working directory. It targets macOS 14 or newer and the build host's architecture
+(not a universal binary). Framework Lua modules are embedded in the runner.
+The packaged runner defaults to `Contents/Resources/app/main.luax` when no
+source argument is supplied; an explicit source path overrides it.
+`"dist/GPUIX Solid.app/Contents/MacOS/GPUIX Solid" --check` validates the bundled
+application without opening windows.
+
+This first package is ad-hoc signed, **not notarized** and has no custom app
+icon. It is a local/test distribution artifact, not a production installer;
+downloaded copies may be blocked by Gatekeeper. Developer ID signing and
+notarization remain necessary for normal public distribution. Packaging does
+not include updater or installer infrastructure.
+
 - **`@gpuix/native`** — Rust bindings to GPUI. It publishes napi-rs desktop binaries and a wasm-bindgen browser build, both backed by `GpuixRenderer`, `RetainedTree`, `build_element()`, and `apply_styles()`.
 - **`@gpuix/react`** — React reconciler, event registry, and TypeScript types. Implements the `react-reconciler` host config using the mutation API.
 - **`@gpuix/cli`** — `gpuix new` downloads `example-app/`, sets its published React dependency, and installs it as a standalone project.

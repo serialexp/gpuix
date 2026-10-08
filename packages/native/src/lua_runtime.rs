@@ -27,6 +27,41 @@ const HOOK_SITE_PREFIX: &str = "__gpuix_hook_site:";
 
 const BUILTIN_LUA_MODULES: &[(&str, &str, bool)] = &[
     (
+        "gpuix.solid.controls",
+        include_str!("../../lua/gpuix/solid_controls.luax"),
+        true,
+    ),
+    (
+        "gpuix.solid.button",
+        "return require('gpuix.solid.controls').Button",
+        false,
+    ),
+    (
+        "gpuix.solid.checkbox",
+        "return require('gpuix.solid.controls').Checkbox",
+        false,
+    ),
+    (
+        "gpuix.solid.radio_group",
+        "return require('gpuix.solid.controls').RadioGroup",
+        false,
+    ),
+    (
+        "gpuix.solid.select",
+        "return require('gpuix.solid.controls').Select",
+        false,
+    ),
+    (
+        "gpuix.host",
+        include_str!("../../lua/gpuix/host.lua"),
+        false,
+    ),
+    (
+        "gpuix.solid",
+        include_str!("../../lua/gpuix/solid.lua"),
+        false,
+    ),
+    (
         "gpuix._util",
         include_str!("../../lua/gpuix/_util.lua"),
         false,
@@ -87,6 +122,29 @@ struct MountedHostHandle {
 }
 
 type MountedHostHandleMap = HashMap<i64, MountedHostHandle>;
+
+enum HostUpdate {
+    Text(i64, String),
+    Style(i64, Arc<StyleDesc>),
+    Prop(i64, String, serde_json::Value),
+    Child(i64, Option<usize>),
+    Children(i64, Vec<i64>),
+}
+
+impl HostUpdate {
+    fn handle(&self) -> i64 {
+        match self {
+            Self::Text(handle, _)
+            | Self::Style(handle, _)
+            | Self::Prop(handle, _, _)
+            | Self::Child(handle, _)
+            | Self::Children(handle, _) => *handle,
+        }
+    }
+}
+
+type HostUpdates = Arc<Mutex<Vec<HostUpdate>>>;
+type RootCleanups = Arc<Mutex<HashMap<LuaRootId, Vec<Function>>>>;
 
 #[derive(Clone, Copy)]
 struct NodeHandle {
@@ -1181,6 +1239,8 @@ pub(crate) struct LuaRuntime {
     memo: Arc<Mutex<MemoStore>>,
     arena: Arc<Mutex<RenderArena>>,
     host_handles: Arc<Mutex<MountedHostHandleMap>>,
+    host_updates: HostUpdates,
+    root_cleanups: RootCleanups,
     focus_request: Arc<Mutex<Option<LuaFocusRequest>>>,
     open_windows: Arc<Mutex<HashSet<String>>>,
     application: Arc<Mutex<LuaApplicationRegistry>>,
@@ -1313,6 +1373,8 @@ impl LuaRuntime {
         let memo = Arc::new(Mutex::new(MemoStore::default()));
         let arena = Arc::new(Mutex::new(RenderArena::default()));
         let host_handles = Arc::new(Mutex::new(MountedHostHandleMap::new()));
+        let host_updates = Arc::new(Mutex::new(Vec::new()));
+        let root_cleanups = Arc::new(Mutex::new(HashMap::new()));
         let focus_request = Arc::new(Mutex::new(None));
         let open_windows = Arc::new(Mutex::new(HashSet::new()));
         let application = Arc::new(Mutex::new(LuaApplicationRegistry::default()));
@@ -1325,6 +1387,8 @@ impl LuaRuntime {
             memo.clone(),
             arena.clone(),
             host_handles.clone(),
+            host_updates.clone(),
+            root_cleanups.clone(),
             focus_request.clone(),
             open_windows.clone(),
             application.clone(),
@@ -1354,6 +1418,8 @@ impl LuaRuntime {
             memo,
             arena,
             host_handles,
+            host_updates,
+            root_cleanups,
             focus_request,
             open_windows,
             application,
@@ -1389,6 +1455,7 @@ impl LuaRuntime {
     }
 
     pub(crate) fn unmount_window(&mut self, id: &str) {
+        self.cleanup_root(id);
         let jobs = self.hooks.lock().unwrap().take_root_cleanup_jobs(id);
         run_effect_cleanups(&self.lua, &jobs);
         if let Some(root) = self.roots.get_mut(id) {
@@ -1405,6 +1472,20 @@ impl LuaRuntime {
             .entries
             .retain(|key, _| key.root.as_ref() != id);
         self.set_window_open(id, false);
+    }
+
+    fn cleanup_root(&self, id: &str) {
+        let callbacks = self
+            .root_cleanups
+            .lock()
+            .unwrap()
+            .remove(id)
+            .unwrap_or_default();
+        for callback in callbacks.into_iter().rev() {
+            if let Err(error) = callback.call::<()>(()) {
+                log::error!("Lua root cleanup failed: {error}");
+            }
+        }
     }
 
     pub(crate) fn set_window_open(&self, id: &str, open: bool) {
@@ -1663,15 +1744,25 @@ impl LuaRuntime {
             return Ok(Vec::new());
         };
         let event = event_table(&self.lua, &payload).map_err(lua_error)?;
+        if self.host_updates.lock().unwrap().is_empty() {
+            self.arena.lock().unwrap().begin_render();
+        }
         handler.call::<()>(event).map_err(lua_error)?;
-        Ok(self
+        let mut dirty: HashSet<String> = self
             .hooks
             .lock()
             .unwrap()
             .dirty_root_ids()
             .into_iter()
             .map(|root| root.to_string())
-            .collect())
+            .collect();
+        let handles = self.host_handles.lock().unwrap();
+        for update in self.host_updates.lock().unwrap().iter() {
+            if let Some(handle) = handles.get(&update.handle()) {
+                dirty.insert(handle.root.to_string());
+            }
+        }
+        Ok(dirty.into_iter().collect())
     }
 
     pub(crate) fn take_focus_request(&self) -> Option<LuaFocusRequest> {
@@ -1688,8 +1779,20 @@ impl LuaRuntime {
         tree: &mut RetainedTree,
         refreshing: bool,
     ) -> Result<(), String> {
+        if !refreshing
+            && self
+                .roots
+                .get(root_id)
+                .is_some_and(|root| root.node.is_some())
+            && !self.hooks.lock().unwrap().root_is_dirty(root_id)
+            && !self.host_updates.lock().unwrap().is_empty()
+        {
+            self.flush_host_updates(root_id, tree)?;
+            return Ok(());
+        }
         for pass in 0..25 {
             self.render_root_once(root_id, tree, refreshing && pass == 0)?;
+            self.flush_host_updates(root_id, tree)?;
             if !self.hooks.lock().unwrap().root_is_dirty(root_id) {
                 return Ok(());
             }
@@ -1697,6 +1800,190 @@ impl LuaRuntime {
         Err(format!(
             "Lua hooks scheduled too many consecutive renders in window {root_id:?}"
         ))
+    }
+
+    fn flush_host_updates(&mut self, root_id: &str, tree: &mut RetainedTree) -> Result<(), String> {
+        let mut updates = std::mem::take(&mut *self.host_updates.lock().unwrap());
+        loop {
+            let mut deferred = Vec::new();
+            let mut progressed = false;
+            for update in updates {
+                if matches!(update, HostUpdate::Child(_, _) | HostUpdate::Children(_, _)) {
+                    let token = update.handle();
+                    let handle = self.host_handles.lock().unwrap().get(&token).cloned();
+                    if let Some(handle) = handle.filter(|handle| handle.root.as_ref() == root_id) {
+                        match update {
+                            HostUpdate::Child(_, index) => {
+                                self.replace_host_child(root_id, handle.element_id, index, tree)?
+                            }
+                            HostUpdate::Children(_, children) => self.replace_host_children(
+                                root_id,
+                                handle.element_id,
+                                children,
+                                tree,
+                            )?,
+                            _ => unreachable!(),
+                        }
+                        progressed = true;
+                    } else {
+                        deferred.push(update);
+                    }
+                } else {
+                    deferred.push(update);
+                }
+            }
+            updates = deferred;
+            if !progressed {
+                break;
+            }
+        }
+        let handles = self.host_handles.lock().unwrap();
+        let mut remaining = Vec::new();
+        for update in updates {
+            let Some(handle) = handles.get(&update.handle()) else {
+                let token = Value::Integer(update.handle());
+                if node_handle(&token)
+                    .and_then(|handle| self.arena.lock().unwrap().validate_handle(handle))
+                    .is_ok()
+                {
+                    remaining.push(update);
+                }
+                continue;
+            };
+            if handle.root.as_ref() != root_id {
+                remaining.push(update);
+                continue;
+            }
+            match update {
+                HostUpdate::Text(_, content) => tree.set_text(handle.element_id, content),
+                HostUpdate::Style(_, style) => tree.set_style(handle.element_id, style),
+                HostUpdate::Prop(_, key, value) => {
+                    tree.set_custom_prop(handle.element_id, key, value)
+                }
+                HostUpdate::Child(_, _) | HostUpdate::Children(_, _) => {}
+            }
+        }
+        self.host_updates.lock().unwrap().extend(remaining);
+        Ok(())
+    }
+
+    fn replace_host_child(
+        &mut self,
+        root_id: &str,
+        parent_id: u64,
+        index: Option<usize>,
+        tree: &mut RetainedTree,
+    ) -> Result<(), String> {
+        let root = self.roots.get_mut(root_id).ok_or("missing root")?;
+        let node = find_host_node(root.node.as_mut().ok_or("unmounted root")?, parent_id)
+            .ok_or("missing structural slot")?;
+        for child in node.children.drain(..) {
+            tree.destroy_element(child.id);
+        }
+        if let Some(index) = index {
+            let child = reconcile_node(
+                tree,
+                &mut self.next_id,
+                None,
+                &mut self.arena.lock().unwrap(),
+                index,
+                &mut HostHandleMap::new(),
+            )?;
+            tree.append_child(parent_id, child.id);
+            node.children.push(child);
+        }
+        let mut aliases = HostHandleMap::new();
+        collect_host_handles(root.node.as_ref().unwrap(), &mut aliases);
+        let mut handles = self.host_handles.lock().unwrap();
+        for token in root.host_tokens.drain(..) {
+            handles.remove(&token);
+        }
+        root.host_tokens = aliases.keys().copied().collect();
+        for (token, element_id) in aliases {
+            handles.insert(
+                token,
+                MountedHostHandle {
+                    root: Arc::from(root_id),
+                    element_id,
+                },
+            );
+        }
+        root.handlers.clear();
+        collect_handlers(root.node.as_ref().unwrap(), &mut root.handlers);
+        Ok(())
+    }
+
+    fn replace_host_children(
+        &mut self,
+        root_id: &str,
+        parent_id: u64,
+        tokens: Vec<i64>,
+        tree: &mut RetainedTree,
+    ) -> Result<(), String> {
+        let root = self.roots.get_mut(root_id).ok_or("missing root")?;
+        let node = find_host_node(root.node.as_mut().ok_or("unmounted root")?, parent_id)
+            .ok_or("missing structural slot")?;
+        let mut arena = self.arena.lock().unwrap();
+        let mut seen = HashSet::new();
+        let existing: HashSet<_> = node
+            .children
+            .iter()
+            .map(|child| child.handle_token)
+            .collect();
+        for token in &tokens {
+            if !seen.insert(*token) {
+                return Err("duplicate child handle".into());
+            }
+            if !existing.contains(token) {
+                arena
+                    .validate_root(node_handle(&Value::Integer(*token)).map_err(lua_error)?)
+                    .map_err(lua_error)?;
+            }
+        }
+        let mut previous: HashMap<_, _> = node
+            .children
+            .drain(..)
+            .map(|child| (child.handle_token, child))
+            .collect();
+        for token in tokens {
+            let child = if let Some(child) = previous.remove(&token) {
+                child
+            } else {
+                let handle = node_handle(&Value::Integer(token)).map_err(lua_error)?;
+                reconcile_node(
+                    tree,
+                    &mut self.next_id,
+                    None,
+                    &mut arena,
+                    handle.index,
+                    &mut HostHandleMap::new(),
+                )?
+            };
+            tree.append_child(parent_id, child.id);
+            node.children.push(child);
+        }
+        for child in previous.into_values() {
+            tree.destroy_element(child.id);
+        }
+        let mut aliases = HostHandleMap::new();
+        collect_host_handles(root.node.as_ref().unwrap(), &mut aliases);
+        let mut handles = self.host_handles.lock().unwrap();
+        for token in root.host_tokens.drain(..) {
+            handles.remove(&token);
+        }
+        root.host_tokens = aliases.keys().copied().collect();
+        for (token, element_id) in aliases {
+            handles.insert(
+                token,
+                MountedHostHandle {
+                    root: Arc::from(root_id),
+                    element_id,
+                },
+            );
+        }
+        root.handlers.clear();
+        collect_handlers(root.node.as_ref().unwrap(), &mut root.handlers);
+        Ok(())
     }
 
     fn render_root_once(
@@ -1711,6 +1998,7 @@ impl LuaRuntime {
             .map(|(id, _)| id.clone())
             .ok_or_else(|| format!("Lua window {root_id:?} is not defined"))?;
         let render = self.roots[root_id].render.clone();
+        self.cleanup_root(root_id);
         let hook_snapshot = {
             let mut hooks = self.hooks.lock().unwrap();
             let snapshot = hooks.snapshot();
@@ -1884,6 +2172,10 @@ impl LuaRuntime {
 
 impl Drop for LuaRuntime {
     fn drop(&mut self) {
+        let roots: Vec<_> = self.roots.keys().cloned().collect();
+        for root in roots {
+            self.cleanup_root(&root);
+        }
         let jobs = self.hooks.lock().unwrap().take_all_cleanup_jobs();
         run_effect_cleanups(&self.lua, &jobs);
     }
@@ -2537,12 +2829,141 @@ fn install_api(
     memo: Arc<Mutex<MemoStore>>,
     arena: Arc<Mutex<RenderArena>>,
     host_handles: Arc<Mutex<MountedHostHandleMap>>,
+    host_updates: HostUpdates,
+    root_cleanups: RootCleanups,
     focus_request: Arc<Mutex<Option<LuaFocusRequest>>>,
     open_windows: Arc<Mutex<HashSet<String>>>,
     application: Arc<Mutex<LuaApplicationRegistry>>,
     styles: Arc<Mutex<StyleCache>>,
 ) -> mlua::Result<()> {
     let api = lua.create_table()?;
+
+    let prop_updates = host_updates.clone();
+    api.set(
+        "set_prop",
+        lua.create_function(move |lua, (handle, key, value): (i64, String, Value)| {
+            if matches!(
+                key.as_str(),
+                "key"
+                    | "children"
+                    | "style"
+                    | "content"
+                    | "autoFocus"
+                    | "testId"
+                    | "ref"
+                    | "className"
+            ) || key.starts_with("on")
+            {
+                return Err(mlua::Error::runtime(
+                    "set_prop accepts custom host props, not structural props or events",
+                ));
+            }
+            let value = if matches!(value, Value::Nil) {
+                serde_json::Value::Null
+            } else {
+                lua.from_value(value)?
+            };
+            prop_updates
+                .lock()
+                .unwrap()
+                .push(HostUpdate::Prop(handle, key, value));
+            Ok(())
+        })?,
+    )?;
+
+    let child_updates = host_updates.clone();
+    let child_arena = arena.clone();
+    api.set(
+        "set_child",
+        lua.create_function(move |_, (parent, value): (i64, Value)| {
+            let index = if matches!(value, Value::Nil) {
+                None
+            } else {
+                let handle = node_handle(&value)?;
+                let mut arena = child_arena.lock().unwrap();
+                arena.validate_root(handle)?;
+                arena.parented[handle.index] = true;
+                Some(handle.index)
+            };
+            child_updates
+                .lock()
+                .unwrap()
+                .push(HostUpdate::Child(parent, index));
+            Ok(())
+        })?,
+    )?;
+
+    let children_updates = host_updates.clone();
+    api.set(
+        "set_children",
+        lua.create_function(move |_, (parent, children): (i64, Table)| {
+            let length = children.raw_len();
+            for entry in children.clone().pairs::<Value, Value>() {
+                let (key, _) = entry?;
+                if !matches!(key, Value::Integer(index) if index > 0 && index as usize <= length) {
+                    return Err(mlua::Error::runtime("children must be a dense array"));
+                }
+            }
+            let tokens = children
+                .sequence_values::<i64>()
+                .collect::<mlua::Result<Vec<_>>>()?;
+            if tokens.len() != length {
+                return Err(mlua::Error::runtime("children must be a dense array"));
+            }
+            children_updates
+                .lock()
+                .unwrap()
+                .push(HostUpdate::Children(parent, tokens));
+            Ok(())
+        })?,
+    )?;
+
+    let cleanup_hooks = hooks.clone();
+    api.set(
+        "on_root_cleanup",
+        lua.create_function(move |_, callback: Function| {
+            let root = cleanup_hooks
+                .lock()
+                .unwrap()
+                .current_root()
+                .map_err(mlua::Error::runtime)?;
+            root_cleanups
+                .lock()
+                .unwrap()
+                .entry(root)
+                .or_default()
+                .push(callback);
+            Ok(())
+        })?,
+    )?;
+
+    let text_updates = host_updates.clone();
+    api.set(
+        "set_text",
+        lua.create_function(move |_, (handle, value): (i64, Value)| {
+            let content = parse_text_content(value)?
+                .ok_or_else(|| mlua::Error::runtime("set_text requires text"))?;
+            text_updates
+                .lock()
+                .unwrap()
+                .push(HostUpdate::Text(handle, content));
+            Ok(())
+        })?,
+    )?;
+    let style_updates = host_updates;
+    let update_styles = styles.clone();
+    api.set(
+        "set_style",
+        lua.create_function(move |lua, (handle, value): (i64, Value)| {
+            let style = parse_style(lua, value, &update_styles)?
+                .unwrap_or_else(|| Arc::new(StyleDesc::default()));
+            style_updates
+                .lock()
+                .unwrap()
+                .push(HostUpdate::Style(handle, style));
+            Ok(())
+        })?,
+    )?;
 
     let create_app_registry = application.clone();
     api.set(
@@ -3827,6 +4248,15 @@ fn collect_host_handles(node: &LuaNode, handles: &mut HostHandleMap) {
     }
 }
 
+fn find_host_node(node: &mut LuaNode, id: u64) -> Option<&mut LuaNode> {
+    if node.id == id {
+        return Some(node);
+    }
+    node.children
+        .iter_mut()
+        .find_map(|child| find_host_node(child, id))
+}
+
 fn collect_handlers(node: &LuaNode, handlers: &mut HashMap<(u64, String), Function>) {
     for (event_type, handler) in &node.events {
         handlers.insert((node.id, event_type.clone()), handler.clone());
@@ -3910,6 +4340,976 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).ok();
         }
+    }
+
+    #[test]
+    fn solid_show_routes_pending_subtrees_to_each_window() {
+        let mut runtime = LuaRuntime::load_source_unrendered(
+            r#"--!gpuix solid
+                local solid = require("gpuix.solid")
+                local Show = solid.Show
+                local visible, set_visible = solid.create_signal(false)
+                local app = gpuix.create_app()
+                local function View()
+                    return solid.mount(function()
+                        return <div>
+                            <div testId="toggle" onClick={function() set_visible(not visible()) end} />
+                            <Show when={visible} render={function()
+                                return <div>
+                                    <Show when={visible} render={function()
+                                        return <text>Shared {tostring(visible())}</text>
+                                    end} />
+                                </div>
+                            end} />
+                        </div>
+                    end)
+                end
+                gpuix.define_window(app, { id = "main", render = View })
+                gpuix.define_window(app, { id = "inspector", render = View })
+                return app
+            "#,
+            None,
+            true,
+        ).unwrap();
+        let mut main = RetainedTree::new();
+        let mut inspector = RetainedTree::new();
+        runtime.mount_window("main", &mut main).unwrap();
+        runtime.mount_window("inspector", &mut inspector).unwrap();
+        let element_id = main
+            .elements
+            .values()
+            .find(|node| node.test_id.as_deref() == Some("toggle"))
+            .unwrap()
+            .id;
+        let dirty = runtime
+            .dispatch_window_event(
+                "main",
+                EventPayload {
+                    element_id: element_id as f64,
+                    event_type: "click".to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(dirty.len(), 2);
+        runtime.mount_window("main", &mut main).unwrap();
+        runtime.mount_window("inspector", &mut inspector).unwrap();
+        assert!(has_text(&main, "Shared true"));
+        assert!(has_text(&inspector, "Shared true"));
+        assert!(runtime.host_updates.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn solid_controls_track_accessors_without_hooks_or_rebuilding() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(r#"--!gpuix solid
+            local solid = require("gpuix.solid")
+            local Button = require("gpuix.solid.button")
+            local Checkbox = require("gpuix.solid.checkbox")
+            local RadioGroup = require("gpuix.solid.radio_group")
+            local Select = require("gpuix.solid.select")
+            local checked, set_checked = solid.create_signal(false)
+            local disabled, set_disabled = solid.create_signal(false)
+            local value, set_value = solid.create_signal("a")
+            local options, set_options = solid.create_signal({
+                {value="a",label="Alpha"}, {value="b",label="Beta"}, {value="c",label="Blocked",disabled=true}
+            })
+            widget_renders, button_clicks = 0, 0
+            return function()
+                widget_renders = widget_renders + 1
+                return solid.mount(function()
+                    return <div>
+                        <Button testId="button" disabled={disabled}
+                            onClick={function() button_clicks = button_clicks + 1 end}><text>Press</text></Button>
+                        <Checkbox testId="checkbox" checked={checked} disabled={disabled}
+                            onCheckedChange={set_checked} label="Enabled" />
+                        <Checkbox testId="local-checkbox" defaultChecked />
+                        <RadioGroup testId="radio" options={options} value={value} onValueChange={set_value} />
+                        <Select testId="select" options={options} value={value} onValueChange={set_value} />
+                        <div testId="disable" onClick={function() set_disabled(not disabled()) end} />
+                        <div testId="reorder" onClick={function()
+                            set_options({{value="b",label="Bee"}, {value="a",label="Alpha"}})
+                        end} />
+                    </div>
+                end)
+            end
+        "#, &mut tree).unwrap();
+        fn id(tree: &RetainedTree, name: &str) -> u64 {
+            tree.elements
+                .values()
+                .find(|node| node.test_id.as_deref() == Some(name))
+                .unwrap()
+                .id
+        }
+        let button = id(&tree, "button");
+        let radio_b = id(&tree, "radio-b");
+        let checkbox = id(&tree, "checkbox");
+        dispatch_by_test_id(&mut runtime, &mut tree, "checkbox-indicator").unwrap();
+        dispatch_by_test_id(&mut runtime, &mut tree, "button").unwrap();
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("button_clicks").unwrap(),
+            1
+        );
+        dispatch_by_test_id(&mut runtime, &mut tree, "disable").unwrap();
+        assert_eq!(
+            tree.elements[&button].custom_props["tabIndex"],
+            serde_json::json!(-1)
+        );
+        assert_eq!(
+            tree.elements[&checkbox].custom_props["tabIndex"],
+            serde_json::json!(-1)
+        );
+        dispatch_by_test_id(&mut runtime, &mut tree, "button").unwrap();
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("button_clicks").unwrap(),
+            1
+        );
+        dispatch_by_test_id(&mut runtime, &mut tree, "radio-b").unwrap();
+        assert_eq!(
+            tree.elements[&radio_b].custom_props["tabIndex"],
+            serde_json::json!(0)
+        );
+        runtime
+            .dispatch_event(
+                EventPayload {
+                    element_id: radio_b as f64,
+                    event_type: "keyDown".into(),
+                    key: Some("right".into()),
+                    ..Default::default()
+                },
+                &mut tree,
+            )
+            .unwrap();
+        let radio_a = id(&tree, "radio-a");
+        assert_eq!(
+            tree.elements[&radio_a].custom_props["tabIndex"],
+            serde_json::json!(0)
+        );
+        dispatch_by_test_id(&mut runtime, &mut tree, "select").unwrap();
+        assert!(has_test_id(&tree, "select-content"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "select-option-c").unwrap();
+        assert!(has_test_id(&tree, "select-content"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "select-option-a").unwrap();
+        assert!(!has_test_id(&tree, "select-content"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "reorder").unwrap();
+        assert!(tree.elements.contains_key(&radio_b));
+        assert!(has_text(&tree, "Bee"));
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("widget_renders").unwrap(),
+            1
+        );
+        assert_eq!(id(&tree, "button"), button);
+        runtime.unmount_window(DEFAULT_ROOT_ID);
+    }
+
+    #[test]
+    fn solid_host_props_update_without_rebuilding_and_nil_removes_them() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(r#"--!gpuix solid
+            local solid = require("gpuix.solid")
+            local value, set_value = solid.create_signal("hello")
+            local locked, set_locked = solid.create_signal(false)
+            prop_renders = 0
+            return function()
+                prop_renders = prop_renders + 1
+                return solid.mount(function()
+                    return <div>
+                        <input testId="field" value={value()} readOnly={locked()} placeholder="Write" />
+                        <div testId="update" onClick={function()
+                            solid.batch(function() set_value(""); set_locked(true) end)
+                        end} />
+                        <div testId="remove" onClick={function() set_value(nil) end} />
+                    </div>
+                end)
+            end
+        "#, &mut tree).unwrap();
+        let id = tree
+            .elements
+            .values()
+            .find(|node| node.test_id.as_deref() == Some("field"))
+            .unwrap()
+            .id;
+        assert_eq!(
+            tree.elements[&id].custom_props["value"],
+            serde_json::json!("hello")
+        );
+        dispatch_by_test_id(&mut runtime, &mut tree, "update").unwrap();
+        assert_eq!(
+            tree.elements[&id].custom_props["value"],
+            serde_json::json!("")
+        );
+        assert_eq!(
+            tree.elements[&id].custom_props["readOnly"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            tree.elements[&id].custom_props["placeholder"],
+            serde_json::json!("Write")
+        );
+        dispatch_by_test_id(&mut runtime, &mut tree, "remove").unwrap();
+        assert!(!tree.elements[&id].custom_props.contains_key("value"));
+        assert_eq!(runtime.lua.globals().get::<i64>("prop_renders").unwrap(), 1);
+        runtime
+            .lua
+            .load("assert(not pcall(gpuix.set_prop, 1, 'onClick', true))")
+            .exec()
+            .unwrap();
+        runtime.unmount_window(DEFAULT_ROOT_ID);
+    }
+
+    #[test]
+    fn solid_workspace_exercises_shared_store_lists_and_panel_lifetimes() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/solid-workspace/main.luax");
+        let mut runtime = LuaRuntime::load_application_file(&path).unwrap();
+        let mut main = RetainedTree::new();
+        let mut inspector = RetainedTree::new();
+        runtime.mount_window("main", &mut main).unwrap();
+        runtime.mount_window("inspector", &mut inspector).unwrap();
+        fn event(
+            runtime: &mut LuaRuntime,
+            main: &mut RetainedTree,
+            inspector: &mut RetainedTree,
+            window: &str,
+            test_id: &str,
+            kind: &str,
+            value: Option<String>,
+        ) {
+            let tree = if window == "main" {
+                &*main
+            } else {
+                &*inspector
+            };
+            let id = tree
+                .elements
+                .values()
+                .find(|node| node.test_id.as_deref() == Some(test_id))
+                .unwrap()
+                .id;
+            let dirty = runtime
+                .dispatch_window_event(
+                    window,
+                    EventPayload {
+                        element_id: id as f64,
+                        event_type: kind.into(),
+                        value,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            for root in dirty {
+                let tree = if root == "main" {
+                    &mut *main
+                } else {
+                    &mut *inspector
+                };
+                runtime.mount_window(&root, tree).unwrap();
+            }
+        }
+        let original_root = main.root_id;
+        let row = main
+            .elements
+            .values()
+            .find(|node| node.test_id.as_deref() == Some("conversation-lists"))
+            .unwrap()
+            .id;
+        event(
+            &mut runtime,
+            &mut main,
+            &mut inspector,
+            "main",
+            "conversation-lists",
+            "click",
+            None,
+        );
+        assert!(has_text(&main, "Visits: 1"));
+        assert!(has_text(&inspector, "Selected: lists"));
+        event(
+            &mut runtime,
+            &mut main,
+            &mut inspector,
+            "inspector",
+            "inspector-reverse",
+            "click",
+            None,
+        );
+        assert!(main.elements.contains_key(&row));
+        assert!(has_text(&main, "Visits: 1"));
+        event(
+            &mut runtime,
+            &mut main,
+            &mut inspector,
+            "main",
+            "activity-click",
+            "click",
+            None,
+        );
+        assert!(has_text(&main, "Panel clicks: 1"));
+        event(
+            &mut runtime,
+            &mut main,
+            &mut inspector,
+            "main",
+            "toggle-activity",
+            "click",
+            None,
+        );
+        assert!(!has_test_id(&main, "activity-panel"));
+        event(
+            &mut runtime,
+            &mut main,
+            &mut inspector,
+            "main",
+            "toggle-activity",
+            "click",
+            None,
+        );
+        assert!(has_text(&main, "Panel clicks: 0"));
+        event(
+            &mut runtime,
+            &mut main,
+            &mut inspector,
+            "main",
+            "composer",
+            "change",
+            Some("Hello Solid".into()),
+        );
+        assert!(has_text(&inspector, "Draft: Hello Solid"));
+        let composer_id = main
+            .elements
+            .values()
+            .find(|node| node.test_id.as_deref() == Some("composer"))
+            .unwrap()
+            .id;
+        assert_eq!(
+            main.elements[&composer_id].custom_props["value"],
+            serde_json::json!("Hello Solid")
+        );
+        event(
+            &mut runtime,
+            &mut main,
+            &mut inspector,
+            "main",
+            "send",
+            "click",
+            None,
+        );
+        assert!(has_test_id(&main, "conversation-message-1"));
+        assert!(has_text(&main, "Messages: 4"));
+        assert!(has_text(&main, "2. Sent message-1"));
+        assert!(has_text(&inspector, "Messages: 4"));
+        assert!(has_text(&inspector, "Selected: message-1"));
+        assert_eq!(
+            main.elements[&composer_id].custom_props["value"],
+            serde_json::json!("")
+        );
+        assert_eq!(main.root_id, original_root);
+        runtime.unmount_window("main");
+        runtime.unmount_window("inspector");
+        assert!(runtime.stores.lock().unwrap().entries["solid-workspace"]
+            .listeners
+            .is_empty());
+    }
+
+    #[test]
+    fn solid_memos_cache_batch_track_dependencies_and_dispose() {
+        let mut tree = RetainedTree::new();
+        let runtime =
+            LuaRuntime::load("return function() return gpuix.div {} end", &mut tree).unwrap();
+        runtime
+            .lua
+            .load(
+                r#"
+            local solid = require("gpuix.solid")
+            assert(not pcall(solid.create_memo, function() return 1 end))
+            local value, set_value = solid.create_signal(1)
+            local other, set_other = solid.create_signal(10)
+            local first, set_first = solid.create_signal(true)
+            local runs, effects, cleanups = 0, 0, 0
+            local memo, owner = solid.create_root(function()
+                local selected = solid.create_memo(function()
+                    runs = runs + 1
+                    solid.on_cleanup(function() cleanups = cleanups + 1 end)
+                    return first() and value() or other()
+                end)
+                solid.create_effect(function() selected(); effects = effects + 1 end)
+                solid.create_effect(function() selected() end)
+                return selected
+            end)
+            assert(memo() == 1 and memo() == 1 and runs == 1)
+            set_other(11)
+            assert(runs == 1)
+            solid.batch(function() set_value(2); set_value(3) end)
+            assert(memo() == 3 and runs == 2 and effects == 2)
+            solid.batch(function()
+                set_value(4)
+                assert(memo() == 4)
+                assert(memo() == 4 and runs == 3)
+            end)
+            set_first(false)
+            assert(memo() == 11 and runs == 4)
+            set_value(5)
+            assert(runs == 4)
+            solid.dispose(owner)
+            assert(cleanups == 4)
+            set_other(12)
+            assert(memo() == 11 and runs == 4)
+
+            local parity_effects = 0
+            local _, parity_owner = solid.create_root(function()
+                local parity = solid.create_memo(function() return value() % 2 end)
+                solid.create_effect(function() parity(); parity_effects = parity_effects + 1 end)
+            end)
+            set_value(7)
+            assert(parity_effects == 1)
+            set_value(8)
+            assert(parity_effects == 2)
+            solid.dispose(parity_owner)
+
+            local derived, diamond_owner = solid.create_root(function()
+                local left = solid.create_memo(function() return value() * 2 end)
+                local right = solid.create_memo(function() return value() * 3 end)
+                local total = solid.create_memo(function() return left() + right() end)
+                solid.create_effect(function()
+                    assert(total() == value() * 5)
+                end)
+                return total
+            end)
+            for next_value = 9, 30 do
+                solid.batch(function()
+                    set_value(next_value)
+                    assert(derived() == next_value * 5)
+                end)
+            end
+            solid.dispose(diamond_owner)
+            local result, result_owner = solid.create_root(function()
+                return solid.create_memo(function()
+                    if value() == 30 then return nil end
+                    return function() return value() end
+                end)
+            end)
+            assert(result() == nil)
+            set_value(31)
+            assert(type(result()) == "function" and result()() == 31)
+            solid.dispose(result_owner)
+        "#,
+            )
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn solid_store_selectors_skip_equal_values_and_cleanup_branches() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(
+            r#"--!gpuix solid
+                local solid = require("gpuix.solid")
+                local Show = solid.Show
+                local store = gpuix.create_store("solid-store", function(state, action)
+                    return {count = state.count + action}
+                end, {count=0})
+                local visible, set_visible = solid.create_signal(true)
+                store_effects, store_renders = 0, 0
+                return function()
+                    store_renders = store_renders + 1
+                    return solid.mount(function()
+                        return <div>
+                            <div testId="two" onClick={function() store.dispatch(2) end} />
+                            <div testId="one" onClick={function() store.dispatch(1) end} />
+                            <div testId="toggle" onClick={function() set_visible(not visible()) end} />
+                            <Show when={visible} render={function()
+                                local parity = solid.use_store(store,
+                                    function(state) return {value=state.count % 2} end,
+                                    function(previous, next) return previous.value == next.value end)
+                                solid.create_effect(function()
+                                    parity()
+                                    store_effects = store_effects + 1
+                                end)
+                                return <text>Parity {parity().value}</text>
+                            end} />
+                        </div>
+                    end)
+                end
+            "#,
+            &mut tree,
+        ).unwrap();
+        assert_eq!(
+            runtime.stores.lock().unwrap().entries["solid-store"]
+                .listeners
+                .len(),
+            1
+        );
+        assert!(!dispatch_by_test_id(&mut runtime, &mut tree, "two").unwrap());
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("store_effects").unwrap(),
+            1
+        );
+        dispatch_by_test_id(&mut runtime, &mut tree, "one").unwrap();
+        assert!(has_text(&tree, "Parity 1"));
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("store_effects").unwrap(),
+            2
+        );
+        dispatch_by_test_id(&mut runtime, &mut tree, "toggle").unwrap();
+        assert!(runtime.stores.lock().unwrap().entries["solid-store"]
+            .listeners
+            .is_empty());
+        dispatch_by_test_id(&mut runtime, &mut tree, "one").unwrap();
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("store_effects").unwrap(),
+            2
+        );
+        dispatch_by_test_id(&mut runtime, &mut tree, "toggle").unwrap();
+        assert!(has_text(&tree, "Parity 0"));
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("store_renders").unwrap(),
+            1
+        );
+        runtime.unmount_window(DEFAULT_ROOT_ID);
+        assert!(runtime.stores.lock().unwrap().entries["solid-store"]
+            .listeners
+            .is_empty());
+    }
+
+    #[test]
+    fn solid_store_shares_state_with_react_style_window_hooks() {
+        let mut runtime = LuaRuntime::load_source_unrendered(
+            r#"--!gpuix solid
+                local solid = require("gpuix.solid")
+                local store = gpuix.create_store("shared-solid", function(state, action)
+                    return {count=state.count+1}
+                end, {count=0})
+                local app = gpuix.create_app()
+                solid_renders, hook_renders = 0, 0
+                gpuix.define_window(app, {id="main", render=function()
+                    solid_renders = solid_renders + 1
+                    return solid.mount(function()
+                        local state = solid.use_store(store)
+                        return <div>
+                            <text>Solid {state().count}</text>
+                            <div testId="increment" onClick={function() store.dispatch({}) end} />
+                        </div>
+                    end)
+                end})
+                gpuix.define_window(app, {id="inspector", render=function()
+                    hook_renders = hook_renders + 1
+                    local count = store.use_state(function(state) return state.count end)
+                    return gpuix.text("Hook " .. count)
+                end})
+                return app
+            "#,
+            None,
+            true,
+        )
+        .unwrap();
+        let mut main = RetainedTree::new();
+        let mut inspector = RetainedTree::new();
+        runtime.mount_window("main", &mut main).unwrap();
+        runtime.mount_window("inspector", &mut inspector).unwrap();
+        let element_id = main
+            .elements
+            .values()
+            .find(|node| node.test_id.as_deref() == Some("increment"))
+            .unwrap()
+            .id;
+        let dirty = runtime
+            .dispatch_window_event(
+                "main",
+                EventPayload {
+                    element_id: element_id as f64,
+                    event_type: "click".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(dirty.len(), 2);
+        runtime.mount_window("main", &mut main).unwrap();
+        runtime.mount_window("inspector", &mut inspector).unwrap();
+        assert!(has_text(&main, "Solid 1"));
+        assert!(has_text(&inspector, "Hook 1"));
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("solid_renders").unwrap(),
+            1
+        );
+        assert_eq!(runtime.lua.globals().get::<i64>("hook_renders").unwrap(), 2);
+        runtime.unmount_window("main");
+        assert!(runtime.stores.lock().unwrap().entries["shared-solid"]
+            .listeners
+            .is_empty());
+    }
+
+    #[test]
+    fn solid_counter_example_supports_keyed_rows() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(
+            include_str!("../../../examples/solid-counter.luax"),
+            &mut tree,
+        )
+        .unwrap();
+        assert!(has_text(&tree, "Row 1, position 1: 0 clicks"));
+        assert!(has_text(&tree, "Row 3, position 3: 0 clicks"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "solid-counter").unwrap();
+        assert!(has_text(&tree, "Count: 1"));
+    }
+
+    #[test]
+    fn solid_index_preserves_positions_and_disposes_tail_rows() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(
+            r#"--!gpuix solid
+                local solid = require("gpuix.solid")
+                local Index = solid.Index
+                local values, set_values = solid.create_signal({"A", "B"})
+                index_mounts, index_cleanups, index_renders = 0, 0, 0
+                return function()
+                    index_renders = index_renders + 1
+                    return solid.mount(function()
+                        return <div>
+                            <div testId="swap" onClick={function() set_values({"B", "A"}) end} />
+                            <div testId="shrink" onClick={function() set_values({"C"}) end} />
+                            <div testId="grow" onClick={function()
+                                solid.batch(function()
+                                    set_values({})
+                                    set_values({"C", "C", "D"})
+                                end)
+                            end} />
+                            <div testId="invalid" onClick={function() set_values({[2]="bad"}) end} />
+                            <div testId="empty" onClick={function() set_values({}) end} />
+                            <Index testId="slots" each={values} render={function(item, index)
+                                assert(type(index) == "number")
+                                index_mounts = index_mounts + 1
+                                solid.on_cleanup(function() index_cleanups = index_cleanups + 1 end)
+                                local clicks, set_clicks = solid.create_signal(0)
+                                return <div testId={"slot-" .. index}
+                                    onClick={function() set_clicks(clicks() + 1) end}>
+                                    <text>{index}:{item()}:{clicks()}</text>
+                                </div>
+                            end} />
+                        </div>
+                    end)
+                end
+            "#,
+            &mut tree,
+        ).unwrap();
+        let ids = tree
+            .elements
+            .values()
+            .find(|node| node.test_id.as_deref() == Some("slots"))
+            .unwrap()
+            .children
+            .clone();
+        dispatch_by_test_id(&mut runtime, &mut tree, "slot-1").unwrap();
+        dispatch_by_test_id(&mut runtime, &mut tree, "swap").unwrap();
+        assert!(has_text(&tree, "1:B:1"));
+        assert!(has_text(&tree, "2:A:0"));
+        let slot = tree
+            .elements
+            .values()
+            .find(|node| node.test_id.as_deref() == Some("slots"))
+            .unwrap();
+        assert_eq!(slot.children, ids);
+        assert_eq!(runtime.lua.globals().get::<i64>("index_mounts").unwrap(), 2);
+        dispatch_by_test_id(&mut runtime, &mut tree, "shrink").unwrap();
+        assert!(has_text(&tree, "1:C:1"));
+        assert!(!tree.elements.contains_key(&ids[1]));
+        assert!(!runtime.roots[DEFAULT_ROOT_ID]
+            .handlers
+            .contains_key(&(ids[1], "click".to_string())));
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("index_cleanups").unwrap(),
+            1
+        );
+        dispatch_by_test_id(&mut runtime, &mut tree, "grow").unwrap();
+        assert!(has_text(&tree, "1:C:1"));
+        assert!(has_text(&tree, "2:C:0"));
+        assert!(has_text(&tree, "3:D:0"));
+        assert_eq!(runtime.lua.globals().get::<i64>("index_mounts").unwrap(), 4);
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "invalid").is_err());
+        assert!(has_text(&tree, "1:C:1"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "empty").unwrap();
+        assert!(!has_test_id(&tree, "slot-1"));
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("index_cleanups").unwrap(),
+            4
+        );
+        dispatch_by_test_id(&mut runtime, &mut tree, "grow").unwrap();
+        assert!(has_text(&tree, "1:C:0"));
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("index_renders").unwrap(),
+            1
+        );
+        runtime.unmount_window(DEFAULT_ROOT_ID);
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("index_cleanups").unwrap(),
+            7
+        );
+    }
+
+    #[test]
+    fn solid_for_preserves_rows_and_updates_items_and_indices() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(
+            r#"--!gpuix solid
+                local solid = require("gpuix.solid")
+                local For = solid.For
+                local items, set_items = solid.create_signal({{id="a", title="A"}, {id="b", title="B"}})
+                mounts, cleanups = 0, 0
+                return function()
+                    return solid.mount(function()
+                        return <div>
+                            <div testId="reorder" onClick={function()
+                                set_items({{id="b",title="Bee"}, {id="a",title="A"}})
+                            end} />
+                            <div testId="remove" onClick={function() set_items({{id="b",title="Bee"}}) end} />
+                            <div testId="add" onClick={function()
+                                solid.batch(function()
+                                    set_items({})
+                                    set_items({{id="a",title="Again"}, {id="b",title="Bee"}})
+                                end)
+                            end} />
+                            <div testId="empty" onClick={function() set_items({}) end} />
+                            <div testId="invalid" onClick={function()
+                                set_items({{id="b",title="B"}, {id="b",title="Duplicate"}})
+                            end} />
+                            <For testId="rows" each={items} key={function(item) return item.id end}
+                                render={function(item, index)
+                                    mounts = mounts + 1
+                                    solid.on_cleanup(function() cleanups = cleanups + 1 end)
+                                    local clicks, set_clicks = solid.create_signal(0)
+                                    return <div testId={item().id} onClick={function() set_clicks(clicks()+1) end}>
+                                        <text>{item().title}:{index()}:{clicks()}</text>
+                                    </div>
+                                end} />
+                        </div>
+                    end)
+                end
+            "#,
+            &mut tree,
+        ).unwrap();
+        let row_id = tree
+            .elements
+            .values()
+            .find(|node| node.test_id.as_deref() == Some("a"))
+            .unwrap()
+            .id;
+        dispatch_by_test_id(&mut runtime, &mut tree, "a").unwrap();
+        dispatch_by_test_id(&mut runtime, &mut tree, "reorder").unwrap();
+        assert!(has_text(&tree, "A:2:1"));
+        assert!(has_text(&tree, "Bee:1:0"));
+        assert!(tree.elements.contains_key(&row_id));
+        assert_eq!(runtime.lua.globals().get::<i64>("mounts").unwrap(), 2);
+        let slot = tree
+            .elements
+            .values()
+            .find(|node| node.test_id.as_deref() == Some("rows"))
+            .unwrap();
+        assert_eq!(slot.children[1], row_id);
+        dispatch_by_test_id(&mut runtime, &mut tree, "remove").unwrap();
+        assert!(!tree.elements.contains_key(&row_id));
+        assert_eq!(runtime.lua.globals().get::<i64>("cleanups").unwrap(), 1);
+        dispatch_by_test_id(&mut runtime, &mut tree, "add").unwrap();
+        assert!(has_text(&tree, "Again:1:0"));
+        assert_eq!(runtime.lua.globals().get::<i64>("mounts").unwrap(), 3);
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "invalid").is_err());
+        assert!(has_text(&tree, "Again:1:0"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "empty").unwrap();
+        assert!(!has_test_id(&tree, "a"));
+        assert!(!has_test_id(&tree, "b"));
+        assert_eq!(runtime.lua.globals().get::<i64>("cleanups").unwrap(), 3);
+    }
+
+    #[test]
+    fn solid_show_preserves_truthy_branches_and_disposes_removed_nodes() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(
+            r#"--!gpuix solid
+                local solid = require("gpuix.solid")
+                local Show = solid.Show
+                local level, set_level = solid.create_signal(0)
+                branch_mounts, branch_cleanups = 0, 0
+                local renders = 0
+                return function()
+                    renders = renders + 1
+                    return solid.mount(function()
+                        return <div>
+                            <div testId="toggle" onClick={function() set_level((level() + 1) % 3) end} />
+                            <Show testId="slot" when={function() return level() > 0 end}
+                                fallback={function() return <text>Hidden</text> end}
+                                render={function()
+                                    branch_mounts = branch_mounts + 1
+                                    solid.on_cleanup(function() branch_cleanups = branch_cleanups + 1 end)
+                                    local count, set_count = solid.create_signal(0)
+                                    return <div testId="branch" onClick={function() set_count(count() + 1) end}>
+                                        <text>Local {count()}</text>
+                                        <Show when={function() return true end} render={function()
+                                            return <text>Nested {count()}</text>
+                                        end} />
+                                    </div>
+                                end} />
+                            <text>Renders {renders}</text>
+                        </div>
+                    end)
+                end
+            "#,
+            &mut tree,
+        ).unwrap();
+        let root = tree.root_id;
+        assert!(has_text(&tree, "Hidden"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "toggle").unwrap();
+        assert!(has_text(&tree, "Local 0"));
+        let branch = tree
+            .elements
+            .values()
+            .find(|node| node.test_id.as_deref() == Some("branch"))
+            .unwrap()
+            .id;
+        dispatch_by_test_id(&mut runtime, &mut tree, "branch").unwrap();
+        assert!(has_text(&tree, "Nested 1"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "toggle").unwrap();
+        assert!(tree.elements.contains_key(&branch));
+        assert!(has_text(&tree, "Local 1"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "toggle").unwrap();
+        assert!(!tree.elements.contains_key(&branch));
+        assert!(has_text(&tree, "Hidden"));
+        assert!(!runtime.roots[DEFAULT_ROOT_ID]
+            .handlers
+            .contains_key(&(branch, "click".to_string())));
+        runtime
+            .lua
+            .load("assert(branch_mounts == 1 and branch_cleanups == 1)")
+            .exec()
+            .unwrap();
+        dispatch_by_test_id(&mut runtime, &mut tree, "toggle").unwrap();
+        assert!(has_text(&tree, "Local 0"));
+        assert!(has_text(&tree, "Renders 1"));
+        assert_eq!(tree.root_id, root);
+        runtime.unmount_window(DEFAULT_ROOT_ID);
+        runtime
+            .lua
+            .load("assert(branch_mounts == 2 and branch_cleanups == 2)")
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn solid_luax_tracks_text_and_style_without_component_renders() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(
+            r#"--!gpuix solid
+                local solid = require("gpuix.solid")
+                local count, set_count = solid.create_signal(0)
+                local runs = 0
+                return function()
+                    runs = runs + 1
+                    return solid.mount(function()
+                        return <div testId="increment" style={{ width = 100 + count() }}
+                            onClick={function() set_count(count() + 1) end}>
+                            <text>Count {count()}</text>
+                            <text testId="styled-text" style={{ height = 20 + count() }}>Value {count()}</text>
+                            <text content={"Prop " .. count()} />
+                            <text>Runs {runs}</text>
+                        </div>
+                    end)
+                end
+            "#,
+            &mut tree,
+        ).unwrap();
+        let root = tree.root_id.unwrap();
+        let children = tree.elements[&root].children.clone();
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "increment").unwrap());
+        assert!(has_text(&tree, "Count 1"));
+        assert!(has_text(&tree, "Value 1"));
+        assert!(has_text(&tree, "Prop 1"));
+        assert!(has_text(&tree, "Runs 1"));
+        assert_eq!(tree.elements[&root].children, children);
+        assert!(matches!(
+            tree.elements[&root].style.as_ref().unwrap().width,
+            Some(crate::style::DimensionValue::Pixels(101.0))
+        ));
+    }
+
+    #[test]
+    fn solid_bindings_update_native_nodes_without_rerendering() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load(
+            r#"
+                local solid = require("gpuix.solid")
+                local count, set_count = solid.create_signal(0)
+                test_set_count = set_count
+                test_cleanups = 0
+                local renders = 0
+                return function()
+                    renders = renders + 1
+                    return solid.mount(function()
+                        solid.on_cleanup(function() test_cleanups = test_cleanups + 1 end)
+                        local label = solid.text(function() return "Count " .. count() end)
+                        local root = gpuix.div {
+                            testId = "counter",
+                            onClick = function() set_count(function(value) return value + 1 end) end,
+                            children = { label, gpuix.text("Renders " .. renders) },
+                        }
+                        solid.bind_style(root, function()
+                            return { width = 100 + count(), height = 40 }
+                        end)
+                        return root
+                    end)
+                end
+            "#,
+            &mut tree,
+        ).unwrap();
+        let root = tree.root_id.unwrap();
+        let children = tree.elements[&root].children.clone();
+        assert!(has_text(&tree, "Count 0"));
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "counter").unwrap());
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "counter").unwrap());
+        assert!(has_text(&tree, "Count 2"));
+        assert!(has_text(&tree, "Renders 1"));
+        assert_eq!(tree.root_id, Some(root));
+        assert_eq!(tree.elements[&root].children, children);
+        assert!(matches!(
+            tree.elements[&root].style.as_ref().unwrap().width,
+            Some(crate::style::DimensionValue::Pixels(102.0))
+        ));
+        runtime.unmount_window(DEFAULT_ROOT_ID);
+        runtime
+            .lua
+            .load("test_set_count(3); assert(test_cleanups == 1)")
+            .exec()
+            .unwrap();
+        assert!(runtime.host_updates.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn solid_signals_track_batch_and_dispose_owned_effects() {
+        let lua = Lua::new();
+        install_builtin_modules(&lua).unwrap();
+        lua.load(
+            r#"
+            local solid = require("gpuix.solid")
+            local value, set_value = solid.create_signal(0)
+            local enabled, set_enabled = solid.create_signal(true)
+            local runs, seen, cleaned = 0, 0, 0
+            local _, owner = solid.create_root(function()
+                solid.create_effect(function()
+                    runs = runs + 1
+                    seen = enabled() and value() or -1
+                    solid.on_cleanup(function() cleaned = cleaned + 1 end)
+                end)
+            end)
+            solid.batch(function() set_value(1) set_value(2) end)
+            assert(runs == 2 and seen == 2 and cleaned == 1)
+            set_enabled(false)
+            set_value(3)
+            assert(runs == 3 and seen == -1)
+            solid.dispose(owner)
+            solid.dispose(owner)
+            set_enabled(true)
+            assert(runs == 3 and cleaned == 3)
+            assert(not pcall(function() solid.create_effect(function() end) end))
+        "#,
+        )
+        .exec()
+        .unwrap();
     }
 
     #[test]

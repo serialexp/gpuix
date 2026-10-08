@@ -1,0 +1,219 @@
+--!gpuix solid
+local solid = require("gpuix.solid")
+local util = require("gpuix._util")
+local For, Show = solid.For, solid.Show
+local controls = {}
+local row_style = { display = "flex", flexDirection = "row", alignItems = "center", gap = 8, focus = util.focus_ring }
+local trigger_style = {
+    width = 200, height = 36, padding = 10, background = "#18181b",
+    borderWidth = 1, borderColor = "#52525b", borderRadius = 7, focus = util.focus_ring,
+}
+local menu_style = {
+    width = 200, padding = 5, background = "#27272a", borderRadius = 8,
+    borderWidth = 1, borderColor = "#52525b", focus = util.focus_ring,
+}
+
+local function read(props, name, fallback)
+    local value = props[name]
+    if type(value) == "function" then value = value() end
+    if value == nil then return fallback end
+    return value
+end
+
+local function controlled(props, name, initial, callback)
+    local local_value, set_local = solid.create_signal(initial)
+    local function value()
+        if props[name] ~= nil then return read(props, name) end
+        return local_value()
+    end
+    local function set_value(next_value)
+        if value() == next_value then return end
+        if props[name] == nil then set_local(function() return next_value end) end
+        util.call(props[callback], next_value)
+    end
+    return value, set_value
+end
+
+function controls.Button(props)
+    local function state() return { disabled = read(props, "disabled", false) } end
+    return <div testId={props.testId} autoFocus={props.autoFocus}
+        tabIndex={state().disabled and -1 or read(props, "tabIndex", 0)}
+        onClick={function(event) if not state().disabled then util.call(props.onClick, event) end end}
+        onFocus={props.onFocus} onBlur={props.onBlur} onKeyDown={props.onKeyDown} onKeyUp={props.onKeyUp}
+        onMouseEnter={props.onMouseEnter} onMouseLeave={props.onMouseLeave}
+        style={util.resolve_style(props.style, state(), row_style)} children={props} />
+end
+
+function controls.Checkbox(props)
+    local checked, set_checked = controlled(props, "checked", props.defaultChecked == true, "onCheckedChange")
+    local function state() return { checked = checked(), disabled = read(props, "disabled", false) } end
+    local function toggle() if not state().disabled then set_checked(not checked()) end end
+    return <div testId={props.testId} tabIndex={state().disabled and -1 or read(props, "tabIndex", 0)}
+        onClick={toggle} style={util.resolve_style(props.style, state(), row_style)}>
+        <div testId={util.test_id(props.testId, "-indicator")} onClick={toggle}
+            style={util.resolve_style(props.indicatorStyle, state(), {
+                width = 20, height = 20, borderRadius = 5, borderWidth = 1,
+                borderColor = "#71717a", background = "#18181b", pointerEvents = "auto",
+            })}>
+            <text style={{ pointerEvents = "none" }}>{checked() and "✓" or ""}</text>
+        </div>
+        <text>{read(props, "label", "")}</text>
+    </div>
+end
+
+function controls.RadioGroup(props)
+    local function options() return read(props, "options", {}) end
+    local initial = props.defaultValue
+    if initial == nil then
+        for _, option in ipairs(options()) do
+            if not util.is_disabled(option) then initial = option.value; break end
+        end
+    end
+    local value, set_value = controlled(props, "value", initial, "onValueChange")
+    local rows = {}
+    local function disabled(option) return read(props, "disabled", false) or util.is_disabled(option) end
+    local tab_stop = solid.create_memo(function()
+        local fallback
+        for _, option in ipairs(options()) do
+            if not disabled(option) then
+                fallback = fallback or option.value
+                if option.value == value() then return option.value end
+            end
+        end
+        return fallback
+    end)
+    local group = <For testId={props.testId} each={options} key={function(option) return option.value end}
+        style={util.resolve_style(props.style, { value = value() }, row_style)}
+        render={function(item)
+            local function state()
+                return { selected = item().value == value(), disabled = disabled(item()), option = item() }
+            end
+            local function select() if not state().disabled then set_value(item().value) end end
+            local handle = <div testId={util.test_id(props.testId, "-" .. item().value)}
+                tabIndex={state().disabled and -1 or (tab_stop() == item().value and 0 or -1)}
+                onClick={select} onKeyDown={function(event)
+                    if read(props, "disabled", false) then return end
+                    local direction
+                    if event.key == "right" or event.key == "down" then direction = 1
+                    elseif event.key == "left" or event.key == "up" then direction = -1 end
+                    if not direction then return end
+                    local list = options()
+                    local index = util.option_index(list, item().value)
+                    if not index then return end
+                    for offset = 1, #list do
+                        local next_item = list[((index - 1 + direction * offset) % #list) + 1]
+                        if not disabled(next_item) then
+                            set_value(next_item.value)
+                            gpuix.focus(rows[next_item.value])
+                            break
+                        end
+                    end
+                end} style={util.resolve_style(props.itemStyle, state(), row_style)}>
+                <div testId={util.test_id(props.testId, "-" .. item().value .. "-indicator")}
+                    onClick={select} style={util.resolve_style(props.indicatorStyle, state(), {
+                        width = 18, height = 18, borderRadius = 9, borderWidth = 1, borderColor = "#71717a",
+                    })}>
+                    <text style={{ pointerEvents = "none" }}>{state().selected and "●" or ""}</text>
+                </div>
+                <text>{item().label or item().value}</text>
+            </div>
+            local key = item().value
+            rows[key] = handle
+            solid.on_cleanup(function() rows[key] = nil end)
+            return handle
+        end} />
+    solid.bind_style(group, function()
+        return util.resolve_style(props.style, { value = value() }, row_style)
+    end)
+    return group
+end
+
+function controls.Select(props)
+    local function options() return read(props, "options", {}) end
+    local value, set_value = controlled(props, "value", props.defaultValue, "onValueChange")
+    local open, set_open = controlled(props, "open", props.defaultOpen == true, "onOpenChange")
+    local active, set_active = solid.create_signal(nil)
+    local trigger
+    local function state() return { value = value(), open = open(), disabled = read(props, "disabled", false) } end
+    local function selected()
+        for _, option in ipairs(options()) do if option.value == value() then return option end end
+    end
+    local function enabled(option) return option and not util.is_disabled(option) end
+    local function open_menu()
+        if state().disabled then return end
+        local option = selected()
+        if not enabled(option) then
+            option = nil
+            for _, candidate in ipairs(options()) do if enabled(candidate) then option = candidate; break end end
+        end
+        if not option then return end
+        set_active(option.value)
+        set_open(true)
+    end
+    local function close(restore_focus)
+        set_open(false)
+        if restore_focus ~= false then gpuix.focus(trigger) end
+    end
+    local function choose(key)
+        if state().disabled then return end
+        for _, option in ipairs(options()) do
+            if option.value == key and enabled(option) then set_value(key); close(); return end
+        end
+    end
+    local function move(direction)
+        local list = options()
+        local index = util.option_index(list, active()) or 0
+        if index == 0 and direction < 0 then index = 1 end
+        for offset = 1, #list do
+            local option = list[((index - 1 + direction * offset) % #list) + 1]
+            if enabled(option) then set_active(option.value); return end
+        end
+    end
+    local function handle_key(event)
+        if state().disabled then return end
+        if event.key == "escape" then close()
+        elseif event.key == "down" or event.key == "up" then
+            if not open() then open_menu() else move(event.key == "down" and 1 or -1) end
+        elseif event.key == "enter" or event.key == "space" then
+            if open() then choose(active()) else open_menu() end
+        end
+    end
+    trigger = <div testId={props.testId} tabIndex={state().disabled and -1 or read(props, "tabIndex", 0)}
+        onClick={function() if not state().disabled then if open() then close() else open_menu() end end end}
+        onKeyDown={function(event)
+            if event.key ~= "enter" and event.key ~= "space" then handle_key(event) end
+        end} style={util.resolve_style(props.triggerStyle, state(), trigger_style)}>
+        <text>{selected() and (selected().label or selected().value) or read(props, "placeholder", "Select…")}</text>
+    </div>
+    return <div style={util.resolve_style(props.style, state(), { position = "relative" })}>
+        {trigger}
+        <Show when={function() return open() and not state().disabled end}
+            style={{ position = "absolute", width = "100%", height = "100%", pointerEvents = "none" }}
+            render={function()
+                return <anchored side={read(props, "side", "bottom")} align={read(props, "align", "start")}
+                    gap={read(props, "sideOffset", 5)} fit="snap" snapMargin={read(props, "collisionPadding", 8)}
+                    deferred priority={read(props, "priority", 1)}>
+                    <div testId={util.test_id(props.testId, "-content")} autoFocus tabIndex={0}
+                        onMouseDownOutside={function() close(false) end} onKeyDown={handle_key}
+                        style={util.resolve_style(props.contentStyle, state(), menu_style)}>
+                        <For each={options} key={function(option) return option.value end}
+                            render={function(item)
+                                local function item_state()
+                                    return { selected = value() == item().value, highlighted = active() == item().value,
+                                        disabled = util.is_disabled(item()), option = item() }
+                                end
+                                return <div testId={util.test_id(props.testId, "-option-" .. item().value)}
+                                    onMouseEnter={function() if enabled(item()) then set_active(item().value) end end}
+                                    onClick={function() choose(item().value) end}
+                                    style={util.resolve_style(props.itemStyle, item_state(), {
+                                        padding = 9, borderRadius = 6,
+                                        background = active() == item().value and "#3f3f46" or "#27272a",
+                                    })}><text>{item().label or item().value}</text></div>
+                            end} />
+                    </div>
+                </anchored>
+            end} />
+    </div>
+end
+
+return controls
