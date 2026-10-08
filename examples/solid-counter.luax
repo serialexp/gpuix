@@ -1,0 +1,75 @@
+--!gpuix solid
+local solid = require("gpuix.solid")
+local store = gpuix.create_store("solid-counter", function(state, action)
+    return { count = state.count + 1 }
+end, { count = 0 })
+local visible, set_visible = solid.create_signal(true)
+local Show = solid.Show
+local For = solid.For
+local Index = solid.Index
+local items, set_items = solid.create_signal({ { id = 1 }, { id = 2 }, { id = 3 } })
+local next_id = 3
+
+return function()
+    return solid.mount(function()
+        local count = solid.use_store(store, function(state) return state.count end)
+        local doubled = solid.create_memo(function() return count() * 2 end)
+        return <div style={{ padding = 24, background = "#18181b", height = "100%" }}>
+            <div
+                testId="solid-counter"
+                tabIndex={0}
+                autoFocus
+                onClick={function() store.dispatch({ type = "increment" }) end}
+                style={{
+                    width = 180,
+                    padding = 16,
+                    borderRadius = 8,
+                    color = "#ffffff",
+                    background = count() % 2 == 0 and "#2563eb" or "#7c3aed",
+                }}
+            ><text>Count: {count()}</text></div>
+            <text style={{ color = "#ffffff" }}>Doubled: {doubled()}</text>
+            <div tabIndex={0} onClick={function() set_visible(not visible()) end}
+                style={{ padding = 12, color = "#ffffff" }}>
+                <text>Toggle details</text>
+            </div>
+            <Show when={visible} render={function()
+                return <text style={{ color = "#ffffff" }}>Reactive details: {count()}</text>
+            end} fallback={function()
+                return <text style={{ color = "#a1a1aa" }}>Details hidden</text>
+            end} />
+            <div tabIndex={0} style={{ padding = 12, color = "#ffffff" }}
+                onClick={function()
+                    local reversed = {}
+                    for index = #items(), 1, -1 do
+                        reversed[#reversed + 1] = items()[index]
+                    end
+                    set_items(reversed)
+                end}><text>Reverse rows (local counts survive)</text></div>
+            <div tabIndex={0} style={{ padding = 12, color = "#ffffff" }}
+                onClick={function()
+                    local updated = {}
+                    for index, item in ipairs(items()) do updated[index] = item end
+                    next_id = next_id + 1
+                    updated[#updated + 1] = { id = next_id }
+                    set_items(updated)
+                end}><text>Add row</text></div>
+            <For each={items} key={function(item) return item.id end}
+                render={function(item, index)
+                    local clicks, set_clicks = solid.create_signal(0)
+                    return <div tabIndex={0} style={{ padding = 8, color = "#ffffff" }}
+                        onClick={function() set_clicks(clicks() + 1) end}>
+                        <text>Row {item().id}, position {index()}: {clicks()} clicks</text>
+                    </div>
+                end} />
+            <text style={{ color = "#a1a1aa" }}>Index: counts stay at their positions</text>
+            <Index each={items} render={function(item, index)
+                local clicks, set_clicks = solid.create_signal(0)
+                return <div tabIndex={0} style={{ padding = 8, color = "#ffffff" }}
+                    onClick={function() set_clicks(clicks() + 1) end}>
+                    <text>Slot {index}, item {item().id}: {clicks()} clicks</text>
+                </div>
+            end} />
+        </div>
+    end)
+end

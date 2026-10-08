@@ -1,0 +1,152 @@
+--!gpuix solid
+local solid = require("gpuix.solid")
+local store = require("store")
+local For, Index, Show = solid.For, solid.Index, solid.Show
+local app = gpuix.create_app()
+local Button = require("gpuix.solid.button")
+local Checkbox = require("gpuix.solid.checkbox")
+local RadioGroup = require("gpuix.solid.radio_group")
+local Select = require("gpuix.solid.select")
+local colors = { background = "#15171c", panel = "#1d2027", text = "#e5e7eb", muted = "#9ca3af", accent = "#2563eb" }
+local button_style = {
+    padding = 10, borderRadius = 6, background = colors.panel,
+    focus = { foregroundBoxShadow = {
+        offsetX = 0, offsetY = 0, blurRadius = 0, spreadRadius = 2,
+        color = "#60a5fa", inset = true,
+    } },
+}
+local function read_field(field)
+    return solid.use_store(store, function(state) return state[field] end)
+end
+
+local function MainWindow()
+    return solid.mount(function()
+        local messages = read_field("messages")
+        local selected = read_field("selected")
+        local compact = read_field("compact")
+        local activity_visible = read_field("show_activity")
+        local activity = read_field("activity")
+        local draft = read_field("draft")
+        local detail = solid.create_memo(function()
+            for _, message in ipairs(messages()) do
+                if message.id == selected() then return message end
+            end
+        end)
+        local total = solid.create_memo(function() return #messages() end)
+        local choices = solid.create_memo(function()
+            local result = {}
+            for index, message in ipairs(messages()) do
+                result[index] = { value = message.id, label = message.title }
+            end
+            return result
+        end)
+        local function select_conversation(value) store.dispatch({ type = "select", id = value }) end
+        return <div testId="solid-workspace" style={{
+            display = "flex", flexDirection = "column", width = "100%", height = "100%",
+            padding = 16, gap = 12, background = colors.background, color = colors.text,
+        }}>
+            <div style={{ display = "flex", flexDirection = "row", gap = 10, flexShrink = 0 }}>
+                <text style={{ fontSize = 20 }}>Solid workspace</text>
+                <div style={{ flexGrow = 1 }} />
+                <div testId="compact" tabIndex={0} style={button_style}
+                    onClick={function() store.dispatch({ type = "compact" }) end}>
+                    <text>{compact() and "Expand" or "Compact"}</text>
+                </div>
+                <div testId="reverse" tabIndex={0} style={button_style}
+                    onClick={function() store.dispatch({ type = "reverse" }) end}><text>Reverse</text></div>
+                <Checkbox testId="toggle-activity" checked={activity_visible} label="Activity"
+                    style={{ display = "flex", flexDirection = "row", alignItems = "center",
+                        gap = 8, padding = 10, background = colors.panel, borderRadius = 6,
+                        focus = button_style.focus }}
+                    onCheckedChange={function() store.dispatch({ type = "activity" }) end} />
+                <div testId="open-inspector" tabIndex={0} style={button_style}
+                    onClick={function() gpuix.open_window(app, "inspector") end}><text>Inspector</text></div>
+            </div>
+            <div style={{ display = "flex", flexDirection = "row", gap = 16, flexGrow = 1, minHeight = 0 }}>
+                <div testId="sidebar" style={{
+                    width = compact() and 180 or 300, flexShrink = 0,
+                    background = colors.panel, padding = 8, overflowY = "scroll",
+                }}>
+                    <For each={messages} key={function(item) return item.id end}
+                        render={function(item)
+                            local visits, set_visits = solid.create_signal(0)
+                            return <div testId={"conversation-" .. item().id} tabIndex={0}
+                                onClick={function()
+                                    set_visits(visits() + 1)
+                                    store.dispatch({ type = "select", id = item().id })
+                                end}
+                                style={{
+                                    padding = 12, marginBottom = 6, borderRadius = 6,
+                                    background = selected() == item().id and colors.accent or colors.panel,
+                                    focus = button_style.focus,
+                                }}>
+                                <text>{item().title}</text>
+                                <text style={{ color = colors.muted }}>Visits: {visits()}</text>
+                            </div>
+                        end} />
+                </div>
+                <div style={{ flexGrow = 1, minWidth = 0, padding = 16, background = colors.panel }}>
+                    <text style={{ fontSize = 22 }}>{detail() and detail().title or "No selection"}</text>
+                    <text>{detail() and detail().body or ""}</text>
+                    <text style={{ color = colors.muted }}>Messages: {total()}</text>
+                    <text>Draft preview: {draft()}</text>
+                    <Select testId="conversation-select" options={choices} value={selected}
+                        onValueChange={select_conversation} />
+                    <RadioGroup testId="conversation-radio" options={choices} value={selected}
+                        onValueChange={select_conversation}
+                        style={{ display = "flex", flexDirection = "column", gap = 8 }} />
+                </div>
+                <Show when={activity_visible} style={{ flexShrink = 0 }}
+                    render={function()
+                        local clicks, set_clicks = solid.create_signal(0)
+                        return <div testId="activity-panel" style={{
+                            width = 240, padding = 12, background = colors.panel,
+                        }}>
+                            <text style={{ fontSize = 18 }}>Activity</text>
+                            <Index each={activity} render={function(item, index)
+                                return <text>{index}. {item()}</text>
+                            end} />
+                            <div testId="activity-click" tabIndex={0} style={button_style}
+                                onClick={function() set_clicks(clicks() + 1) end}>
+                                <text>Panel clicks: {clicks()}</text>
+                            </div>
+                        </div>
+                    end} />
+            </div>
+            <div style={{ display = "flex", flexDirection = "row", gap = 10, flexShrink = 0 }}>
+                <input testId="composer" value={draft()} placeholder="Write a message…" style={{
+                    flexGrow = 1, height = 40, background = colors.panel, color = colors.text,
+                }} onChange={function(event)
+                    store.dispatch({ type = "draft", value = event.value or "" })
+                end} />
+                <Button testId="send" disabled={function() return draft() == "" end} style={button_style}
+                    onClick={function() store.dispatch({ type = "send" }) end}><text>Send</text></Button>
+            </div>
+        </div>
+    end)
+end
+
+local function InspectorWindow()
+    return solid.mount(function()
+        local messages = read_field("messages")
+        local selected = read_field("selected")
+        local draft = read_field("draft")
+        return <div style={{
+            padding = 20, width = "100%", height = "100%",
+            background = colors.background, color = colors.text,
+        }}>
+            <text style={{ fontSize = 20 }}>Shared inspector</text>
+            <text>Selected: {selected()}</text>
+            <text>Messages: {#messages()}</text>
+            <text>Draft: {draft()}</text>
+            <div testId="inspector-reverse" tabIndex={0} style={button_style}
+                onClick={function() store.dispatch({ type = "reverse" }) end}><text>Reverse shared list</text></div>
+            <div testId="close-inspector" tabIndex={0} style={button_style}
+                onClick={function() gpuix.close_window(app, "inspector") end}><text>Close</text></div>
+        </div>
+    end)
+end
+
+gpuix.define_window(app, { id = "main", title = "GPUIX Solid Workspace", width = 1280, height = 800, render = MainWindow })
+gpuix.define_window(app, { id = "inspector", title = "Solid Inspector", width = 420, height = 360, open = false, render = InspectorWindow })
+return app
