@@ -221,7 +221,7 @@ describe.skipIf(!hasTestGpuixRenderer())("LuaX focus navigation", () => {
     expect(renderer.getAllText()).toContain("Selected: comfortable; after: focused")
   })
 
-  it("focuses a control through its children and blurs on background press", () => {
+  it("focuses a control through its children and refocuses the window on background press", () => {
     const renderer = new TestGpuixRenderer(420, 220)
     renderer.loadLuax(`
       local Button = require("gpuix.button")
@@ -262,7 +262,7 @@ describe.skipIf(!hasTestGpuixRenderer())("LuaX focus navigation", () => {
       expect(id).toBeDefined()
       const bounds = renderer.getElementBounds(id!)
       expect(bounds).not.toBeNull()
-      const [x, y, width, height] = bounds!
+      const { x, y, width, height } = bounds!
       renderer.simulateClick(x + width / 2, y + height / 2)
       for (const event of renderer.drainEvents()) renderer.dispatchLuaEvent(event)
       renderer.flush()
@@ -280,8 +280,8 @@ describe.skipIf(!hasTestGpuixRenderer())("LuaX focus navigation", () => {
     click("checkbox-indicator")
     const rootBounds = renderer.getElementBounds(tree.id)
     expect(rootBounds).not.toBeNull()
-    const [rootX, rootY, rootWidth, rootHeight] = rootBounds!
-    renderer.simulateClick(rootX + rootWidth - 5, rootY + rootHeight - 5)
+    const root = rootBounds!
+    renderer.simulateClick(root.x + root.width - 5, root.y + root.height - 5)
     renderer.flush()
     press("tab f")
     expect(renderer.getAllText()).toContain("Target: first")
@@ -318,7 +318,7 @@ describe.skipIf(!hasTestGpuixRenderer())("LuaX focus navigation", () => {
     const icon = (tree.children ?? []).find(
       (child) => (child as { testId?: string }).testId === "icon"
     ) as { id: number }
-    const [x, y, width, height] = renderer.getElementBounds(icon.id)!
+    const { x, y, width, height } = renderer.getElementBounds(icon.id)!
     renderer.simulateClick(x + width / 2, y + height / 2)
     renderer.simulateKeystrokes("tab a")
     for (const event of renderer.drainEvents()) renderer.dispatchLuaEvent(event)

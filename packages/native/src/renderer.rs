@@ -47,6 +47,7 @@ use crate::theme::Theme;
 
 gpui::actions!(gpuix_lua_focus, [LuaFocusNext, LuaFocusPrevious]);
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub(crate) fn init_lua_focus_key_bindings(cx: &mut gpui::App) {
     cx.bind_keys([
         gpui::KeyBinding::new("tab", LuaFocusNext, None),
@@ -85,7 +86,9 @@ fn with_window_menu_actions(root: gpui::Div) -> gpui::Div {
     root
 }
 
-fn pointer_focus_boundary(root_focus: Option<gpui::FocusHandle>) -> impl gpui::IntoElement {
+/// Lua windows: a left press that no element claimed moves focus back to the
+/// window root, like clicking the background of a web page.
+fn pointer_focus_boundary(root_focus: gpui::FocusHandle) -> impl gpui::IntoElement {
     use gpui::prelude::*;
 
     gpui::canvas(
@@ -97,11 +100,7 @@ fn pointer_focus_boundary(root_focus: Option<gpui::FocusHandle>) -> impl gpui::I
                     && event.button == gpui::MouseButton::Left
                     && !window.default_prevented()
                 {
-                    if let Some(handle) = root_focus.as_ref() {
-                        handle.focus(window, cx);
-                    } else {
-                        window.blur();
-                    }
+                    root_focus.focus(window, cx);
                 }
             });
         },
@@ -4085,11 +4084,13 @@ impl GpuixView {
         );
     }
 
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub(crate) fn with_native_tab_navigation(mut self) -> Self {
         self.native_tab_navigation = true;
         self
     }
 
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub(crate) fn enable_native_tab_navigation(&mut self) {
         self.native_tab_navigation = true;
     }
@@ -4184,7 +4185,7 @@ impl GpuixView {
             paint_reports: &self.paint_reports,
             highlight_events: &mut highlight_events,
             keyboard_focus,
-            native_keyboard: self.native_tab_navigation,
+            native_focus: self.native_tab_navigation,
         };
         let child = build_element(expected_child_id, &mut build_ctx, window, cx);
         emit_highlight_events(&callback, &highlight_events);
@@ -4317,22 +4318,33 @@ pub(crate) struct BuildCtx<'a> {
     highlight_events: &'a mut Vec<(u64, usize)>,
     /// See `GpuixView::keyboard_focus_path`.
     pub keyboard_focus: Option<Arc<[u64]>>,
-    /// Lua windows: Enter and Space click the focused element natively. React
-    /// and Solid do this in JavaScript.
-    pub native_keyboard: bool,
+    /// Lua windows: GPUI owns pointer and keyboard focus. Enter and Space click
+    /// the focused element, a press on a plain descendant focuses its nearest
+    /// focusable ancestor, and a press on the background moves focus back to
+    /// the window root. React and Solid do this in JavaScript, and their
+    /// controls rely on GPUI leaving focus be.
+    pub native_focus: bool,
 }
 
+/// The nearest focusable retained ancestor that a press on `element` should
+/// focus, in Lua windows only. `pointerEvents: "none"` opts out.
 fn ancestor_focus_handle<'a>(
     element: &crate::retained_tree::RetainedElement,
-    tree: &RetainedTree,
-    focus_handles: &'a HashMap<u64, gpui::FocusHandle>,
+    style: Option<&StyleDesc>,
+    ctx: &BuildCtx<'a>,
 ) -> Option<&'a gpui::FocusHandle> {
+    if !ctx.native_focus
+        || style.is_some_and(|style| style.pointer_events.as_deref() == Some("none"))
+    {
+        return None;
+    }
     let mut parent = element.parent;
     while let Some(parent_id) = parent {
-        if let Some(handle) = focus_handles.get(&parent_id) {
+        if let Some(handle) = ctx.focus_handles.get(&parent_id) {
             return Some(handle);
         }
-        parent = tree
+        parent = ctx
+            .tree
             .elements
             .get(&parent_id)
             .and_then(|element| element.parent);
@@ -5160,7 +5172,7 @@ impl gpui::Render for GpuixView {
                     paint_reports: &self.paint_reports,
                     highlight_events: &mut highlight_events,
                     keyboard_focus,
-                    native_keyboard: self.native_tab_navigation,
+                    native_focus: self.native_tab_navigation,
                 };
                 build_element(root_id, &mut ctx, window, cx)
             }
@@ -5222,7 +5234,9 @@ impl gpui::Render for GpuixView {
                     },
                 ))
                 .child(crate::automation::bounds_frame_reset())
-                .child(pointer_focus_boundary(native_tab_root_focus))
+                .when_some(native_tab_root_focus, |root, handle| {
+                    root.child(pointer_focus_boundary(handle))
+                })
                 .child(result)
                 .into_any_element()
         };
@@ -5338,14 +5352,7 @@ pub(crate) fn build_element(
                 .map(|child_id| build_element(child_id, ctx, window, cx))
                 .collect();
             let inherited = ctx.inherited.clone();
-            let ancestor_focus_handle = if style
-                .filter(|style| style.pointer_events.as_deref() == Some("none"))
-                .is_some()
-            {
-                None
-            } else {
-                ancestor_focus_handle(element, ctx.tree, ctx.focus_handles)
-            };
+            let ancestor_focus_handle = ancestor_focus_handle(element, style, ctx);
             let render_ctx = CustomRenderContext {
                 id,
                 events: element.events(),
@@ -5679,21 +5686,16 @@ pub(crate) fn build_host_container(
     if let Some(handle) = ctx.focus_handles.get(&element.id) {
         el = el.track_focus(handle);
         el = apply_focus_visible(el, element.id, style, ctx.keyboard_focus.as_deref());
-    } else if style
-        .filter(|style| style.pointer_events.as_deref() == Some("none"))
-        .is_none()
-    {
-        if let Some(handle) = ancestor_focus_handle(element, ctx.tree, ctx.focus_handles).cloned() {
-            // GPUI focuses a tracked hitbox automatically, but a painted child with
-            // BlockMouseExceptScroll excludes its focusable ancestor from hit testing.
-            // Route that descendant press to the nearest retained focus ancestor.
-            el = el.on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
-                if event.is_focusing() && !window.default_prevented() {
-                    handle.focus(window, cx);
-                    window.prevent_default();
-                }
-            });
-        }
+    } else if let Some(handle) = ancestor_focus_handle(element, style, ctx).cloned() {
+        // GPUI focuses a tracked hitbox automatically, but a painted child with
+        // BlockMouseExceptScroll excludes its focusable ancestor from hit testing.
+        // Route that descendant press to the nearest retained focus ancestor.
+        el = el.on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+            if event.is_focusing() && !window.default_prevented() {
+                handle.focus(window, cx);
+                window.prevent_default();
+            }
+        });
     }
     if let Some(tab_index) = element
         .custom_props()
@@ -5745,7 +5747,7 @@ pub(crate) fn build_host_container(
         // unmodified Enter/Space press and release while focus stays here.
         // React and Solid controls activate from Enter/Space in JavaScript, so
         // only Lua windows get it; otherwise a Button would click twice.
-        if ctx.native_keyboard {
+        if ctx.native_focus {
             el = el.on_click(move |click_event, _window, _cx| {
                 if !click_event.is_keyboard() {
                     return;

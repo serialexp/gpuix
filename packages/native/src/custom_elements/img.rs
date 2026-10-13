@@ -470,6 +470,15 @@ impl CustomElement for SvgElement {
 
         let bytes = if self.source.trim().is_empty() {
             self.bytes.as_deref()
+        } else if self.source.starts_with("phosphor:") {
+            #[cfg(any(feature = "lua54", feature = "luajit"))]
+            {
+                crate::phosphor::source_from_token(&self.source)
+            }
+            #[cfg(not(any(feature = "lua54", feature = "luajit")))]
+            {
+                None
+            }
         } else {
             Some(self.source.as_bytes())
         };

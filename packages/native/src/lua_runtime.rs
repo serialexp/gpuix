@@ -127,6 +127,11 @@ const BUILTIN_LUA_MODULES: &[(&str, &str, bool)] = &[
         true,
     ),
     (
+        "gpuix.icon",
+        include_str!("../../lua/gpuix/icon.luax"),
+        true,
+    ),
+    (
         "gpuix.tooltip",
         include_str!("../../lua/gpuix/tooltip.luax"),
         true,
@@ -1353,6 +1358,7 @@ impl LuaRuntime {
         Self::load_source(source, None, true, tree)
     }
 
+    #[cfg(test)]
     pub(crate) fn load_file(path: &Path, tree: &mut RetainedTree) -> Result<Self, String> {
         let mut runtime = Self::load_application_file(path)?;
         if runtime.roots.len() != 1 || !runtime.roots.contains_key(DEFAULT_ROOT_ID) {
@@ -2127,7 +2133,7 @@ impl LuaRuntime {
                         tree.destroy_element(id);
                     }
                 }
-                tree.set_root(None);
+                tree.clear_root();
                 self.memo
                     .lock()
                     .unwrap()
@@ -2157,7 +2163,7 @@ impl LuaRuntime {
             .unwrap()
             .entries
             .retain(|key, _| key.root != root_key || live_memo_keys.contains(&key.key));
-        tree.set_root(Some(root.id));
+        tree.set_root(root.id);
         collect_host_handles(&root, &mut handle_aliases);
         let host_tokens = handle_aliases.keys().copied().collect();
         {
@@ -2499,31 +2505,33 @@ fn hook_value_type(value: &Value) -> HookValueType {
     }
 }
 
-fn hook_dependencies(lua: &Lua, table: Option<Table>) -> mlua::Result<Option<DependencyList>> {
-    let Some(table) = table else {
-        return Ok(None);
-    };
+/// The length of `table` if its keys are exactly `1..=n`, else `None`.
+///
+/// `raw_len` alone cannot tell: a table with a hole has several valid lengths,
+/// and Lua 5.4 and LuaJIT pick different ones. Read the values by index
+/// afterwards, since `pairs` order is unspecified.
+fn dense_len(table: &Table) -> mlua::Result<Option<usize>> {
     let len = table.raw_len();
     let mut seen = 0usize;
     for pair in table.clone().pairs::<Value, Value>() {
         let (key, _) = pair?;
-        let Value::Integer(index) = key else {
-            return Err(mlua::Error::runtime(
-                "Lua hook dependencies must be a dense array",
-            ));
-        };
-        if index < 1 || index as usize > len {
-            return Err(mlua::Error::runtime(
-                "Lua hook dependencies must be a dense array",
-            ));
+        if !matches!(key, Value::Integer(index) if index >= 1 && index as usize <= len) {
+            return Ok(None);
         }
         seen += 1;
     }
-    if seen != len {
+    Ok((seen == len).then_some(len))
+}
+
+fn hook_dependencies(lua: &Lua, table: Option<Table>) -> mlua::Result<Option<DependencyList>> {
+    let Some(table) = table else {
+        return Ok(None);
+    };
+    let Some(len) = dense_len(&table)? else {
         return Err(mlua::Error::runtime(
             "Lua hook dependencies must be a dense array",
         ));
-    }
+    };
     let mut dependencies = Vec::with_capacity(len);
     for index in 1..=len {
         let value = table.raw_get::<Value>(index)?;
@@ -2983,19 +2991,12 @@ fn install_api(
     api.set(
         "set_children",
         lua.create_function(move |_, (parent, children): (i64, Table)| {
-            let length = children.raw_len();
-            for entry in children.clone().pairs::<Value, Value>() {
-                let (key, _) = entry?;
-                if !matches!(key, Value::Integer(index) if index > 0 && index as usize <= length) {
-                    return Err(mlua::Error::runtime("children must be a dense array"));
-                }
-            }
-            let tokens = children
-                .sequence_values::<i64>()
-                .collect::<mlua::Result<Vec<_>>>()?;
-            if tokens.len() != length {
+            let Some(length) = dense_len(&children)? else {
                 return Err(mlua::Error::runtime("children must be a dense array"));
-            }
+            };
+            let tokens = (1..=length)
+                .map(|index| children.raw_get::<i64>(index))
+                .collect::<mlua::Result<Vec<_>>>()?;
             children_updates
                 .lock()
                 .unwrap()
@@ -3682,33 +3683,28 @@ fn install_api(
     let batch_hooks = hooks.clone();
     let memo_batch = lua.create_function(
         move |_, (keys, dependencies, render): (Table, Table, Function)| {
-            let len = keys.raw_len();
-            if dependencies.raw_len() != len {
+            let (Some(len), Some(dependency_len)) = (dense_len(&keys)?, dense_len(&dependencies)?)
+            else {
+                return Err(mlua::Error::runtime(
+                    "gpuix.memo_batch keys and dependencies must be dense tables",
+                ));
+            };
+            if dependency_len != len {
                 return Err(mlua::Error::runtime(
                     "gpuix.memo_batch keys and dependencies must have equal lengths",
                 ));
             }
 
             let mut batch_dependencies = Vec::with_capacity(len);
-            dependencies.for_each_value::<Value>(|value| {
+            for index in 1..=len {
+                let value = dependencies.raw_get::<Value>(index)?;
                 let dependency = memo_dependency(&value)?;
                 batch_dependencies.push((value, dependency));
-                Ok(())
-            })?;
-            if batch_dependencies.len() != len {
-                return Err(mlua::Error::runtime(
-                    "gpuix.memo_batch keys and dependencies must be dense tables",
-                ));
             }
 
             let mut children = Vec::with_capacity(len);
-            keys.for_each_value::<Value>(|raw_key| {
-                let offset = children.len();
-                let Some((raw_dependencies, dependency)) = batch_dependencies.get(offset) else {
-                    return Err(mlua::Error::runtime(
-                        "gpuix.memo_batch keys and dependencies must be dense tables",
-                    ));
-                };
+            for (offset, (raw_dependencies, dependency)) in batch_dependencies.iter().enumerate() {
+                let raw_key = keys.raw_get::<Value>(offset + 1)?;
                 let key = memo_key(&raw_key)?;
                 let root = batch_hooks
                     .lock()
@@ -3757,18 +3753,17 @@ fn install_api(
                     )?
                 };
                 children.push(handle.index);
-                Ok(())
-            })?;
-            if children.len() != len {
-                return Err(mlua::Error::runtime(
-                    "gpuix.memo_batch keys and dependencies must be dense tables",
-                ));
             }
             let handle = batch_arena.lock().unwrap().push_child_list(children);
             child_list_token(handle)
         },
     )?;
     api.set("memo_batch", memo_batch)?;
+    let phosphor_icon = lua.create_function(|_, (name, weight): (String, Option<String>)| {
+        crate::phosphor::token(&name, weight.as_deref().unwrap_or("regular"))
+            .map_err(mlua::Error::runtime)
+    })?;
+    api.set("_phosphor_icon", phosphor_icon)?;
     lua.globals().set("gpuix", api)
 }
 
@@ -3881,7 +3876,12 @@ fn create_host_node(
                                 events.insert(event_type.to_string(), handler);
                             } else if !built_in || is_universal_prop(name) {
                                 if !matches!(value, Value::Nil | Value::Function(_)) {
-                                    custom_props.insert(name.to_string(), lua.from_value(value)?);
+                                    // A null light userdata converts to JSON null, which the
+                                    // mutation path treats as removing the prop.
+                                    let value: serde_json::Value = lua.from_value(value)?;
+                                    if !value.is_null() {
+                                        custom_props.insert(name.to_string(), value);
+                                    }
                                 }
                             }
                         }
@@ -4655,7 +4655,7 @@ mod tests {
             "c"
         );
         assert_eq!(
-            tree.elements[&input].custom_props["value"],
+            tree.elements[&input].custom_props()["value"],
             serde_json::json!("Beacon")
         );
         assert!(!has_test_id(&tree, "combo-content"));
@@ -4675,11 +4675,11 @@ mod tests {
         dispatch_by_test_id(&mut runtime, &mut tree, "disable-combo").unwrap();
         assert!(!has_test_id(&tree, "combo-content"));
         assert_eq!(
-            tree.elements[&input].custom_props["readOnly"],
+            tree.elements[&input].custom_props()["readOnly"],
             serde_json::json!(true)
         );
         assert_eq!(
-            tree.elements[&input].custom_props["tabIndex"],
+            tree.elements[&input].custom_props()["tabIndex"],
             serde_json::json!(-1)
         );
         dispatch_by_test_id(&mut runtime, &mut tree, "multi-option-one").unwrap();
@@ -5096,11 +5096,11 @@ mod tests {
         );
         dispatch_by_test_id(&mut runtime, &mut tree, "disable").unwrap();
         assert_eq!(
-            tree.elements[&button].custom_props["tabIndex"],
+            tree.elements[&button].custom_props()["tabIndex"],
             serde_json::json!(-1)
         );
         assert_eq!(
-            tree.elements[&checkbox].custom_props["tabIndex"],
+            tree.elements[&checkbox].custom_props()["tabIndex"],
             serde_json::json!(-1)
         );
         dispatch_by_test_id(&mut runtime, &mut tree, "button").unwrap();
@@ -5110,7 +5110,7 @@ mod tests {
         );
         dispatch_by_test_id(&mut runtime, &mut tree, "radio-b").unwrap();
         assert_eq!(
-            tree.elements[&radio_b].custom_props["tabIndex"],
+            tree.elements[&radio_b].custom_props()["tabIndex"],
             serde_json::json!(0)
         );
         runtime
@@ -5126,7 +5126,7 @@ mod tests {
             .unwrap();
         let radio_a = id(&tree, "radio-a");
         assert_eq!(
-            tree.elements[&radio_a].custom_props["tabIndex"],
+            tree.elements[&radio_a].custom_props()["tabIndex"],
             serde_json::json!(0)
         );
         dispatch_by_test_id(&mut runtime, &mut tree, "select").unwrap();
@@ -5174,24 +5174,24 @@ mod tests {
             .unwrap()
             .id;
         assert_eq!(
-            tree.elements[&id].custom_props["value"],
+            tree.elements[&id].custom_props()["value"],
             serde_json::json!("hello")
         );
         dispatch_by_test_id(&mut runtime, &mut tree, "update").unwrap();
         assert_eq!(
-            tree.elements[&id].custom_props["value"],
+            tree.elements[&id].custom_props()["value"],
             serde_json::json!("")
         );
         assert_eq!(
-            tree.elements[&id].custom_props["readOnly"],
+            tree.elements[&id].custom_props()["readOnly"],
             serde_json::json!(true)
         );
         assert_eq!(
-            tree.elements[&id].custom_props["placeholder"],
+            tree.elements[&id].custom_props()["placeholder"],
             serde_json::json!("Write")
         );
         dispatch_by_test_id(&mut runtime, &mut tree, "remove").unwrap();
-        assert!(!tree.elements[&id].custom_props.contains_key("value"));
+        assert!(!tree.elements[&id].custom_props().contains_key("value"));
         assert_eq!(runtime.lua.globals().get::<i64>("prop_renders").unwrap(), 1);
         runtime
             .lua
@@ -5326,7 +5326,7 @@ mod tests {
             .unwrap()
             .id;
         assert_eq!(
-            main.elements[&composer_id].custom_props["value"],
+            main.elements[&composer_id].custom_props()["value"],
             serde_json::json!("Hello Solid")
         );
         event(
@@ -5344,7 +5344,7 @@ mod tests {
         assert!(has_text(&inspector, "Messages: 4"));
         assert!(has_text(&inspector, "Selected: message-1"));
         assert_eq!(
-            main.elements[&composer_id].custom_props["value"],
+            main.elements[&composer_id].custom_props()["value"],
             serde_json::json!("")
         );
         assert_eq!(main.root_id, original_root);
@@ -7584,7 +7584,9 @@ mod tests {
                 return function()
                     local first = ui.text("first")
                     assert(type(first) == "number")
-                    assert(math.type(first) == "integer")
+                    -- LuaJIT has no integer subtype, so no `math.type`.
+                    assert(math.type == nil or math.type(first) == "integer")
+                    assert(first % 1 == 0)
                     return ui.div {
                         first,
                         ui.text { content = 42 },
@@ -7642,7 +7644,7 @@ mod tests {
             .find(|element| element.test_id.as_deref() == Some("bundled-button"))
             .unwrap();
         assert_eq!(
-            button.custom_props.get("tabIndex"),
+            button.custom_props().get("tabIndex"),
             Some(&serde_json::json!(0))
         );
         assert!(has_text(&tree, "off"));
@@ -7652,6 +7654,44 @@ mod tests {
         );
         assert!(has_text(&tree, "on"));
         assert!(has_text(&tree, "✓"));
+    }
+
+    #[test]
+    fn bundled_phosphor_icon_resolves_names_aliases_and_weights() {
+        let mut tree = RetainedTree::new();
+        LuaRuntime::load_luax(
+            r##"
+                local Icon = require("gpuix.icon")
+                return function()
+                    return <div>
+                        <Icon testId="activity" name="Activity" size={20} color="#ffffff" />
+                        <Icon testId="github" name="github-logo" weight="duotone" />
+                    </div>
+                end
+            "##,
+            &mut tree,
+        )
+        .unwrap();
+
+        let activity = tree
+            .elements
+            .values()
+            .find(|element| element.test_id.as_deref() == Some("activity"))
+            .unwrap();
+        assert_eq!(activity.element_type, "svg");
+        assert_eq!(
+            activity.custom_props().get("source"),
+            Some(&serde_json::json!("phosphor:0:pulse"))
+        );
+        let github = tree
+            .elements
+            .values()
+            .find(|element| element.test_id.as_deref() == Some("github"))
+            .unwrap();
+        assert_eq!(
+            github.custom_props().get("source"),
+            Some(&serde_json::json!("phosphor:5:githublogo"))
+        );
     }
 
     #[test]

@@ -131,6 +131,7 @@ local Combobox = require("gpuix.combobox")
 local Tooltip = require("gpuix.tooltip")
 local Drawer = require("gpuix.drawer")
 local DockLayout = require("gpuix.dock_layout")
+local Icon = require("gpuix.icon")
 ```
 
 Each control accepts controlled value props and matching change callbacks, or
@@ -156,8 +157,10 @@ for moving it left, right, or bottom. One panel is visible per edge, and hidden
 panel trees remain mounted with GPUI `visibility: hidden`, preserving local hook
 state and `gpuix.memo` entries. The worked workspace app uses this full dock for
 its activity panel. See `packages/lua/README.md` for all layout and panel props.
-The example's dock button also demonstrates importing raw Phosphor SVG source
-from a normal Lua module and tinting it with the native `<svg>` element.
+`gpuix.icon` exposes the complete bundled Phosphor 2.1.1 catalog through
+`<Icon name="Activity" />`, including all six weights and aliases. Lua retains
+only a compact name/weight token; Rust resolves the packed SVG bytes directly.
+See `packages/lua/README.md` for its props and naming rules.
 
 Images use the same native element and props as React:
 

@@ -767,7 +767,7 @@ mod tests {
             .find(|element| element.test_id.as_deref() == Some("conversation-list"))
             .unwrap();
         assert_eq!(
-            conversation_list.custom_props.get("tabIndex"),
+            conversation_list.custom_props().get("tabIndex"),
             Some(&serde_json::json!(0))
         );
         assert!(!has_foreground_box_shadow(&tree, "conversation-runtime"));
@@ -777,7 +777,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|test_id| test_id.starts_with("conversation-"))
                 && element.test_id.as_deref() != Some("conversation-list")
-                && element.custom_props.contains_key("tabIndex")
+                && element.custom_props().contains_key("tabIndex")
         }));
         assert!(tree
             .elements
@@ -794,7 +794,7 @@ mod tests {
                     .as_ref()
                     .and_then(|style| style.focus.as_deref())
                     .and_then(|style| style.foreground_box_shadow.as_ref())
-                    .is_some_and(|shadow| shadow.inset)
+                    .is_some_and(|shadows| shadows.as_slice().iter().any(|shadow| shadow.inset))
         });
         assert!(activity_focus_is_inset);
         dispatch_test_id(
@@ -1031,7 +1031,7 @@ mod tests {
         );
         assert!(tree.elements.values().any(|element| {
             element.test_id.as_deref() == Some("workspace-composer")
-                && element.custom_props.get("value")
+                && element.custom_props().get("value")
                     == Some(&serde_json::Value::String("native input".to_string()))
         }));
 
@@ -1042,7 +1042,7 @@ mod tests {
             .any(|element| element.content.as_deref() == Some("Send (1)")));
         assert!(tree.elements.values().any(|element| {
             element.test_id.as_deref() == Some("workspace-composer")
-                && element.custom_props.get("value")
+                && element.custom_props().get("value")
                     == Some(&serde_json::Value::String(String::new()))
         }));
     }
@@ -1143,6 +1143,6 @@ mod tests {
             .find(|element| element.test_id.as_deref() == Some(test_id))
             .and_then(|element| element.style.as_ref())
             .and_then(|style| style.foreground_box_shadow.as_ref())
-            .is_some_and(|shadow| shadow.inset)
+            .is_some_and(|shadows| shadows.as_slice().iter().any(|shadow| shadow.inset))
     }
 }

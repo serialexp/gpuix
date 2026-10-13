@@ -345,24 +345,41 @@ impl RetainedTree {
             _ => true,
         };
         let content_changed = element.content != content;
-        let highlight_changed = element.custom_props.contains_key("highlight")
+        let events_changed = *element.events() != events;
+        let custom_props_changed = *element.custom_props() != custom_props;
+        let highlight_changed = element.custom_props().contains_key("highlight")
             != custom_props.contains_key("highlight");
-        let custom_props_changed = element.custom_props != custom_props
-            || element.auto_focus != auto_focus
-            || element.test_id != test_id;
+        let has_motion = custom_props.contains_key("motion");
+        // Like `set_custom_prop`: these two are lifted out of the prop map, and
+        // changing them redraws without invalidating any cached subtree.
+        let metadata_changed = element.auto_focus != auto_focus || element.test_id != test_id;
 
         element.style = style;
         element.content = content;
-        element.events = events;
-        element.custom_props = custom_props;
         element.auto_focus = auto_focus;
         element.test_id = test_id;
+        if events_changed || custom_props_changed {
+            let extras = element.extras_mut();
+            extras.events = events;
+            extras.custom_props = custom_props;
+            element.release_empty_extras();
+            self.track_focusable(id);
+        }
+        if custom_props_changed {
+            if has_motion {
+                self.motion_ids.insert(id);
+            } else {
+                self.motion_ids.remove(&id);
+            }
+        }
 
         if content_changed {
             self.mark_changed(id);
         } else if style_changed || custom_props_changed {
             self.mark_render_changed(id);
         }
+        // Which listeners exist decides how the element is built.
+        self.dirty |= events_changed || metadata_changed;
         if highlight_changed {
             if let Some(parent) = self.elements.get(&id).and_then(|element| element.parent) {
                 self.mark_changed(parent);
@@ -420,13 +437,9 @@ impl RetainedTree {
         self.mark_changed(parent_id);
     }
 
-    pub fn set_root(&mut self, root_id: Option<u64>) {
-        if self.root_id == root_id {
-            return;
-        }
-        self.root_id = root_id;
-        if let Some(root_id) = root_id {
-            self.mark_changed(root_id);
+    pub fn clear_root(&mut self) {
+        if self.root_id.take().is_some() {
+            self.dirty = true;
         }
     }
 
@@ -1419,6 +1432,74 @@ mod tests {
         // Not deferred: painted in place, in tree order, under the clip.
         tree.set_custom_prop(2, "deferred".to_string(), serde_json::json!(false));
         assert_eq!(tree.elements_at(10.0, 10.0, &boxed(&boxes)), vec![5, 3, 1]);
+    }
+
+    #[test]
+    fn update_element_keeps_focus_motion_and_cold_storage_in_step() {
+        let mut tree = RetainedTree::new();
+        tree.create_element(1, "div".to_string());
+        let update = |tree: &mut RetainedTree, events: &[&str], props: serde_json::Value| {
+            let props = props
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            let events = events.iter().map(|event| event.to_string()).collect();
+            tree.update_element(1, None, None, events, props, false, None);
+        };
+
+        update(&mut tree, &["keyDown"], serde_json::json!({}));
+        assert!(tree.focusable_ids.contains(&1));
+        assert!(tree.elements[&1].events().contains("keyDown"));
+
+        update(
+            &mut tree,
+            &[],
+            serde_json::json!({ "tabIndex": 0, "motion": { "animate": {} } }),
+        );
+        assert!(tree.focusable_ids.contains(&1), "tabIndex keeps it focusable");
+        assert!(tree.motion_ids.contains(&1));
+
+        update(&mut tree, &[], serde_json::json!({}));
+        assert!(tree.focusable_ids.is_empty());
+        assert!(tree.motion_ids.is_empty());
+        assert!(tree.elements[&1].extras.is_none());
+    }
+
+    #[test]
+    fn update_element_invalidates_like_the_matching_mutations() {
+        let mut tree = RetainedTree::new();
+        tree.create_element(1, "div".to_string());
+        tree.set_root(1);
+        let update = |tree: &mut RetainedTree, events: &[&str], props: serde_json::Value| {
+            let props = props.as_object().unwrap().clone().into_iter().collect();
+            let events = events.iter().map(|event| event.to_string()).collect();
+            tree.update_element(1, None, None, events, props, false, None);
+        };
+        let revisions = |tree: &RetainedTree| {
+            let element = &tree.elements[&1];
+            (element.subtree_revision, element.search_revision)
+        };
+        update(&mut tree, &[], serde_json::json!({ "a": 1 }));
+        tree.take_dirty();
+        let before = revisions(&tree);
+
+        // An identical resend changes nothing.
+        update(&mut tree, &[], serde_json::json!({ "a": 1 }));
+        assert!(!tree.take_dirty());
+        assert_eq!(revisions(&tree), before);
+
+        // Listeners decide how the element is built, not what it paints.
+        update(&mut tree, &["click"], serde_json::json!({ "a": 1 }));
+        assert!(tree.take_dirty());
+        assert_eq!(revisions(&tree), before);
+
+        // A paint-only prop change invalidates render caches but not search.
+        update(&mut tree, &["click"], serde_json::json!({ "a": 2 }));
+        let (subtree, search) = revisions(&tree);
+        assert!(subtree > before.0);
+        assert_eq!(search, before.1);
     }
 
     #[test]

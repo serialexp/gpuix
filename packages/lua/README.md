@@ -9,6 +9,7 @@ local Combobox = require("gpuix.combobox")
 local Tooltip = require("gpuix.tooltip")
 local Drawer = require("gpuix.drawer")
 local DockLayout = require("gpuix.dock_layout")
+local Icon = require("gpuix.icon")
 ```
 
 ## Applications and windows
@@ -66,8 +67,8 @@ window lifecycle changes.
 
 The package currently provides `gpuix.button`, `gpuix.checkbox`, `gpuix.radio_group`,
 `gpuix.select`, `gpuix.combobox`, `gpuix.tooltip`, `gpuix.drawer`, and
-`gpuix.dock_layout`. They are headless LuaX components built from GPUIX host
-elements, so applications own their styling.
+`gpuix.dock_layout`, plus the Phosphor-backed `gpuix.icon`. They are LuaX
+components built from GPUIX host elements, so applications own their styling.
 
 `gpuix.button` joins GPUI's native tab order by default. `Tab` and `Shift+Tab`
 cycle through controls with a non-negative `tabIndex`; inputs and textareas join
@@ -109,6 +110,7 @@ local Combobox = require("gpuix.combobox")
 local Tooltip = require("gpuix.tooltip")
 local Drawer = require("gpuix.drawer")
 local DockLayout = require("gpuix.dock_layout")
+local Icon = require("gpuix.icon")
 
 <Button onClick={save}><text>Save</text></Button>
 <Checkbox checked={enabled} onCheckedChange={set_enabled} label="Enabled" />
@@ -119,6 +121,7 @@ local DockLayout = require("gpuix.dock_layout")
 <Select value={runtime} onValueChange={set_runtime} options={runtimes} />
 <Combobox value={framework} onValueChange={set_framework} items={frameworks} />
 <Tooltip content="Runs without JavaScript"><text>LuaX</text></Tooltip>
+<Icon name="Activity" weight="regular" size={16} color="#a1a1aa" />
 <Drawer
     side="right"
     open={activity_open}
@@ -175,25 +178,31 @@ panel requires `id` and may set `label`, `buttonLabel`,
 `renderButton` receives `id`, `active`, and `position`. A right-docked button
 group is displayed in reverse declaration order, matching Zed.
 
-Lua applications can keep SVG assets in an ordinary module and pass the raw
-source to GPUIX's native monochrome renderer. The workspace's `icons.lua`
-imports a Phosphor Pulse asset this way and uses it from `renderButton`:
+`gpuix.icon` bundles the complete Phosphor 2.1.1 catalog: 1,512 icons in
+`regular`, `thin`, `light`, `bold`, `fill`, and `duotone` weights. It accepts
+Phosphor PascalCase names, kebab-case asset names, and aliases; punctuation and
+case are ignored. Unknown names and weights fail during render instead of
+painting an empty placeholder.
 
 ```lua
-local icons = require("icons")
+local Icon = require("gpuix.icon")
 
 renderButton = function(state)
-    return <svg source={icons.activity} style={{
-        width = 16,
-        height = 16,
-        color = state.active and "#fafafa" or "#a1a1aa",
-    }} />
+    return <Icon
+        name="Activity"
+        weight="regular"
+        size={16}
+        color={state.active and "#fafafa" or "#a1a1aa"}
+    />
 end
 ```
 
-Phosphor's raw files use `fill="currentColor"`; change that to `fill="#000"`
-when copying an asset into a Lua string. GPUIX then applies the desired tint
-from `style.color`.
+`Icon` accepts `name`, `weight`, `size`, `color`, `style`, `testId`, `tabIndex`,
+`onClick`, `onMouseEnter`, and `onMouseLeave`. A custom `style` table or
+state-aware style function replaces the generated size/color style. The build
+packs the official SVG assets into the native binary; the retained Lua tree
+stores only a short name/weight token, so icon source never crosses through Lua
+or requires JavaScript or loose runtime asset files.
 
 The Lua runtime has no timer scheduler or host refs yet. Tooltip delay windows
 and ref-based focus restoration therefore remain React-only behavior for now.

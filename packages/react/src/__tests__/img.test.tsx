@@ -495,4 +495,27 @@ describeNative("custom element: svg", () => {
       expect(bufferSimilarity(before, after)).toBeLessThan(0.99)
     }
   })
+
+  it("takes focus from a press when it has a tab stop", () => {
+    const testRoot = createTestRoot()
+    const focused: string[] = []
+
+    testRoot.render(
+      <div style={{ width: "100%", height: "100%", padding: 20 }}>
+        <svg
+          testId="icon"
+          tabIndex={0}
+          source={SVG_FIXTURE}
+          style={{ width: 120, height: 70 }}
+          onFocus={() => focused.push("icon")}
+        />
+      </div>
+    )
+
+    const bounds = imgBounds(testRoot.renderer, "icon")
+    testRoot.renderer.nativeSimulateClick(bounds.x + 10, bounds.y + 10)
+    testRoot.renderer.flush()
+
+    expect(focused).toEqual(["icon"])
+  })
 })

@@ -1,7 +1,6 @@
 local ui = gpuix
 local theme = require("theme")
 local data = require("data")
-local icons = require("icons")
 local store = require("store")
 local Sidebar = require("components.sidebar")
 local Detail = require("components.detail")
@@ -9,6 +8,7 @@ local ActivityList = require("components.activity_list")
 local Composer = require("components.composer")
 local Button = require("gpuix.button")
 local DockLayout = require("gpuix.dock_layout")
+local Icon = require("gpuix.icon")
 local app = ui.create_app()
 
 local function title_for(id)
@@ -53,14 +53,11 @@ local function MainWindow()
             borderColor = theme.colors.border,
         },
         renderButton = function(state)
-            return <svg
+            return <Icon
                 testId="activity-dock-icon"
-                source={icons.activity}
-                style={{
-                    width = 16,
-                    height = 16,
-                    color = state.active and theme.colors.text or theme.colors.muted,
-                }}
+                name="Activity"
+                size={16}
+                color={state.active and theme.colors.text or theme.colors.muted}
             />
         end,
         render = function()

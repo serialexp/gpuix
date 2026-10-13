@@ -24,6 +24,8 @@ mod lua_runtime;
 mod luax;
 mod markdown;
 mod motion;
+#[cfg(any(feature = "lua54", feature = "luajit"))]
+mod phosphor;
 mod renderer;
 // The data model is public so `examples/bench_serde.rs` measures the real
 // types instead of a copy that silently drifts from them.

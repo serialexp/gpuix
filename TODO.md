@@ -18,3 +18,8 @@
   row (like `selected() == index`) re-runs every row's effect on each change.
   `~/Projects/rust-js-vm` (`src/workload.rs`, `create_selector`) has a
   minimal keyed version that re-runs only the two affected rows.
+- Upstream code warns on a macOS native build: `browser_platform_is_macos`
+  (`custom_elements/input.rs`), `BlockTree::is_empty` (`markdown/parser.rs`)
+  and `Metrics::hash_into` (`theme.rs`) are unused outside the browser or test
+  builds. Fix upstream (cfg-gate them) rather than in this fork, so rebases
+  stay clean.

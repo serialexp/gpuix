@@ -3725,14 +3725,15 @@ handling instead of a test-only input path.
 The locators above sit on a **GPU-backed test renderer** (`TestGpuixRenderer`).
 It runs the same `GpuixView`, `build_element()`, `apply_styles()`, and event
 handlers as production. Test windows are positioned offscreen and rendered by
-Metal on macOS or DirectX on Windows. The methods below are the lower-level API
-when a locator is not enough.
+Metal on macOS or DirectX on Windows. On Linux there is no window at all: the
+frame renders headless through WGPU, so tests need no compositor. The methods
+below are the lower-level API when a locator is not enough.
 
 | Platform | Test renderer | PNG capture |
 |---|---|---|
 | macOS | Metal | Yes |
 | Windows | DirectX | Yes |
-| Linux | Not yet | Waiting for GPUI's wgpu headless renderer |
+| Linux | WGPU, headless | Yes |
 
 ```ts
 import { createTestRoot } from '@gpuix/react/testing'
@@ -3938,8 +3939,10 @@ left, right, or bottom. One panel can be visible on each edge. Hidden panels
 remain mounted with GPUI `visibility: hidden`, so local hook values and memoized
 rows survive closing and re-docking. `just start` opens the workspace example
 with its activity panel in this dock layout.
-Its activity toggle imports a raw Phosphor SVG from `icons.lua`; standalone Lua
-apps can therefore use icon packs without loading a JavaScript icon component.
+The bundled `gpuix.icon` component exposes all 1,512 Phosphor 2.1.1 icons and
+all six weights as `<Icon name="Activity" />`. The build packs SVG bytes into
+the native binary, while Lua retains only a compact name/weight token; standalone
+apps therefore need neither JavaScript nor loose icon files at runtime.
 
 See [`docs/lua-runtime.md`](./docs/lua-runtime.md) for syntax, runtime commands,
 the bundled controls, benchmarks, and current limitations.
@@ -3948,7 +3951,11 @@ In a Lua window, a focused element with `onClick` is activated by an
 unmodified Enter or Space press and release. GPUI cancels the click if focus
 moves or another key event intervenes, matching its native button behavior. Add
 `tabIndex = 0` when a host element should participate in keyboard focus order.
-React and Solid controls such as `Button` do this in JavaScript instead.
+Pointer presses follow the web too: a press on a plain child focuses its
+nearest focusable ancestor (unless the child sets `pointerEvents = "none"`),
+and a press on the background moves focus back to the window. React and Solid
+controls such as `Button` and `Combobox` handle activation and focus in
+JavaScript instead, so their windows get none of this.
 
 ### Experimental Lua signal core
 

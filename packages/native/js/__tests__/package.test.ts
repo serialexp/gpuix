@@ -32,6 +32,8 @@ describe("native ESM package", () => {
     expect(commonJs.stdout.trim()).toBe("function")
   })
 
+  // Packs the package (with the 20 MB wasm when built), installs it, and
+  // starts node twice, so it needs more than the default 5 seconds.
   it("resolves shared subpaths from an installed tarball without an addon", () => {
     const packageRoot = join(fileURLToPath(new URL(".", import.meta.url)), "../..")
     const packed = run([
@@ -66,7 +68,7 @@ describe("native ESM package", () => {
     ])
     expect(browser.status, browser.stderr).toBe(0)
     expect(browser.stdout).toContain("browser.mjs")
-  })
+  }, 30_000)
 
   it("bundles both public adapters for the browser", () => {
     for (const adapter of ["react", "solid"]) {
