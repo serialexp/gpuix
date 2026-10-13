@@ -42,4 +42,5 @@ built-in JSX/TSX compilation) behind a shared core.
 2. Port the rust-js-vm improvements: keyed `create_selector` in solid.lua;
    skip unchanged values in `solid.text`, `bind_style`, `bind_prop`; check the
    parent/child swap in one update; the full-tree-walk TODO.
-3. Extract the shared core, then add QuickJS (design doc first).
+3. QuickJS: follow `docs/design/embedded-quickjs-runtime.md` (accepted
+   2026-10-13). Phase 0 first: measure real React and Solid 2.0 in QuickJS.
