@@ -49,7 +49,7 @@ built-in JSX/TSX compilation) behind a shared core.
    `reload.rs` (see the doc's 2026-10-13 notes). Phase 2 is done:
    `src/quickjs/` behind the `quickjs` feature, tested from Rust with
    `cargo test --lib --features quickjs --target-dir
-   /private/tmp/gpuix-quickjs-target quickjs::`. Two follow-ups are in the
-   doc's Outstanding list (React commits waiting for a timer round; the
-   optional `NativeRenderer` methods). Next is Phase 3: oxc compile,
+   /private/tmp/gpuix-quickjs-target quickjs::`. React updates now get React
+   DOM's priorities (a click commits in a microtask). One follow-up is in
+   the doc's Outstanding list: the optional `NativeRenderer` methods. Next is Phase 3: oxc compile,
    module loader, embedded bundles.

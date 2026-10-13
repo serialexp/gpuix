@@ -43,6 +43,13 @@ Tracking the gap between this design and what's on the main branch.
   `stopPropagation` stay in JS, as under Node, so nothing returns to Rust.
   Connecting GPUI's event callback is the app loop's job (Phase 4) (same
   commit)
+- [x] Phase 2 follow-up: React updates get React DOM's priorities, so a
+  click's update commits in a microtask and `dispatch_event` returns with
+  it applied. `@gpuix/react`'s host config sets `supportsMicrotasks` and
+  resolves the priority from the running GPUI event, as React DOM does from
+  `window.event`; mouse movement and scrolling stay continuous. Decided by
+  Bart on 2026-10-13, for Node and QuickJS alike (`feat(react): give event
+  updates React DOM's priorities`)
 
 ### Outstanding
 
@@ -52,12 +59,6 @@ Tracking the gap between this design and what's on the main branch.
 - [ ] Phase 1 (dropped 2026-10-13): direct host and its swap-safe flush.
   Lua's Solid layer is not a direct host, and QuickJS reuses
   `apply_batch_to_tree` (see the Shared core update)
-- [ ] Phase 2 follow-up: React commits after a click wait for a timer
-  round. `@gpuix/react`'s host config doesn't set `supportsMicrotasks`, so
-  React schedules the work with `setImmediate`, and `dispatch_event`
-  returns before the commit. The app loop (Phase 4) must call `run_timers`
-  right after each event, or the host config could opt into microtasks,
-  which changes the Node path too (needs Bart's call)
 - [ ] Phase 2 follow-up: the optional `NativeRenderer` methods on
   `__gpuix.renderer` (`focusNext`, `focusPrevious`, `getFocusedElementId`
   and the rest), which `renderer-state.ts` uses for Tab and dismiss layers,

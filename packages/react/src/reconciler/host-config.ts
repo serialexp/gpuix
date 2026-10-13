@@ -5,7 +5,11 @@
 /// of the full element tree. Only changed elements cross the FFI boundary.
 
 import { createContext } from "react"
-import { DefaultEventPriority } from "react-reconciler/constants.js"
+import {
+  ContinuousEventPriority,
+  DefaultEventPriority,
+  DiscreteEventPriority,
+} from "react-reconciler/constants.js"
 import type { HostEventHandler } from "@gpuix/native/host"
 import {
   BUILT_IN_TYPES,
@@ -35,6 +39,61 @@ import {
 } from "./event-registry.js"
 
 let currentUpdatePriority = NoEventPriority
+
+/** The GPUI event whose handlers are running, like the browser's `window.event`. */
+let currentEventType: string | null = null
+
+// React DOM's `getEventPriority`, for GPUIX's event types. A discrete update
+// (a click, a key) commits in a microtask, before the event's turn ends; a
+// continuous one (pointer movement, scrolling) can be batched. Anything else
+// gets the default priority.
+const DISCRETE_EVENTS: ReadonlySet<string> = new Set([
+  "click",
+  "auxClick",
+  "contextMenu",
+  "mouseDown",
+  "mouseUp",
+  "mouseDownOutside",
+  "keyDown",
+  "keyUp",
+  "windowKeyDown",
+  "windowKeyUp",
+  "focus",
+  "blur",
+  "change",
+  "submit",
+  "selectionChange",
+  "fileDrop",
+  "toggleFile",
+  "showMore",
+  "lineClick",
+  "linkClick",
+])
+const CONTINUOUS_EVENTS: ReadonlySet<string> = new Set([
+  "mouseMove",
+  "mouseEnter",
+  "mouseLeave",
+  "scroll",
+  "scrollChange",
+  "visibleRange",
+])
+
+function eventPriority(eventType: string): number {
+  if (DISCRETE_EVENTS.has(eventType)) return DiscreteEventPriority
+  if (CONTINUOUS_EVENTS.has(eventType)) return ContinuousEventPriority
+  return DefaultEventPriority
+}
+
+/** Run an event's handlers with the event current, so its updates get the event's priority. */
+export function runInEvent(eventType: string, run: () => void): void {
+  const previous = currentEventType
+  currentEventType = eventType
+  try {
+    run()
+  } finally {
+    currentEventType = previous
+  }
+}
 
 type HostNode = Instance | TextInstance
 
@@ -429,6 +488,12 @@ export const hostConfig = {
   scheduleTimeout: setTimeout,
   cancelTimeout: clearTimeout,
   noTimeout: -1,
+  // As in React DOM: an update from a click or key press commits in a
+  // microtask, before the event's turn ends. Without this React queues it
+  // through the scheduler (`setImmediate` under Node), a turn later, and an
+  // embedded host has to remember to run its timers after every event.
+  supportsMicrotasks: true,
+  scheduleMicrotask: queueMicrotask,
 
   shouldAttemptEagerTransition(): boolean {
     return false
@@ -529,7 +594,7 @@ export const hostConfig = {
     if (currentUpdatePriority !== NoEventPriority) {
       return currentUpdatePriority
     }
-    return DefaultEventPriority
+    return currentEventType === null ? DefaultEventPriority : eventPriority(currentEventType)
   },
 
   maySuspendCommit(): boolean {
@@ -542,8 +607,8 @@ export const hostConfig = {
   requestPostPaintCallback(): void {},
   trackSchedulerEvent(): void {},
 
-  resolveEventType(): null {
-    return null
+  resolveEventType(): string | null {
+    return currentEventType
   },
 
   resolveEventTimeStamp(): number {

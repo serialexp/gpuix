@@ -17,7 +17,8 @@ export interface RendererRootHandlers {
   /** See `WindowKeyEventHandlers.tabNavigation`. Defaults to true. */
   tabNavigation?: boolean
   onEvent?: (event: EventPayload) => void
-  schedule?: (dispatch: () => void) => void
+  /** Runs each handler call. Defaults to calling it at once. */
+  schedule?: (dispatch: () => void, event: EventPayload) => void
 }
 
 export interface RendererRootBinding {
@@ -185,7 +186,7 @@ export function createRendererState(renderer: NativeRenderer): RendererState {
           invoke()
           root.handlers.onEvent?.(event)
         }
-        if (root.handlers.schedule) root.handlers.schedule(run)
+        if (root.handlers.schedule) root.handlers.schedule(run, event)
         else run()
       }
 

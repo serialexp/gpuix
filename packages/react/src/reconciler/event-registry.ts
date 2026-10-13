@@ -5,6 +5,7 @@ import {
   unregisterEventHandler,
   unregisterEventHandlers,
 } from "@gpuix/native/host"
+import { runInEvent } from "./host-config.js"
 import type {
   Container,
   ElementIdAllocator,
@@ -26,6 +27,7 @@ export function attachRoot(renderer: NativeRenderer, container: Container): void
     onSelectionChange: container.windowKeyEventHandlers.onSelectionChange,
     tabNavigation: container.windowKeyEventHandlers.tabNavigation,
     onEvent: container.onEvent,
+    schedule: (dispatch, event) => runInEvent(event.eventType, dispatch),
   })
   container.windowKeyEventId = binding.windowKeyEventId
   container.windowSelectionEventId = binding.windowSelectionEventId
