@@ -1,6 +1,6 @@
 # Embedded QuickJS runtime
 
-**Status:** Accepted
+**Status:** In progress
 **Last updated:** 2026-10-13
 
 ## Implementation status
@@ -11,11 +11,16 @@ Tracking the gap between this design and what's on the main branch.
 
 - [x] Engine comparison and design spike, outside this repo (rust-js-vm,
   see References)
+- [x] Phase 0: measure `@gpuix/react` and Solid 2.0 running inside QuickJS
+  on the rust-js-vm workload (rust-js-vm `src/js/react.rs`, `react/`,
+  `solid2/`; results in its README, "Real React and Solid 2.0", and under
+  open question 1 below. rust-js-vm is not a git repository, so there is
+  no commit)
+- [x] Phase 0: settle open question 1: real `@gpuix/react` (decided
+  2026-10-13)
 
 ### Outstanding
 
-- [ ] Phase 0: measure `@gpuix/react` and Solid 2.0 running inside QuickJS
-  on the rust-js-vm workload, and settle open question 1
 - [ ] Phase 1: `src/script/` shared core: direct host, application registry,
   event and focus plumbing, reload bookkeeping
 - [ ] Phase 1: move the Lua runtime onto the shared core with no behavior
@@ -52,7 +57,8 @@ Tracking the gap between this design and what's on the main branch.
 - [ ] Phase 6: README section, changeset, and benchmark numbers in
   `docs/lua-runtime.md`'s benchmark table
 - [ ] Rust-reconciler React-style API for JS, shared with Lua's hooks
-  (deferred: only if Phase 0 shows real React is too slow in QuickJS)
+  (deferred: Phase 0 showed real React is slower but acceptable; revisit
+  only if apps need it)
 - [ ] Bundle any npm package an app imports (deferred: a later goal, see
   open question 3)
 - [ ] System APIs for apps (deferred: none at first, see open question 4)
@@ -255,6 +261,28 @@ name is still to be picked; `cli/` already ships the npm `gpuix` command.
    - Both, real React first: the deferred bullet above.
 
    > **2026-10-13 update:** measure first (Phase 0), then decide.
+
+   > **2026-10-13 update:** measured. At 10,000 rows, real React in QuickJS
+   > takes 224 ms per selection change with every row re-rendering and
+   > 34 ms with `React.memo` rows, against 14.8 ms and 3.7 ms for the Rust
+   > reconciler on the same engine (9–15 times slower), and mounts in
+   > 340–520 ms against 20–40 ms. Reversing all rows takes 2.4 s: React's
+   > own algorithm grows roughly with the square of the row count, which the
+   > same bundle shows under Bun too (141 ms there), and QuickJS runs React
+   > about 16 times slower than Bun's JIT. The two transports cost the same,
+   > so the embedded host can keep `applyBatch`'s JSON batches. Solid 2.0
+   > costs 37 µs per selection change with a keyed selector, 22 ms with
+   > every row re-running (1.x: 13 ms), and matches 1.x on reverse
+   > (14–15 ms). Two Solid 2.0 behaviours the QuickJS host has to allow for:
+   > it renders `""` as no text node, and removed nodes stay in reference
+   > cycles until QuickJS's cycle collector runs, so the host must run it
+   > (gpuix's idle GC would do). Full tables: rust-js-vm README, "Real React
+   > and Solid 2.0".
+
+   > **2026-10-13 update:** decided: real `@gpuix/react`. Its cost shows up
+   > during development, so app authors can see it and design for it; React
+   > apps need more care with large lists than Solid apps do. The Rust
+   > reconciler stays deferred.
 2. **How to compile Solid JSX in Rust?** `@gpuix/solid` needs
    `babel-preset-solid` with `generate: "universal"`.
    - Add universal mode to solid-jsx-oxc (Aeolun/solid-jsx-oxc, an oxc
