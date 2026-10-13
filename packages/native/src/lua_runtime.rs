@@ -9,6 +9,11 @@ use mlua::{
 
 use crate::element_tree::EventPayload;
 use crate::retained_tree::RetainedTree;
+use crate::script::app::{
+    AppCommand, ApplicationRegistry, FocusRequest, RegistryError, WindowDefinition, WindowOptions,
+    WindowSpec,
+};
+use crate::script::reload::{ApplicationReload, ReloadOutcome};
 use crate::style::StyleDesc;
 
 const ELEMENT_HELPERS: &[(&str, &str)] = &[
@@ -201,57 +206,6 @@ impl UserData for StyleHandle {}
 struct LuaAppHandle;
 
 impl UserData for LuaAppHandle {}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct LuaWindowOptions {
-    pub id: String,
-    pub title: String,
-    pub width: f32,
-    pub height: f32,
-    pub open: bool,
-    pub focus: bool,
-    pub reposition: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum LuaAppCommand {
-    Open(String),
-    Close(String),
-    Focus(String),
-    SetTitle { id: String, title: String },
-}
-
-pub(crate) struct LuaFocusRequest {
-    pub root_id: String,
-    pub element_id: u64,
-}
-
-#[derive(Clone)]
-struct LuaWindowDefinition {
-    options: LuaWindowOptions,
-    render: Function,
-}
-
-#[derive(Clone, Default)]
-struct LuaApplicationRegistry {
-    created: bool,
-    definitions: Vec<LuaWindowDefinition>,
-    commands: VecDeque<LuaAppCommand>,
-}
-
-impl LuaApplicationRegistry {
-    fn begin_entry(&mut self) {
-        self.created = false;
-        self.definitions.clear();
-        self.commands.clear();
-    }
-
-    fn definition_exists(&self, id: &str) -> bool {
-        self.definitions
-            .iter()
-            .any(|definition| definition.options.id == id)
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ComponentKey {
@@ -1240,7 +1194,7 @@ struct LuaNode {
 }
 
 struct LuaRoot {
-    options: LuaWindowOptions,
+    options: WindowOptions,
     render: Function,
     node: Option<LuaNode>,
     handlers: HashMap<(u64, String), Function>,
@@ -1248,7 +1202,7 @@ struct LuaRoot {
 }
 
 impl LuaRoot {
-    fn new(options: LuaWindowOptions, render: Function) -> Self {
+    fn new(options: WindowOptions, render: Function) -> Self {
         Self {
             options,
             render,
@@ -1275,23 +1229,12 @@ pub(crate) struct LuaRuntime {
     host_handles: Arc<Mutex<MountedHostHandleMap>>,
     host_updates: HostUpdates,
     root_cleanups: RootCleanups,
-    focus_request: Arc<Mutex<Option<LuaFocusRequest>>>,
+    focus_request: Arc<Mutex<Option<FocusRequest>>>,
     open_windows: Arc<Mutex<HashSet<String>>>,
-    application: Arc<Mutex<LuaApplicationRegistry>>,
+    application: Arc<Mutex<ApplicationRegistry<Function>>>,
     application_entry: bool,
     loaded_modules: Arc<Mutex<HashSet<String>>>,
     next_id: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ReloadOutcome {
-    PreservedState,
-    ResetState,
-}
-
-pub(crate) struct LuaApplicationReload {
-    pub windows: Vec<LuaWindowOptions>,
-    pub removed: Vec<String>,
 }
 
 struct ModuleSnapshot {
@@ -1300,19 +1243,11 @@ struct ModuleSnapshot {
 
 fn roots_from_entry(
     entry: Value,
-    application: &Arc<Mutex<LuaApplicationRegistry>>,
+    application: &Arc<Mutex<ApplicationRegistry<Function>>>,
 ) -> Result<(HashMap<LuaRootId, LuaRoot>, bool), String> {
     match entry {
         Value::Function(render) => {
-            let options = LuaWindowOptions {
-                id: DEFAULT_ROOT_ID.to_string(),
-                title: "GPUIX".to_string(),
-                width: 800.0,
-                height: 600.0,
-                open: true,
-                focus: true,
-                reposition: false,
-            };
+            let options = WindowOptions::single(DEFAULT_ROOT_ID);
             Ok((
                 HashMap::from([(Arc::from(DEFAULT_ROOT_ID), LuaRoot::new(options, render))]),
                 false,
@@ -1321,15 +1256,15 @@ fn roots_from_entry(
         Value::UserData(handle) => {
             validate_app_handle(&handle).map_err(lua_error)?;
             let application = application.lock().unwrap();
-            if !application.created {
+            if !application.is_created() {
                 return Err("Lua entry returned an inactive application".to_string());
             }
-            if application.definitions.is_empty() {
+            if application.definitions().is_empty() {
                 return Err("Lua application must define at least one window".to_string());
             }
             Ok((
                 application
-                    .definitions
+                    .definitions()
                     .iter()
                     .cloned()
                     .map(|definition| {
@@ -1412,7 +1347,7 @@ impl LuaRuntime {
         let root_cleanups = Arc::new(Mutex::new(HashMap::new()));
         let focus_request = Arc::new(Mutex::new(None));
         let open_windows = Arc::new(Mutex::new(HashSet::new()));
-        let application = Arc::new(Mutex::new(LuaApplicationRegistry::default()));
+        let application = Arc::new(Mutex::new(ApplicationRegistry::default()));
         let styles = Arc::new(Mutex::new(StyleCache::new()));
         let loaded_modules = Arc::new(Mutex::new(HashSet::new()));
         install_api(
@@ -1464,16 +1399,9 @@ impl LuaRuntime {
         })
     }
 
-    pub(crate) fn window_options(&self) -> Vec<LuaWindowOptions> {
+    pub(crate) fn window_options(&self) -> Vec<WindowOptions> {
         if self.application_entry {
-            return self
-                .application
-                .lock()
-                .unwrap()
-                .definitions
-                .iter()
-                .map(|definition| definition.options.clone())
-                .collect();
+            return self.application.lock().unwrap().window_options();
         }
         self.roots
             .values()
@@ -1547,13 +1475,8 @@ impl LuaRuntime {
             .collect()
     }
 
-    pub(crate) fn take_app_commands(&self) -> Vec<LuaAppCommand> {
-        self.application
-            .lock()
-            .unwrap()
-            .commands
-            .drain(..)
-            .collect()
+    pub(crate) fn take_app_commands(&self) -> Vec<AppCommand> {
+        self.application.lock().unwrap().take_commands()
     }
 
     pub(crate) fn reload_file(
@@ -1630,7 +1553,7 @@ impl LuaRuntime {
     pub(crate) fn reload_application_file(
         &mut self,
         path: &Path,
-    ) -> Result<LuaApplicationReload, String> {
+    ) -> Result<ApplicationReload, String> {
         let source = std::fs::read_to_string(path)
             .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
         let luax = path
@@ -1711,7 +1634,7 @@ impl LuaRuntime {
         self.roots = next_roots;
         self.application_entry = true;
         self.memo.lock().unwrap().entries.clear();
-        Ok(LuaApplicationReload {
+        Ok(ApplicationReload {
             windows: self.window_options(),
             removed,
         })
@@ -1800,7 +1723,7 @@ impl LuaRuntime {
         Ok(dirty.into_iter().collect())
     }
 
-    pub(crate) fn take_focus_request(&self) -> Option<LuaFocusRequest> {
+    pub(crate) fn take_focus_request(&self) -> Option<FocusRequest> {
         self.focus_request.lock().unwrap().take()
     }
 
@@ -2861,59 +2784,52 @@ fn validate_app_handle(handle: &AnyUserData) -> mlua::Result<()> {
     })
 }
 
-fn positive_window_dimension(value: Option<f32>, default: f32, name: &str) -> mlua::Result<f32> {
-    let value = value.unwrap_or(default);
-    if !value.is_finite() || value <= 0.0 {
-        return Err(mlua::Error::runtime(format!(
-            "window {name} must be greater than zero"
-        )));
-    }
-    Ok(value)
-}
-
-fn parse_window_definition(table: Table) -> mlua::Result<LuaWindowDefinition> {
+fn parse_window_definition(table: Table) -> mlua::Result<WindowDefinition<Function>> {
     let id = table.get::<String>("id")?;
+    // An empty id is reported before a missing `render`.
     if id.trim().is_empty() {
         return Err(mlua::Error::runtime("window id cannot be empty"));
     }
     let render = table.get::<Function>("render")?;
-    let title = table
-        .get::<Option<String>>("title")?
-        .unwrap_or_else(|| id.clone());
-    let width = positive_window_dimension(table.get("width")?, 800.0, "width")?;
-    let height = positive_window_dimension(table.get("height")?, 600.0, "height")?;
-    let open = table.get::<Option<bool>>("open")?.unwrap_or(true);
-    let focus = table.get::<Option<bool>>("focus")?.unwrap_or(true);
-    let reposition = table.get::<Option<bool>>("reposition")?.unwrap_or(false);
-    Ok(LuaWindowDefinition {
-        options: LuaWindowOptions {
-            id,
-            title,
-            width,
-            height,
-            open,
-            focus,
-            reposition,
-        },
-        render,
+    let options = WindowSpec {
+        id,
+        title: table.get("title")?,
+        width: table.get("width")?,
+        height: table.get("height")?,
+        open: table.get("open")?,
+        focus: table.get("focus")?,
+        reposition: table.get("reposition")?,
+    }
+    .into_options()
+    .map_err(mlua::Error::runtime)?;
+    Ok(WindowDefinition { options, render })
+}
+
+/// The Lua wording of a registry error.
+fn registry_error(error: RegistryError) -> mlua::Error {
+    mlua::Error::runtime(match error {
+        RegistryError::AlreadyCreated => {
+            "gpuix.create_app may only be called once per entry".to_string()
+        }
+        RegistryError::NotCreated => {
+            "gpuix.define_window requires an active application".to_string()
+        }
+        RegistryError::DuplicateWindow(id) => format!("duplicate Lua window id {id:?}"),
+        RegistryError::UnknownWindow(id) => format!("Lua window {id:?} is not defined"),
     })
 }
 
 fn queue_app_command(
     handle: AnyUserData,
-    id: String,
-    application: &Arc<Mutex<LuaApplicationRegistry>>,
-    command: impl FnOnce(String) -> LuaAppCommand,
+    command: AppCommand,
+    application: &Arc<Mutex<ApplicationRegistry<Function>>>,
 ) -> mlua::Result<()> {
     validate_app_handle(&handle)?;
-    let mut application = application.lock().unwrap();
-    if !application.definition_exists(&id) {
-        return Err(mlua::Error::runtime(format!(
-            "Lua window {id:?} is not defined"
-        )));
-    }
-    application.commands.push_back(command(id));
-    Ok(())
+    application
+        .lock()
+        .unwrap()
+        .queue(command)
+        .map_err(registry_error)
 }
 
 fn install_api(
@@ -2925,9 +2841,9 @@ fn install_api(
     host_handles: Arc<Mutex<MountedHostHandleMap>>,
     host_updates: HostUpdates,
     root_cleanups: RootCleanups,
-    focus_request: Arc<Mutex<Option<LuaFocusRequest>>>,
+    focus_request: Arc<Mutex<Option<FocusRequest>>>,
     open_windows: Arc<Mutex<HashSet<String>>>,
-    application: Arc<Mutex<LuaApplicationRegistry>>,
+    application: Arc<Mutex<ApplicationRegistry<Function>>>,
     styles: Arc<Mutex<StyleCache>>,
 ) -> mlua::Result<()> {
     let api = lua.create_table()?;
@@ -3056,13 +2972,11 @@ fn install_api(
     api.set(
         "create_app",
         lua.create_function(move |lua, ()| {
-            let mut application = create_app_registry.lock().unwrap();
-            if application.created {
-                return Err(mlua::Error::runtime(
-                    "gpuix.create_app may only be called once per entry",
-                ));
-            }
-            application.created = true;
+            create_app_registry
+                .lock()
+                .unwrap()
+                .create()
+                .map_err(registry_error)?;
             lua.create_userdata(LuaAppHandle)
         })?,
     )?;
@@ -3073,20 +2987,11 @@ fn install_api(
         lua.create_function(move |_, (handle, definition): (AnyUserData, Table)| {
             validate_app_handle(&handle)?;
             let definition = parse_window_definition(definition)?;
-            let mut application = define_window_registry.lock().unwrap();
-            if !application.created {
-                return Err(mlua::Error::runtime(
-                    "gpuix.define_window requires an active application",
-                ));
-            }
-            if application.definition_exists(&definition.options.id) {
-                return Err(mlua::Error::runtime(format!(
-                    "duplicate Lua window id {:?}",
-                    definition.options.id
-                )));
-            }
-            application.definitions.push(definition);
-            Ok(())
+            define_window_registry
+                .lock()
+                .unwrap()
+                .define(definition)
+                .map_err(registry_error)
         })?,
     )?;
 
@@ -3094,7 +2999,7 @@ fn install_api(
     api.set(
         "open_window",
         lua.create_function(move |_, (handle, id): (AnyUserData, String)| {
-            queue_app_command(handle, id, &open_window_registry, LuaAppCommand::Open)
+            queue_app_command(handle, AppCommand::Open(id), &open_window_registry)
         })?,
     )?;
 
@@ -3102,7 +3007,7 @@ fn install_api(
     api.set(
         "close_window",
         lua.create_function(move |_, (handle, id): (AnyUserData, String)| {
-            queue_app_command(handle, id, &close_window_registry, LuaAppCommand::Close)
+            queue_app_command(handle, AppCommand::Close(id), &close_window_registry)
         })?,
     )?;
 
@@ -3110,7 +3015,7 @@ fn install_api(
     api.set(
         "focus_window",
         lua.create_function(move |_, (handle, id): (AnyUserData, String)| {
-            queue_app_command(handle, id, &focus_window_registry, LuaAppCommand::Focus)
+            queue_app_command(handle, AppCommand::Focus(id), &focus_window_registry)
         })?,
     )?;
 
@@ -3119,17 +3024,11 @@ fn install_api(
         "set_window_title",
         lua.create_function(
             move |_, (handle, id, title): (AnyUserData, String, String)| {
-                validate_app_handle(&handle)?;
-                let mut application = title_window_registry.lock().unwrap();
-                if !application.definition_exists(&id) {
-                    return Err(mlua::Error::runtime(format!(
-                        "Lua window {id:?} is not defined"
-                    )));
-                }
-                application
-                    .commands
-                    .push_back(LuaAppCommand::SetTitle { id, title });
-                Ok(())
+                queue_app_command(
+                    handle,
+                    AppCommand::SetTitle { id, title },
+                    &title_window_registry,
+                )
             },
         )?,
     )?;
@@ -3145,7 +3044,7 @@ fn install_api(
             if !window_hook_application
                 .lock()
                 .unwrap()
-                .definition_exists(&window_id)
+                .is_defined(&window_id)
             {
                 return Err(mlua::Error::runtime(format!(
                     "Lua window {window_id:?} is not defined"
@@ -3239,7 +3138,7 @@ fn install_api(
             .get(&handle)
             .cloned()
             .ok_or_else(|| mlua::Error::runtime("gpuix.focus expects a mounted host handle"))?;
-        *focus_request.lock().unwrap() = Some(LuaFocusRequest {
+        *focus_request.lock().unwrap() = Some(FocusRequest {
             root_id: handle.root.to_string(),
             element_id: handle.element_id,
         });
@@ -7999,7 +7898,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             runtime.take_app_commands(),
-            vec![LuaAppCommand::Open("inspector".to_string())]
+            vec![AppCommand::Open("inspector".to_string())]
         );
     }
 

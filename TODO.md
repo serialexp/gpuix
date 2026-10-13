@@ -23,3 +23,11 @@
   and `Metrics::hash_into` (`theme.rs`) are unused outside the browser or test
   builds. Fix upstream (cfg-gate them) rather than in this fork, so rebases
   stay clean.
+- `cargo clippy --lib --tests` in `packages/native` fails with about 60
+  errors under `#![deny(clippy::all)]` (too many arguments, needless borrows,
+  derivable impls, elidable lifetimes and more), and `cargo fmt --check`
+  reports drift in `custom_elements/img.rs`, `custom_elements/input.rs`,
+  `renderer.rs`, `retained_tree.rs`, `test_renderer.rs` and `text/search.rs`.
+  Both predate the QuickJS work and come from upstream code. Neither runs in
+  CI, so they accumulate. Decide whether to fix them here or upstream, then
+  add both checks to CI.

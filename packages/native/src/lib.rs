@@ -27,6 +27,8 @@ mod motion;
 #[cfg(any(feature = "lua54", feature = "luajit"))]
 mod phosphor;
 mod renderer;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+mod script;
 // The data model is public so `examples/bench_serde.rs` measures the real
 // types instead of a copy that silently drifts from them.
 pub mod retained_tree;

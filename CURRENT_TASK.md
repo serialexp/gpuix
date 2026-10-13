@@ -45,4 +45,7 @@ built-in JSX/TSX compilation) behind a shared core.
 3. QuickJS: follow `docs/design/embedded-quickjs-runtime.md`. Phase 0's
    measurements are done (in rust-js-vm; numbers under open question 1 and
    in rust-js-vm's README), and open question 1 is settled: real
-   `@gpuix/react`. Next is Phase 1, the shared `src/script/` core.
+   `@gpuix/react`. Phase 1 is done, rescoped: `src/script/app.rs` and
+   `reload.rs` (see the doc's 2026-10-13 notes). Next is Phase 2: the
+   `quickjs` feature, host globals, and a native `applyBatch` over
+   `apply_batch_to_tree`.

@@ -1,18 +1,18 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use futures::StreamExt as _;
 use gpui::AppContext as _;
 
 use crate::element_tree::EventPayload;
-use crate::lua_runtime::{LuaAppCommand, LuaRuntime, LuaWindowOptions};
+use crate::lua_runtime::LuaRuntime;
 use crate::renderer::{EventCallback, GpuixView};
 use crate::retained_tree::RetainedTree;
+use crate::script::app::{AppCommand, WindowOptions};
+use crate::script::reload::{self, ReloadOutcome};
 use crate::text::SharedSelection;
 
 #[derive(Clone, Debug)]
@@ -283,8 +283,8 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<()
                                     runtime.refresh_window(&id, &mut tree)
                                 };
                                 match result {
-                                    Ok(crate::lua_runtime::ReloadOutcome::PreservedState) => {}
-                                    Ok(crate::lua_runtime::ReloadOutcome::ResetState) => {
+                                    Ok(ReloadOutcome::PreservedState) => {}
+                                    Ok(ReloadOutcome::ResetState) => {
                                         reset_state = true
                                     }
                                     Err(error) => {
@@ -343,10 +343,10 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<()
                             .unwrap()
                             .reload_file(&watch_path, &mut tree.lock().unwrap());
                         match result {
-                            Ok(crate::lua_runtime::ReloadOutcome::PreservedState) => {
+                            Ok(ReloadOutcome::PreservedState) => {
                                 eprintln!("gpuix-lua: reloaded (state preserved)")
                             }
-                            Ok(crate::lua_runtime::ReloadOutcome::ResetState) => eprintln!(
+                            Ok(ReloadOutcome::ResetState) => eprintln!(
                                 "gpuix-lua: reloaded (hook signature changed; affected state reset)"
                             ),
                             Err(error) => {
@@ -417,14 +417,14 @@ impl LuaWindowBounds {
 type SharedLuaWindowBounds = Rc<LuaWindowBounds>;
 type LuaTrees = Rc<RefCell<HashMap<String, Arc<Mutex<RetainedTree>>>>>;
 type LuaNativeWindowIds = Rc<RefCell<HashMap<gpui::WindowId, String>>>;
-type LuaWindowDefinitions = Rc<RefCell<HashMap<String, LuaWindowOptions>>>;
+type LuaWindowDefinitions = Rc<RefCell<HashMap<String, WindowOptions>>>;
 
 fn window_handle(windows: &SharedLuaWindows, id: &str) -> Option<gpui::WindowHandle<GpuixView>> {
     windows.get(id)
 }
 
 fn open_lua_window(
-    options: &LuaWindowOptions,
+    options: &WindowOptions,
     runtime: &Arc<Mutex<LuaRuntime>>,
     event_sender: &LuaEventSender,
     windows: &SharedLuaWindows,
@@ -504,7 +504,7 @@ fn open_lua_window(
 }
 
 fn apply_app_command(
-    command: LuaAppCommand,
+    command: AppCommand,
     runtime: &Arc<Mutex<LuaRuntime>>,
     event_sender: &LuaEventSender,
     windows: &SharedLuaWindows,
@@ -515,7 +515,7 @@ fn apply_app_command(
     cx: &mut gpui::AsyncApp,
 ) {
     match command {
-        LuaAppCommand::Open(id) => {
+        AppCommand::Open(id) => {
             if let Some(window) = window_handle(windows, &id) {
                 window
                     .update(cx, |_view, window, cx| {
@@ -544,7 +544,7 @@ fn apply_app_command(
                 log::error!("{error}");
             }
         }
-        LuaAppCommand::Close(id) => {
+        AppCommand::Close(id) => {
             if let Some(window) = window_handle(windows, &id) {
                 let saved_bounds = saved_bounds.clone();
                 window
@@ -555,7 +555,7 @@ fn apply_app_command(
                     .ok();
             }
         }
-        LuaAppCommand::Focus(id) => {
+        AppCommand::Focus(id) => {
             if let Some(window) = window_handle(windows, &id) {
                 window
                     .update(cx, |_view, window, cx| {
@@ -565,7 +565,7 @@ fn apply_app_command(
                     .ok();
             }
         }
-        LuaAppCommand::SetTitle { id, title } => {
+        AppCommand::SetTitle { id, title } => {
             if let Some(options) = definitions.borrow_mut().get_mut(&id) {
                 options.title = title.clone();
             }
@@ -618,80 +618,8 @@ fn reconcile_dirty_windows<C: gpui::AppContext>(
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct SourceSnapshot(Vec<(std::path::PathBuf, u64)>);
-
-fn source_snapshot(root: &Path) -> std::io::Result<SourceSnapshot> {
-    let mut sources = Vec::new();
-    collect_sources(root, &mut sources)?;
-    sources.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    Ok(SourceSnapshot(sources))
-}
-
 fn watch_sources(root: std::path::PathBuf) -> futures::channel::mpsc::UnboundedReceiver<()> {
-    let (sender, receiver) = futures::channel::mpsc::unbounded();
-    eprintln!("gpuix-lua: watching {}", root.display());
-    std::thread::spawn(move || {
-        let mut observed = match source_snapshot(&root) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                eprintln!("gpuix-lua: cannot watch {}: {error}", root.display());
-                return;
-            }
-        };
-        let mut pending_reload = false;
-        loop {
-            std::thread::sleep(Duration::from_millis(100));
-            if sender.is_closed() {
-                return;
-            }
-            let current = match source_snapshot(&root) {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    eprintln!(
-                        "gpuix-lua: cannot scan {} for changes: {error}",
-                        root.display()
-                    );
-                    continue;
-                }
-            };
-            if current != observed {
-                observed = current;
-                pending_reload = true;
-                continue;
-            }
-            if pending_reload {
-                pending_reload = false;
-                if sender.unbounded_send(()).is_err() {
-                    return;
-                }
-            }
-        }
-    });
-    receiver
-}
-
-fn collect_sources(
-    root: &Path,
-    sources: &mut Vec<(std::path::PathBuf, u64)>,
-) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_sources(&path, sources)?;
-            continue;
-        }
-        if !file_type.is_file() || !is_lua_source(&path) {
-            continue;
-        }
-        let bytes = std::fs::read(&path)?;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        bytes.hash(&mut hasher);
-        sources.push((path, hasher.finish()));
-    }
-    Ok(())
+    reload::watch_sources(root, is_lua_source, "gpuix-lua")
 }
 
 fn is_lua_source(path: &Path) -> bool {
@@ -712,6 +640,8 @@ fn default_title(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::element_tree::EventPayload;
 

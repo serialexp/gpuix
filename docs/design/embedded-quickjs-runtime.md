@@ -18,21 +18,30 @@ Tracking the gap between this design and what's on the main branch.
   no commit)
 - [x] Phase 0: settle open question 1: real `@gpuix/react` (decided
   2026-10-13)
+- [x] Phase 1: `script/app.rs`: window options, app commands, focus
+  requests, window spec checks and a generic application registry, used by
+  the Lua runtime (`refactor(native): share app registry and source watcher
+  across script engines`)
+- [x] Phase 1: `script/reload.rs`: source watcher and reload result types,
+  used by the Lua runtime and `lua_app.rs` (same commit)
+- [x] Phase 1: Lua behavior unchanged: every existing Lua test passes, on
+  Lua 5.4 and LuaJIT (same commit)
 
 ### Outstanding
 
-- [ ] Phase 1: `src/script/` shared core: direct host, application registry,
-  event and focus plumbing, reload bookkeeping
-- [ ] Phase 1: move the Lua runtime onto the shared core with no behavior
-  change (all Lua tests unchanged)
-- [ ] Phase 1: direct host flush detaches moved children before writing new
-  child lists (the parent/child swap case), with a test
+- [ ] Phase 1: `script/events.rs` (deferred: Lua's handler lookup, handle
+  routing and dirty-window tracking are Lua-only, and QuickJS keeps its
+  handlers in JS; extract shared routing in Phase 2 if it overlaps)
+- [ ] Phase 1 (dropped 2026-10-13): direct host and its swap-safe flush.
+  Lua's Solid layer is not a direct host, and QuickJS reuses
+  `apply_batch_to_tree` (see the Shared core update)
 - [ ] Phase 2: `quickjs` cargo feature with vendored rquickjs-sys and the
   Map hash fix, excluded from wasm builds
 - [ ] Phase 2: QuickJS host globals: timers, microtasks, `console`,
   `performance.now`, `queueMicrotask`, `structuredClone`
-- [ ] Phase 2: native `MutationRenderer` binding (13 methods) writing into the
-  shared direct host, with no JSON
+- [ ] Phase 2: native `applyBatch` for QuickJS over `apply_batch_to_tree`,
+  so `createMutationQueue` runs unchanged (was: a 13-method binding into a
+  direct host; see the Shared core update)
 - [ ] Phase 2: event dispatch from GPUI into QuickJS, and the
   `preventDefault` / `stopPropagation` return path
 - [ ] Phase 3: oxc compile of app `.ts`/`.tsx`/`.jsx` files (TypeScript strip,
@@ -151,6 +160,27 @@ the engine's handler type instead of storing engine values directly:
   element, and carrying `preventDefault` / `stopPropagation` back.
 - `script/reload.rs`: the file watching and module bookkeeping the Lua
   reload uses, minus the Lua-specific state preservation.
+
+> **2026-10-13 update:** the code doesn't fit this plan, so Phase 1 shares
+> less. `solid.lua`'s host calls don't change nodes one by one: they stage
+> nodes in the React-style render arena, mount them through
+> `reconcile_node`, and only ever replace a slot's whole child list
+> (`replace_host_children`), rejecting moves between parents. Putting Lua
+> on a direct host would be a rewrite with behavior changes, and the
+> parent/child swap can't happen in Lua at all. QuickJS doesn't need a
+> direct host either: `MutationRenderer` has 11 methods (`preventDefault`
+> and `stopPropagation` are on key events, in JS, and nothing returns to
+> Rust), and gpuix already applies them with `apply_batch_to_tree`. Phase 0
+> measured JSON batches at the same cost as per-call bindings, so QuickJS
+> keeps `createMutationQueue` and calls `apply_batch_to_tree` through a
+> native `applyBatch`. `script/` holds what both engines do need:
+> `app.rs`, `events.rs` (routing and focus requests only) and `reload.rs`.
+
+> **2026-10-13 update:** `events.rs` is deferred too. Reading the dispatch
+> path showed nothing QuickJS would reuse beyond the focus-request type,
+> which is in `app.rs`. Lua's module bookkeeping (`package.loaded`) stays in
+> `lua_runtime.rs` for the same reason; `reload.rs` holds the source watcher
+> and the reload result types.
 
 Lua's React-style hook store, render arena and reconciler stay in
 `lua_runtime.rs` unless open question 1 lands on the deferred Rust-reconciler

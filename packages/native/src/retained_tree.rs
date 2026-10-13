@@ -1458,7 +1458,10 @@ mod tests {
             &[],
             serde_json::json!({ "tabIndex": 0, "motion": { "animate": {} } }),
         );
-        assert!(tree.focusable_ids.contains(&1), "tabIndex keeps it focusable");
+        assert!(
+            tree.focusable_ids.contains(&1),
+            "tabIndex keeps it focusable"
+        );
         assert!(tree.motion_ids.contains(&1));
 
         update(&mut tree, &[], serde_json::json!({}));
