@@ -4119,10 +4119,12 @@ For/Index local-state behavior while adding and reversing rows.
 
 Run `just start-solid` for `examples/solid-workspace/main.luax`: a separate
 workspace with a keyed sidebar, memo-derived details, an Index activity list,
-a disposable Show panel, a native input and a shared-store inspector window.
+a disposable Show panel, a native input, tooltip, combobox and shared-store
+inspector window. The Tools status button opens a dock panel containing a
+standalone resizable drawer; right-click it to move the panel between edges.
 Reversing rows preserves their visit counters; hiding/reopening activity resets
 its panel-local counter. The React-style workspace remains available via
-`just start`. This is not a full port of its hook-based dock/widget components.
+`just start`. This is a separate example, not an identical copy of that workspace.
 The input is controlled: sending clears both the store draft and native input.
 Existing watch behavior applies; saving rebuilds Solid
 owners rather than preserving their local signals.
@@ -4143,10 +4145,12 @@ external replacement uses the existing input reset behavior.
 
 #### Solid controls
 
-The first Solid-native controls are `gpuix.solid.button`,
-`gpuix.solid.checkbox`, `gpuix.solid.radio_group` and `gpuix.solid.select`.
+Solid-native controls are `gpuix.solid.button`, `gpuix.solid.checkbox`,
+`gpuix.solid.radio_group`, `gpuix.solid.select`, `gpuix.solid.combobox`,
+`gpuix.solid.tooltip`, `gpuix.solid.drawer` and `gpuix.solid.dock_layout`.
 Alternatively, `require("gpuix.solid.controls")` exports `Button`, `Checkbox`,
-`RadioGroup` and `Select`. These require a mounted Solid owner and use signals,
+`RadioGroup`, `Select`, `Combobox`, `Tooltip`, `Drawer` and `DockLayout`.
+These require a mounted Solid owner and use signals,
 not hooks; the original `gpuix.*` components are unchanged.
 
 Component props are eager in LuaX, so pass **accessors**, not accessor results,
@@ -4181,8 +4185,86 @@ trigger focus (outside presses do not steal focus back). Controlled props emit c
 signal-local state. Style states expose `disabled` and control-specific
 `checked`, `selected`, `option`, `value`, `open` or `highlighted`.
 Custom Select render callbacks are not yet supported in this Solid version.
-Combobox, Tooltip, Drawer and DockLayout remain hook-based and are not ported
-yet. The Solid workspace showcases all four new controls.
+The Solid workspace showcases all eight controls.
+
+**Combobox** supports reactive `items`, `value`, `inputValue`, `open`,
+`multiple`, `disabled`, `readOnly`, `autoHighlight`, `tabIndex`, `placeholder`
+and `emptyText`; initial `defaultValue`, `defaultInputValue`, `defaultOpen`;
+and `onValueChange`, `onInputValueChange`, `onOpenChange`. Items are a dense
+array of unique string/number values or `{ value, label?, disabled? }` objects.
+Multiple selection reads/emits arrays and toggles values without closing.
+The input remains mounted while keyed result rows are filtered/reordered.
+Filtering is memoized: the default is a trimmed, case-insensitive substring
+match, `filter = false` disables filtering, and `filter(option, query)` provides
+a custom matcher. Disabled options are skipped. Up/Down and Ctrl+N/P highlight,
+native input submission chooses, and Escape/Tab/outside press close. Choosing
+returns focus to the input. Disabled comboboxes are read-only, leave tab order,
+and hide their menus; `readOnly` alone prevents typing, not option selection.
+Selection and input query are independent controlled values; use
+`inputValue`/`onInputValueChange` when external changes must control the text.
+It also accepts `style`, `inputStyle`, `contentStyle`, `itemStyle`, `emptyStyle`
+state callbacks, `testId`, and Select's placement props.
+`renderItem(item_accessor, state_accessor)` is a lazy per-key factory.
+
+**Tooltip** supports reactive `open`, `content`, `tabIndex`,
+`disableHoverableContent`, the placement props, `defaultOpen`, `onOpenChange`,
+`testId`, `style`, `triggerStyle` and `contentStyle`. Eager children form the
+trigger. Hover/focus open immediately; leave/blur, press/click and Escape close.
+There is no delay/timer option. `renderContent(state_accessor)` creates a
+fresh owned popup subtree per opening; closing disposes it.
+
+**Drawer** supports reactive `side` (left/right/bottom), `open`, `size`,
+`minSize`/`maxSize`, `resizable`, `resizeHandleSize`, `resizeTabIndex` and
+`keepMounted`; initial `defaultOpen` (true) and `defaultSize` (320 sides,
+240 bottom); `onOpenChange`, `onSizeChange`, `onResizeStart`, `onResizeEnd`;
+`testId`, `style`, `contentStyle` and `resizeHandleStyle`. Sizes are clamped
+(defaults 160–720; require `0 <= minSize <= maxSize`). All three mouse handlers
+live on the resize handle so GPUI's existing press-armed capture applies.
+Arrow keys resize by 8, Shift by 32, Home/double-click restore the initial size;
+changing side, disabling resize, or closing cancels an in-progress drag.
+The stable drawer root collapses/hides when closed. Lazy
+`renderContent(state_accessor)` is disposed on close unless `keepMounted`
+is true. Eager children are always kept mounted and cannot use
+`keepMounted = false`; use a lazy factory for disposable content.
+`renderTrigger(state_accessor)` creates a closed-state trigger.
+State exposes `open`, `side`, `size`, `close()`, `setOpen(value)`,
+`setSize(value)`.
+
+**DockLayout** supports reactive `panels`, eager workspace children, `testId`,
+`style`, `workspaceStyle`, `contentStyle`, `statusBarStyle`, `buttonStyle`,
+`activeButtonStyle`, `menuStyle` and `menuItemStyle`; callbacks
+`onPanelToggle({id, open, position})`,
+`onPanelPositionChange({id, position, previousPosition})` and
+`onPanelSizeChange({id, size})`. Panel definitions have unique string/number
+`id`, `position` (default right), `label`/`buttonLabel`, `defaultOpen`,
+`defaultSize`, `minSize`/`maxSize`, `resizable`, `resizeHandleSize`,
+`resizeTabIndex`, `tabIndex`, `hideButton`, the drawer style fields,
+`buttonStyle`/`activeButtonStyle`, and resize start/end callbacks.
+`render(state_accessor)` creates a panel's content once per ID;
+`renderButton(state_accessor)` creates its status button.
+Panel state exposes `id`, `open`, `position`, `size`, `close()`, `toggle()`;
+button state exposes `id`, `active`, `position`. Body state and node IDs
+survive hiding, resizing and moving left/right/bottom. Hidden panel roots remain
+in the retained tree; GPUI visibility keeps them out of painting/hit testing.
+Removing an ID disposes its body and forgets stored size/position; re-adding
+starts fresh. Same-ID definition updates preserve the existing content factory
+(use accessors inside it); changing that factory requires a new ID or remount.
+There is one open panel per edge; activating/moving into an occupied edge emits
+a close callback for the displaced panel. Status buttons group left at the
+start and bottom/right at the end, separated only when both end groups exist.
+Right-click opens an anchored docking menu; arrows highlight, Enter/Space
+choose, Escape/outside press close. Choosing or Escape restores status-button
+focus; button IDs/state survive moves between edges. Outside presses do not
+steal focus back. Center margins track active edge sizes.
+Automatic definition removal/normalization does not emit user-action callbacks.
+
+Style callbacks receive ordinary current-state tables. The four latter widgets
+merge table overrides into defaults; Drawer/panel styles must return tables
+because the widget also sets dimensions and edges. Render callbacks, in
+contrast, receive **accessors**, so their factories run once while expressions
+such as `<text>{state().size}</text>` stay reactive. Call state actions explicitly
+(`state().setSize(300)`, not colon syntax), and retain them only within their
+owner's lifetime.
 
 #### Package the Solid workspace (macOS)
 

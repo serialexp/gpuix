@@ -27,6 +27,31 @@ const HOOK_SITE_PREFIX: &str = "__gpuix_hook_site:";
 
 const BUILTIN_LUA_MODULES: &[(&str, &str, bool)] = &[
     (
+        "gpuix.solid._util",
+        include_str!("../../lua/gpuix/solid_widget_util.lua"),
+        false,
+    ),
+    (
+        "gpuix.solid.combobox",
+        include_str!("../../lua/gpuix/solid_combobox.luax"),
+        true,
+    ),
+    (
+        "gpuix.solid.tooltip",
+        include_str!("../../lua/gpuix/solid_tooltip.luax"),
+        true,
+    ),
+    (
+        "gpuix.solid.drawer",
+        include_str!("../../lua/gpuix/solid_drawer.luax"),
+        true,
+    ),
+    (
+        "gpuix.solid.dock_layout",
+        include_str!("../../lua/gpuix/solid_dock_layout.luax"),
+        true,
+    ),
+    (
         "gpuix.solid.controls",
         include_str!("../../lua/gpuix/solid_controls.luax"),
         true,
@@ -114,6 +139,10 @@ const HANDLE_MAX_GENERATION: u64 = i32::MAX as u64;
 
 type StyleCache = HashMap<Vec<u8>, Arc<StyleDesc>>;
 type HostHandleMap = HashMap<i64, u64>;
+/// Memoized subtrees whose old parent was replaced or removed during one
+/// reconciliation, held until a cache hit claims them. Memo keys are unique
+/// within a root, so the key alone identifies the subtree.
+type Orphans = HashMap<MemoKey, LuaNode>;
 
 #[derive(Clone)]
 struct MountedHostHandle {
@@ -1881,6 +1910,7 @@ impl LuaRuntime {
             tree.destroy_element(child.id);
         }
         if let Some(index) = index {
+            let mut orphans = Orphans::new();
             let child = reconcile_node(
                 tree,
                 &mut self.next_id,
@@ -1888,7 +1918,12 @@ impl LuaRuntime {
                 &mut self.arena.lock().unwrap(),
                 index,
                 &mut HostHandleMap::new(),
-            )?;
+                &mut orphans,
+            );
+            for orphan in orphans.into_values() {
+                tree.destroy_element(orphan.id);
+            }
+            let child = child?;
             tree.append_child(parent_id, child.id);
             node.children.push(child);
         }
@@ -1950,14 +1985,20 @@ impl LuaRuntime {
                 child
             } else {
                 let handle = node_handle(&Value::Integer(token)).map_err(lua_error)?;
-                reconcile_node(
+                let mut orphans = Orphans::new();
+                let child = reconcile_node(
                     tree,
                     &mut self.next_id,
                     None,
                     &mut arena,
                     handle.index,
                     &mut HostHandleMap::new(),
-                )?
+                    &mut orphans,
+                );
+                for orphan in orphans.into_values() {
+                    tree.destroy_element(orphan.id);
+                }
+                child?
             };
             tree.append_child(parent_id, child.id);
             node.children.push(child);
@@ -2055,6 +2096,8 @@ impl LuaRuntime {
         let arena = self.arena.clone();
         let mut arena = arena.lock().unwrap();
         let mut handle_aliases = HostHandleMap::new();
+        let mut orphans = Orphans::new();
+        let first_new_id = self.next_id;
         let root = match reconcile_node(
             tree,
             &mut self.next_id,
@@ -2062,15 +2105,58 @@ impl LuaRuntime {
             &mut arena,
             root_handle.index,
             &mut handle_aliases,
+            &mut orphans,
         ) {
             Ok(root) => root,
             Err(error) => {
                 drop(arena);
+                // Reconciliation stopped halfway: the old node tree is gone and
+                // the retained tree matches no render. Remove everything this
+                // root owns (the old root subtree, detached memo subtrees, and
+                // any element created by this pass that never got attached), and
+                // drop its memo cache, so the next render mounts from scratch.
+                // Hook state is kept.
+                if let Some(old_root) = tree.root_id {
+                    tree.destroy_element(old_root);
+                }
+                for orphan in orphans.into_values() {
+                    tree.destroy_element(orphan.id);
+                }
+                for id in first_new_id..self.next_id {
+                    if tree.elements.contains_key(&id) {
+                        tree.destroy_element(id);
+                    }
+                }
+                tree.set_root(None);
+                self.memo
+                    .lock()
+                    .unwrap()
+                    .entries
+                    .retain(|key, _| key.root != root_key);
+                {
+                    let mut handles = self.host_handles.lock().unwrap();
+                    for token in old_host_tokens {
+                        handles.remove(&token);
+                    }
+                }
+                self.roots.get_mut(root_id).unwrap().handlers.clear();
                 self.hooks.lock().unwrap().rollback(hook_snapshot);
                 return Err(error);
             }
         };
         drop(arena);
+        for orphan in orphans.into_values() {
+            tree.destroy_element(orphan.id);
+        }
+        // Keep a memo entry only if its subtree made it into the tree. One
+        // whose handle the render dropped has nothing to reuse next time.
+        let mut live_memo_keys = HashSet::new();
+        collect_memo_keys(&root, &mut live_memo_keys);
+        self.memo
+            .lock()
+            .unwrap()
+            .entries
+            .retain(|key, _| key.root != root_key || live_memo_keys.contains(&key.key));
         tree.set_root(Some(root.id));
         collect_host_handles(&root, &mut handle_aliases);
         let host_tokens = handle_aliases.keys().copied().collect();
@@ -4122,25 +4208,34 @@ fn reconcile_node(
     arena: &mut RenderArena,
     index: usize,
     handle_aliases: &mut HostHandleMap,
+    orphans: &mut Orphans,
 ) -> Result<LuaNode, String> {
     let handle_token =
         packed_handle_token(arena.generation, index, "nodes").map_err(|error| error.to_string())?;
     match arena.take(index)? {
         ArenaNode::Cached(cached) => {
-            let old = old.ok_or_else(|| {
-                format!(
-                    "Memoized Lua subtree {:?} has no previous node",
-                    cached.memo_key
-                )
-            })?;
-            if old.memo_key.as_ref() != Some(&cached.memo_key)
-                || !old.identity_matches(&cached.element_type, cached.key.as_deref())
-            {
-                return Err(format!(
-                    "Memoized Lua subtree {:?} moved or changed identity",
-                    cached.memo_key
-                ));
-            }
+            let old = match old {
+                Some(old)
+                    if old.memo_key.as_ref() == Some(&cached.memo_key)
+                        && old.identity_matches(&cached.element_type, cached.key.as_deref()) =>
+                {
+                    old
+                }
+                other => {
+                    if let Some(other) = other {
+                        discard_node(tree, other, orphans);
+                    }
+                    // The subtree's old parent was replaced earlier in this
+                    // reconciliation. A subtree that moves ahead of where its
+                    // old copy is discarded is not found, and the render fails.
+                    orphans.remove(&cached.memo_key).ok_or_else(|| {
+                        format!(
+                            "Memoized Lua subtree {:?} moved ahead of its previous position",
+                            cached.memo_key
+                        )
+                    })?
+                }
+            };
             handle_aliases.insert(handle_token, old.id);
             Ok(old)
         }
@@ -4150,7 +4245,7 @@ fn reconcile_node(
                     Some(old)
                 }
                 Some(old) => {
-                    tree.destroy_element(old.id);
+                    discard_node(tree, old, orphans);
                     None
                 }
                 None => None,
@@ -4185,6 +4280,7 @@ fn reconcile_node(
                         arena,
                         child_index,
                         handle_aliases,
+                        orphans,
                     )?);
                 }
             } else {
@@ -4197,6 +4293,14 @@ fn reconcile_node(
                         unkeyed.push_back(child);
                     }
                 }
+                discard_unclaimed(
+                    tree,
+                    arena,
+                    &next_children,
+                    &mut keyed,
+                    &mut unkeyed,
+                    orphans,
+                )?;
 
                 for child_index in next_children {
                     let previous = match arena.key(child_index)? {
@@ -4210,10 +4314,11 @@ fn reconcile_node(
                         arena,
                         child_index,
                         handle_aliases,
+                        orphans,
                     )?);
                 }
                 for child in keyed.into_values().chain(unkeyed) {
-                    tree.destroy_element(child.id);
+                    discard_node(tree, child, orphans);
                 }
             }
 
@@ -4238,6 +4343,67 @@ fn reconcile_node(
                 memo_key: next.memo_key,
             })
         }
+    }
+}
+
+/// Remove an old node that the new render does not reuse in place. Memoized
+/// subtrees inside it are detached and kept as orphans, because a cache hit
+/// later in the same reconciliation may still claim them.
+fn discard_node(tree: &mut RetainedTree, node: LuaNode, orphans: &mut Orphans) {
+    if let Some(key) = node.memo_key.clone() {
+        tree.detach(node.id);
+        orphans.insert(key, node);
+        return;
+    }
+    let id = node.id;
+    for child in node.children {
+        discard_node(tree, child, orphans);
+    }
+    tree.destroy_element(id);
+}
+
+/// Discard the old children no new sibling will claim, before any new sibling
+/// is reconciled, so memoized subtrees inside them are already orphaned when a
+/// sibling's cache hit looks for them.
+fn discard_unclaimed(
+    tree: &mut RetainedTree,
+    arena: &RenderArena,
+    next_children: &[usize],
+    keyed: &mut HashMap<Arc<str>, LuaNode>,
+    unkeyed: &mut VecDeque<LuaNode>,
+    orphans: &mut Orphans,
+) -> Result<(), String> {
+    let mut claimed = HashSet::new();
+    let mut unkeyed_claims = 0;
+    for &index in next_children {
+        match arena.key(index)? {
+            Some(key) => {
+                claimed.insert(key);
+            }
+            None => unkeyed_claims += 1,
+        }
+    }
+    let unclaimed: Vec<Arc<str>> = keyed
+        .keys()
+        .filter(|key| !claimed.contains(key.as_ref()))
+        .cloned()
+        .collect();
+    for key in unclaimed {
+        let child = keyed.remove(&key).expect("key came from the map");
+        discard_node(tree, child, orphans);
+    }
+    while unkeyed.len() > unkeyed_claims {
+        discard_node(tree, unkeyed.pop_back().expect("length checked"), orphans);
+    }
+    Ok(())
+}
+
+fn collect_memo_keys(node: &LuaNode, keys: &mut HashSet<MemoKey>) {
+    if let Some(key) = &node.memo_key {
+        keys.insert(key.clone());
+    }
+    for child in &node.children {
+        collect_memo_keys(child, keys);
     }
 }
 
@@ -4397,6 +4563,484 @@ mod tests {
         assert!(has_text(&main, "Shared true"));
         assert!(has_text(&inspector, "Shared true"));
         assert!(runtime.host_updates.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn solid_combobox_filters_reuses_rows_selects_and_supports_multiple() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(r#"--!gpuix solid
+            local solid = require("gpuix.solid")
+            local Combobox = require("gpuix.solid.combobox")
+            local disabled, set_disabled = solid.create_signal(false)
+            local items, set_items = solid.create_signal({
+                {value="a",label="Alpha"}, {value="b",label="Beta"},
+                {value="x",label="Beta blocked",disabled=true}, {value="c",label="Beacon"}
+            })
+            combo_renders = 0
+            return function()
+                combo_renders = combo_renders + 1
+                return solid.mount(function()
+                    return <div>
+                        <Combobox testId="combo" items={items} disabled={disabled} autoHighlight
+                            onValueChange={function(value) combo_selected = value end} />
+                        <Combobox testId="multi" items={{"one","two"}} multiple defaultOpen
+                            onValueChange={function(value) multi_selected = value end} />
+                        <div testId="disable-combo" onClick={function() set_disabled(true) end} />
+                        <div testId="update-options" onClick={function()
+                            set_items({{value="b",label="Better"}, {value="x",label="Beta blocked",disabled=true},
+                                {value="c",label="Beacon"}})
+                        end} />
+                    </div>
+                end)
+            end
+        "#, &mut tree).unwrap();
+        let input = tree
+            .elements
+            .values()
+            .find(|node| node.test_id.as_deref() == Some("combo"))
+            .unwrap()
+            .id;
+        dispatch_by_test_id(&mut runtime, &mut tree, "combo").unwrap();
+        let beta = tree
+            .elements
+            .values()
+            .find(|node| node.test_id.as_deref() == Some("combo-option-b"))
+            .unwrap()
+            .id;
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "combo",
+            EventPayload {
+                event_type: "change".into(),
+                value: Some("be".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!has_test_id(&tree, "combo-option-a"));
+        assert!(tree.elements.contains_key(&beta));
+        dispatch_by_test_id(&mut runtime, &mut tree, "update-options").unwrap();
+        assert!(tree.elements.contains_key(&beta));
+        assert!(has_text(&tree, "Better"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "combo-option-x").unwrap();
+        assert!(has_test_id(&tree, "combo-content"));
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "combo",
+            EventPayload {
+                event_type: "keyDown".into(),
+                key: Some("down".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "combo",
+            EventPayload {
+                event_type: "submit".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            runtime
+                .lua
+                .globals()
+                .get::<String>("combo_selected")
+                .unwrap(),
+            "c"
+        );
+        assert_eq!(
+            tree.elements[&input].custom_props["value"],
+            serde_json::json!("Beacon")
+        );
+        assert!(!has_test_id(&tree, "combo-content"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "combo").unwrap();
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "combo",
+            EventPayload {
+                event_type: "change".into(),
+                value: Some("missing".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(has_test_id(&tree, "combo-empty"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "disable-combo").unwrap();
+        assert!(!has_test_id(&tree, "combo-content"));
+        assert_eq!(
+            tree.elements[&input].custom_props["readOnly"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            tree.elements[&input].custom_props["tabIndex"],
+            serde_json::json!(-1)
+        );
+        dispatch_by_test_id(&mut runtime, &mut tree, "multi-option-one").unwrap();
+        assert_eq!(
+            runtime
+                .lua
+                .globals()
+                .get::<Table>("multi_selected")
+                .unwrap()
+                .raw_len(),
+            1
+        );
+        assert!(has_test_id(&tree, "multi-content"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "multi-option-one").unwrap();
+        assert_eq!(
+            runtime
+                .lua
+                .globals()
+                .get::<Table>("multi_selected")
+                .unwrap()
+                .raw_len(),
+            0
+        );
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("combo_renders").unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn solid_tooltip_tracks_content_and_disposes_popup_owners() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(
+            r#"--!gpuix solid
+            local solid = require("gpuix.solid")
+            local Tooltip = require("gpuix.solid.tooltip")
+            local content, set_content = solid.create_signal("First")
+            tooltip_mounts, tooltip_cleanups, tooltip_renders = 0, 0, 0
+            return function()
+                tooltip_renders = tooltip_renders + 1
+                return solid.mount(function()
+                    return <div>
+                        <Tooltip testId="tip" renderContent={function(state)
+                            tooltip_mounts = tooltip_mounts + 1
+                            solid.on_cleanup(function() tooltip_cleanups = tooltip_cleanups + 1 end)
+                            return <text>{content()}:{tostring(state().open)}</text>
+                        end}><text>Help</text></Tooltip>
+                        <div testId="change-tip" onClick={function() set_content("Second") end} />
+                    </div>
+                end)
+            end
+        "#,
+            &mut tree,
+        )
+        .unwrap();
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "tip",
+            EventPayload {
+                event_type: "mouseEnter".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(has_text(&tree, "First:true"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "change-tip").unwrap();
+        assert!(has_text(&tree, "Second:true"));
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("tooltip_mounts").unwrap(),
+            1
+        );
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "tip",
+            EventPayload {
+                event_type: "keyDown".into(),
+                key: Some("escape".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!has_test_id(&tree, "tip-content"));
+        assert_eq!(
+            runtime
+                .lua
+                .globals()
+                .get::<i64>("tooltip_cleanups")
+                .unwrap(),
+            1
+        );
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "tip",
+            EventPayload {
+                event_type: "focus".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(has_text(&tree, "Second:true"));
+        runtime.unmount_window(DEFAULT_ROOT_ID);
+        assert_eq!(
+            runtime
+                .lua
+                .globals()
+                .get::<i64>("tooltip_cleanups")
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("tooltip_renders").unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn solid_drawer_resizes_changes_sides_and_disposes_closed_content() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(r#"--!gpuix solid
+            local solid = require("gpuix.solid")
+            local Drawer = require("gpuix.solid.drawer")
+            local side, set_side = solid.create_signal("left")
+            drawer_renders, drawer_cleanups = 0, 0
+            return function()
+                drawer_renders = drawer_renders + 1
+                return solid.mount(function()
+                    return <div style={{width=800,height=600}}>
+                        <Drawer testId="solid-drawer" side={side} defaultSize={200} minSize={120} maxSize={300}
+                            renderContent={function(state)
+                                solid.on_cleanup(function() drawer_cleanups = drawer_cleanups + 1 end)
+                                local clicks, set_clicks = solid.create_signal(0)
+                                return <div>
+                                    <text>{string.format("Size: %.0f", state().size)}</text>
+                                    <text>Side: {state().side}</text>
+                                    <div testId="drawer-count" onClick={function() set_clicks(clicks()+1) end}>
+                                        <text>Clicks: {clicks()}</text>
+                                    </div>
+                                    <div testId="close-drawer" onClick={function() state().close() end} />
+                                </div>
+                            end}
+                            renderTrigger={function(state)
+                                return <div testId="reopen-drawer" onClick={function() state().setOpen(true) end} />
+                            end} />
+                        <div testId="drawer-right" onClick={function() set_side("right") end} />
+                        <div testId="drawer-bottom" onClick={function() set_side("bottom") end} />
+                    </div>
+                end)
+            end
+        "#, &mut tree).unwrap();
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "solid-drawer-resize-handle",
+            EventPayload {
+                event_type: "mouseDown".into(),
+                button: Some(0),
+                x: Some(200.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "solid-drawer-resize-handle",
+            EventPayload {
+                event_type: "mouseMove".into(),
+                pressed_button: Some(0),
+                x: Some(260.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(has_text(&tree, "Size: 260"));
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "solid-drawer-resize-handle",
+            EventPayload {
+                event_type: "mouseMove".into(),
+                pressed_button: Some(0),
+                x: Some(1000.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(has_text(&tree, "Size: 300"));
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "solid-drawer-resize-handle",
+            EventPayload {
+                event_type: "mouseUp".into(),
+                click_count: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(has_text(&tree, "Size: 200"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "drawer-count").unwrap();
+        dispatch_by_test_id(&mut runtime, &mut tree, "drawer-right").unwrap();
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "solid-drawer-resize-handle",
+            EventPayload {
+                event_type: "keyDown".into(),
+                key: Some("left".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(has_text(&tree, "Size: 208"));
+        assert!(has_text(&tree, "Clicks: 1"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "drawer-bottom").unwrap();
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "solid-drawer-resize-handle",
+            EventPayload {
+                event_type: "keyDown".into(),
+                key: Some("up".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(has_text(&tree, "Size: 216"));
+        dispatch_by_test_id(&mut runtime, &mut tree, "close-drawer").unwrap();
+        assert!(!has_test_id(&tree, "solid-drawer-resize-handle"));
+        assert!(has_test_id(&tree, "reopen-drawer"));
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("drawer_cleanups").unwrap(),
+            1
+        );
+        dispatch_by_test_id(&mut runtime, &mut tree, "reopen-drawer").unwrap();
+        assert!(has_text(&tree, "Clicks: 0"));
+        assert!(has_text(&tree, "Size: 216"));
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("drawer_renders").unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn solid_dock_preserves_panels_across_moves_and_disposes_removed_ids() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(r#"--!gpuix solid
+            local solid = require("gpuix.solid")
+            local DockLayout = require("gpuix.solid.dock_layout")
+            dock_mounts, dock_cleanups, dock_renders = 0, 0, 0
+            local function panel(state)
+                dock_mounts = dock_mounts + 1
+                solid.on_cleanup(function() dock_cleanups = dock_cleanups + 1 end)
+                local visits, set_visits = solid.create_signal(0)
+                return <div>
+                    <text>Activity {state().position}</text>
+                    <text>Panel size: {state().size}</text>
+                    <div testId="dock-count" onClick={function() set_visits(visits()+1) end}>
+                        <text>Visits {visits()}</text>
+                    </div>
+                </div>
+            end
+            local definition = {id="activity",label="Activity",position="right",defaultOpen=true,defaultSize=240,render=panel}
+            local panels, set_panels = solid.create_signal({definition})
+            return function()
+                dock_renders = dock_renders + 1
+                return solid.mount(function()
+                    return <div>
+                        <DockLayout testId="solid-dock" panels={panels}><text>Center</text></DockLayout>
+                        <div testId="remove-panel" onClick={function() set_panels({}) end} />
+                        <div testId="restore-panel" onClick={function() set_panels({definition}) end} />
+                    </div>
+                end)
+            end
+        "#, &mut tree).unwrap();
+        let panel_id = tree
+            .elements
+            .values()
+            .find(|node| node.test_id.as_deref() == Some("solid-dock-panel-activity"))
+            .unwrap()
+            .id;
+        let button_id = tree
+            .elements
+            .values()
+            .find(|node| node.test_id.as_deref() == Some("solid-dock-button-activity"))
+            .unwrap()
+            .id;
+        dispatch_by_test_id(&mut runtime, &mut tree, "dock-count").unwrap();
+        dispatch_by_test_id(&mut runtime, &mut tree, "solid-dock-button-activity").unwrap();
+        assert_eq!(
+            tree.elements[&panel_id]
+                .style
+                .as_deref()
+                .unwrap()
+                .visibility
+                .as_deref(),
+            Some("hidden")
+        );
+        assert!(!has_test_id(
+            &tree,
+            "solid-dock-panel-activity-resize-handle"
+        ));
+        dispatch_by_test_id(&mut runtime, &mut tree, "solid-dock-button-activity").unwrap();
+        assert!(has_text(&tree, "Visits 1"));
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "solid-dock-button-activity",
+            EventPayload {
+                event_type: "auxClick".into(),
+                is_right_click: Some(true),
+                x: Some(700.0),
+                y: Some(500.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        dispatch_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "solid-dock-button-activity-dock-left",
+        )
+        .unwrap();
+        assert!(tree.elements.contains_key(&panel_id));
+        assert!(has_text(&tree, "Activity left"));
+        assert!(tree.elements.contains_key(&button_id));
+        assert_eq!(runtime.take_focus_request().unwrap().element_id, button_id);
+        assert!(has_text(&tree, "Visits 1"));
+        assert!(!has_test_id(&tree, "solid-dock-button-menu"));
+        dispatch_event_by_test_id(
+            &mut runtime,
+            &mut tree,
+            "solid-dock-panel-activity-resize-handle",
+            EventPayload {
+                event_type: "keyDown".into(),
+                key: Some("right".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(has_text(&tree, "Panel size: 248"));
+        assert_eq!(runtime.lua.globals().get::<i64>("dock_mounts").unwrap(), 1);
+        dispatch_by_test_id(&mut runtime, &mut tree, "remove-panel").unwrap();
+        assert!(!tree.elements.contains_key(&panel_id));
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("dock_cleanups").unwrap(),
+            1
+        );
+        dispatch_by_test_id(&mut runtime, &mut tree, "restore-panel").unwrap();
+        assert!(has_text(&tree, "Activity right"));
+        assert!(has_text(&tree, "Panel size: 240"));
+        assert!(has_text(&tree, "Visits 0"));
+        assert_eq!(runtime.lua.globals().get::<i64>("dock_renders").unwrap(), 1);
+        runtime.unmount_window(DEFAULT_ROOT_ID);
+        assert_eq!(
+            runtime.lua.globals().get::<i64>("dock_cleanups").unwrap(),
+            2
+        );
     }
 
     #[test]
@@ -7573,6 +8217,122 @@ mod tests {
         );
         assert!(has_text(&main, "reloaded main 1 shared 1"));
         assert!(has_text(&inspector, "reloaded inspector 0 shared 1"));
+    }
+
+    #[test]
+    fn memo_hits_survive_their_parent_changing_identity() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load(
+            r#"
+                local ui = gpuix
+                return function()
+                    local flipped, set_flipped = ui.use_state(false)
+                    local row = ui.memo("row", true, function()
+                        return ui.div { key = "row", testId = "row", ui.text("row") }
+                    end)
+                    return ui.div {
+                        testId = "toggle",
+                        onClick = function() set_flipped(not flipped) end,
+                        ui.div { key = flipped and "b" or "a", row },
+                    }
+                end
+            "#,
+            &mut tree,
+        )
+        .unwrap();
+        let row_id = test_id_element(&tree, "row");
+
+        for _ in 0..2 {
+            assert!(dispatch_by_test_id(&mut runtime, &mut tree, "toggle").unwrap());
+            assert_eq!(test_id_element(&tree, "row"), row_id);
+            assert_tree_has_no_orphans(&tree);
+        }
+    }
+
+    #[test]
+    fn a_memo_whose_handle_was_dropped_renders_fresh_next_time() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load(
+            r#"
+                local ui = gpuix
+                return function()
+                    local shown, set_shown = ui.use_state(true)
+                    local row = ui.memo("row", true, function()
+                        return ui.text("row")
+                    end)
+                    return ui.div {
+                        testId = "toggle",
+                        onClick = function() set_shown(not shown) end,
+                        shown and row or nil,
+                    }
+                end
+            "#,
+            &mut tree,
+        )
+        .unwrap();
+
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "toggle").unwrap());
+        assert!(!has_text(&tree, "row"));
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "toggle").unwrap());
+        assert!(has_text(&tree, "row"));
+        assert_tree_has_no_orphans(&tree);
+    }
+
+    #[test]
+    fn a_failed_reconcile_recovers_on_the_next_render() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load(
+            r#"
+                local ui = gpuix
+                return function()
+                    local swapped, set_swapped = ui.use_state(false)
+                    local row = ui.memo("row", true, function()
+                        return ui.text { key = "row", content = "row" }
+                    end)
+                    local a = ui.div { key = "a", testId = "a", not swapped and row or nil }
+                    local b = ui.div { key = "b", testId = "b", swapped and row or nil }
+                    return ui.div {
+                        testId = "toggle",
+                        onClick = function() set_swapped(not swapped) end,
+                        children = swapped and { b, a } or { a, b },
+                    }
+                end
+            "#,
+            &mut tree,
+        )
+        .unwrap();
+
+        // The memoized row moves to a parent that is reconciled before its
+        // old parent. Whether or not this render can reuse it, the runtime
+        // must not be left in a state where later renders fail.
+        let _ = dispatch_by_test_id(&mut runtime, &mut tree, "toggle");
+        assert_tree_has_no_orphans(&tree);
+        runtime.render(&mut tree, false).unwrap();
+        assert!(has_text(&tree, "row"));
+        assert_tree_has_no_orphans(&tree);
+    }
+
+    fn test_id_element(tree: &RetainedTree, test_id: &str) -> u64 {
+        tree.elements
+            .values()
+            .find(|element| element.test_id.as_deref() == Some(test_id))
+            .unwrap_or_else(|| panic!("no element with test id {test_id:?}"))
+            .id
+    }
+
+    /// Every retained element is reachable from the root.
+    fn assert_tree_has_no_orphans(tree: &RetainedTree) {
+        let mut reached = 0;
+        let mut stack: Vec<u64> = tree.root_id.into_iter().collect();
+        while let Some(id) = stack.pop() {
+            reached += 1;
+            stack.extend(tree.elements[&id].children.iter().copied());
+        }
+        assert_eq!(
+            reached,
+            tree.elements.len(),
+            "unreachable retained elements"
+        );
     }
 
     fn dispatch_by_test_id(

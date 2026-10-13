@@ -1,0 +1,153 @@
+--!gpuix solid
+local solid = require("gpuix.solid")
+local shared = require("gpuix.solid._util")
+local util = require("gpuix._util")
+local For, Show = solid.For, solid.Show
+local read = shared.read
+
+return function(props)
+    local options = solid.create_memo(function()
+        local result = {}
+        local seen = {}
+        for index, item in ipairs(read(props, "items", {})) do
+            local option = type(item) == "table" and item or { value = item, label = tostring(item) }
+            assert((type(option.value) == "string" or type(option.value) == "number") and option.value == option.value,
+                "Combobox option values must be strings or numbers")
+            assert(not seen[option.value], "Combobox option values must be unique")
+            seen[option.value], result[index] = true, option
+        end
+        return result
+    end)
+    local initial = props.defaultValue
+    if read(props, "multiple", false) and initial == nil then initial = {} end
+    local value, set_value = shared.controlled(props, "value", initial, "onValueChange")
+    local function label_for(next_value)
+        for _, option in ipairs(options()) do
+            if option.value == next_value then return option.label or tostring(option.value) end
+        end
+        return ""
+    end
+    local initial_query = props.defaultInputValue
+    if initial_query == nil then initial_query = read(props, "multiple", false) and "" or label_for(value()) end
+    local query, set_query = shared.controlled(props, "inputValue", initial_query, "onInputValueChange")
+    local open, set_open = shared.controlled(props, "open", props.defaultOpen == true, "onOpenChange")
+    local active, set_active = solid.create_signal(nil)
+    local function state()
+        return { value = value(), query = query() or "", open = open(), disabled = read(props, "disabled", false) }
+    end
+    local filtered = solid.create_memo(function()
+        local result = {}
+        local text = query() or ""
+        local normalized = string.lower(string.match(text, "^%s*(.-)%s*$"))
+        for _, option in ipairs(options()) do
+            local include
+            if props.filter == false or normalized == "" then include = true
+            elseif type(props.filter) == "function" then include = props.filter(option, text)
+            else include = string.find(string.lower(option.label or tostring(option.value)), normalized, 1, true) ~= nil end
+            if include then result[#result + 1] = option end
+        end
+        return result
+    end)
+    local highlighted = solid.create_memo(function()
+        for _, option in ipairs(filtered()) do
+            if option.value == active() and not util.is_disabled(option) then return option end
+        end
+        if read(props, "autoHighlight", false) then
+            for _, option in ipairs(filtered()) do if not util.is_disabled(option) then return option end end
+        end
+    end)
+    local input
+    local function choose(option)
+        if not option or state().disabled or util.is_disabled(option) then return end
+        solid.batch(function()
+            if read(props, "multiple", false) then
+                local updated = {}
+                for _, selected in ipairs(type(value()) == "table" and value() or {}) do
+                    if selected ~= option.value then updated[#updated + 1] = selected end
+                end
+                if not shared.contains(value(), option.value) then updated[#updated + 1] = option.value end
+                set_value(updated)
+                set_query("")
+            else
+                set_value(option.value)
+                set_query(option.label or tostring(option.value))
+                set_open(false)
+            end
+            set_active(nil)
+        end)
+        gpuix.focus(input)
+    end
+    local function move(direction)
+        local list = filtered()
+        local current = highlighted()
+        local index = current and util.option_index(list, current.value) or 0
+        if index == 0 and direction < 0 then index = 1 end
+        for offset = 1, #list do
+            local candidate = list[((index - 1 + direction * offset) % #list) + 1]
+            if not util.is_disabled(candidate) then set_active(candidate.value); return end
+        end
+    end
+    local function key(event)
+        if state().disabled then return end
+        local ctrl = event.modifiers and event.modifiers.ctrl
+        if event.key == "escape" or event.key == "tab" then set_open(false)
+        elseif event.key == "down" or (ctrl and event.key == "n") then set_open(true); move(1)
+        elseif event.key == "up" or (ctrl and event.key == "p") then set_open(true); move(-1) end
+    end
+    input = <input testId={props.testId} value={query() or ""} placeholder={read(props, "placeholder", "")}
+        tabIndex={state().disabled and -1 or read(props, "tabIndex", 0)}
+        readOnly={state().disabled or read(props, "readOnly", false)}
+        onClick={function() if not state().disabled then set_open(true) end end}
+        onFocus={function() if not state().disabled then set_open(true) end end}
+        onBlur={function() set_open(false) end}
+        onChange={function(event)
+            if state().disabled or read(props, "readOnly", false) then return end
+            solid.batch(function() set_query(event.value or ""); set_active(nil); set_open(true) end)
+        end}
+        onKeyDown={key}
+        onSubmit={function() choose(highlighted()) end}
+        style={shared.style({ width = 220, height = 36, padding = 9, borderRadius = 7,
+            borderWidth = 1, borderColor = "#52525b", background = "#18181b", color = "#fafafa",
+            focus = util.focus_ring }, props.inputStyle, state())} />
+    return <div style={shared.style({ display = "flex", position = "relative", alignItems = "start" }, props.style, state())}>
+        {input}
+        <Show when={function() return open() and not state().disabled end}
+            style={{ position = "absolute", width = "100%", height = "100%", pointerEvents = "none" }}
+            render={function()
+                return <anchored side={read(props, "side", "bottom")} align={read(props, "align", "start")}
+                    gap={read(props, "sideOffset", 5)} fit="snap" snapMargin={read(props, "collisionPadding", 8)}
+                    deferred priority={read(props, "priority", 1)}>
+                    <div testId={util.test_id(props.testId, "-content")}
+                        onMouseDownOutside={function() set_open(false) end}
+                        style={shared.style({ width = 220, padding = 5, borderRadius = 8,
+                            borderWidth = 1, borderColor = "#52525b", background = "#27272a" }, props.contentStyle, state())}>
+                        <For each={filtered} key={function(option) return option.value end}
+                            render={function(item)
+                                local function item_state()
+                                    local current = highlighted()
+                                    return { option = item(), disabled = util.is_disabled(item()),
+                                        highlighted = current and current.value == item().value or false,
+                                        selected = read(props, "multiple", false) and shared.contains(value(), item().value)
+                                            or value() == item().value }
+                                end
+                                local body = props.renderItem and props.renderItem(item, item_state)
+                                    or <text>{item().label or tostring(item().value)}</text>
+                                return <div testId={util.test_id(props.testId, "-option-" .. item().value)}
+                                    onMouseEnter={function() if not util.is_disabled(item()) then set_active(item().value) end end}
+                                    onClick={function() choose(item()) end}
+                                    style={shared.style({ padding = 9, borderRadius = 6,
+                                        background = item_state().highlighted and "#3f3f46" or "#27272a" }, props.itemStyle, item_state())}>
+                                    {body}
+                                </div>
+                            end} />
+                        <Show when={function() return #filtered() == 0 end} render={function()
+                            return <div testId={util.test_id(props.testId, "-empty")}
+                                style={shared.style({ padding = 9 }, props.emptyStyle, state())}>
+                                <text>{read(props, "emptyText", "No results")}</text>
+                            </div>
+                        end} />
+                    </div>
+                </anchored>
+            end} />
+    </div>
+end

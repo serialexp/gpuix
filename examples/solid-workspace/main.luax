@@ -7,6 +7,10 @@ local Button = require("gpuix.solid.button")
 local Checkbox = require("gpuix.solid.checkbox")
 local RadioGroup = require("gpuix.solid.radio_group")
 local Select = require("gpuix.solid.select")
+local Combobox = require("gpuix.solid.combobox")
+local Tooltip = require("gpuix.solid.tooltip")
+local Drawer = require("gpuix.solid.drawer")
+local DockLayout = require("gpuix.solid.dock_layout")
 local colors = { background = "#15171c", panel = "#1d2027", text = "#e5e7eb", muted = "#9ca3af", accent = "#2563eb" }
 local button_style = {
     padding = 10, borderRadius = 6, background = colors.panel,
@@ -41,12 +45,57 @@ local function MainWindow()
             return result
         end)
         local function select_conversation(value) store.dispatch({ type = "select", id = value }) end
-        return <div testId="solid-workspace" style={{
+        local panels = {{
+            id = "tools", label = "Tools", position = "bottom", defaultSize = 200,
+            minSize = 160, maxSize = 360,
+            render = function(dock_state)
+                local visits, set_visits = solid.create_signal(0)
+                return <div style={{ display = "flex",
+                    flexDirection = dock_state().position == "bottom" and "row" or "column",
+                    width = "100%", height = "100%", gap = 12 }}>
+                    <Drawer testId="demo-drawer"
+                        side={function() return dock_state().position == "bottom" and "left" or "bottom" end}
+                        defaultSize={240} minSize={160} maxSize={360}
+                        renderContent={function(drawer_state)
+                            local clicks, set_clicks = solid.create_signal(0)
+                            return <div style={{ padding = 12 }}>
+                                <text>{string.format("Resizable drawer: %.0f", drawer_state().size)}</text>
+                                <Button testId="demo-drawer-count" onClick={function() set_clicks(clicks() + 1) end}>
+                                    <text>Drawer clicks: {clicks()}</text>
+                                </Button>
+                                <Button testId="close-demo-drawer" onClick={function() drawer_state().close() end}>
+                                    <text>Close drawer</text>
+                                </Button>
+                            </div>
+                        end}
+                        renderTrigger={function(drawer_state)
+                            return <Button testId="open-demo-drawer" onClick={function() drawer_state().setOpen(true) end}>
+                                <text>Open drawer</text>
+                            </Button>
+                        end} />
+                    <div style={{ padding = 12, flexGrow = 1 }}>
+                        <text>Dock position: {dock_state().position}</text>
+                        <Button testId="tools-count" onClick={function() set_visits(visits() + 1) end}>
+                            <text>Tools visits: {visits()}</text>
+                        </Button>
+                        <text>Hide/reopen or dock elsewhere: this counter survives.</text>
+                        <Button testId="close-tools" onClick={function() dock_state().close() end}><text>Close tools</text></Button>
+                    </div>
+                </div>
+            end,
+        }}
+        return <DockLayout testId="solid-workspace" panels={panels} style={{
+            width = "100%", height = "100%", background = colors.background, color = colors.text,
+        }}>
+        <div style={{
             display = "flex", flexDirection = "column", width = "100%", height = "100%",
             padding = 16, gap = 12, background = colors.background, color = colors.text,
         }}>
             <div style={{ display = "flex", flexDirection = "row", gap = 10, flexShrink = 0 }}>
                 <text style={{ fontSize = 20 }}>Solid workspace</text>
+                <Tooltip testId="workspace-help" content="Right-click Tools in the status bar to change its dock position.">
+                    <text>ⓘ</text>
+                </Tooltip>
                 <div style={{ flexGrow = 1 }} />
                 <div testId="compact" tabIndex={0} style={button_style}
                     onClick={function() store.dispatch({ type = "compact" }) end}>
@@ -92,6 +141,8 @@ local function MainWindow()
                     <text>Draft preview: {draft()}</text>
                     <Select testId="conversation-select" options={choices} value={selected}
                         onValueChange={select_conversation} />
+                    <Combobox testId="conversation-combobox" items={choices} value={selected}
+                        autoHighlight onValueChange={select_conversation} placeholder="Find a conversation…" />
                     <RadioGroup testId="conversation-radio" options={choices} value={selected}
                         onValueChange={select_conversation}
                         style={{ display = "flex", flexDirection = "column", gap = 8 }} />
@@ -123,6 +174,7 @@ local function MainWindow()
                     onClick={function() store.dispatch({ type = "send" }) end}><text>Send</text></Button>
             </div>
         </div>
+        </DockLayout>
     end)
 end
 

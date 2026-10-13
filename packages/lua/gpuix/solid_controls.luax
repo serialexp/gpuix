@@ -1,6 +1,7 @@
 --!gpuix solid
 local solid = require("gpuix.solid")
 local util = require("gpuix._util")
+local shared = require("gpuix.solid._util")
 local For, Show = solid.For, solid.Show
 local controls = {}
 local row_style = { display = "flex", flexDirection = "row", alignItems = "center", gap = 8, focus = util.focus_ring }
@@ -13,26 +14,7 @@ local menu_style = {
     borderWidth = 1, borderColor = "#52525b", focus = util.focus_ring,
 }
 
-local function read(props, name, fallback)
-    local value = props[name]
-    if type(value) == "function" then value = value() end
-    if value == nil then return fallback end
-    return value
-end
-
-local function controlled(props, name, initial, callback)
-    local local_value, set_local = solid.create_signal(initial)
-    local function value()
-        if props[name] ~= nil then return read(props, name) end
-        return local_value()
-    end
-    local function set_value(next_value)
-        if value() == next_value then return end
-        if props[name] == nil then set_local(function() return next_value end) end
-        util.call(props[callback], next_value)
-    end
-    return value, set_value
-end
+local read, controlled = shared.read, shared.controlled
 
 function controls.Button(props)
     local function state() return { disabled = read(props, "disabled", false) } end
@@ -215,5 +197,10 @@ function controls.Select(props)
             end} />
     </div>
 end
+
+controls.Combobox = require("gpuix.solid.combobox")
+controls.Tooltip = require("gpuix.solid.tooltip")
+controls.Drawer = require("gpuix.solid.drawer")
+controls.DockLayout = require("gpuix.solid.dock_layout")
 
 return controls

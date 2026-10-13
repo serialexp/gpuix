@@ -1,0 +1,39 @@
+--!gpuix solid
+local solid = require("gpuix.solid")
+local util = require("gpuix._util")
+local shared = require("gpuix.solid._util")
+local Show = solid.Show
+local read = shared.read
+
+return function(props)
+    local open, set_open = shared.controlled(props, "open", props.defaultOpen == true, "onOpenChange")
+    local function state() return { open = open() } end
+    return <div style={shared.style({ position = "relative", display = "flex", alignItems = "start" }, props.style, state())}>
+        <div testId={props.testId} tabIndex={read(props, "tabIndex", 0)}
+            onMouseEnter={function() set_open(true) end}
+            onMouseLeave={function() set_open(false) end}
+            onMouseDown={function() set_open(false) end}
+            onClick={function() set_open(false) end}
+            onFocus={function() set_open(true) end}
+            onBlur={function() set_open(false) end}
+            onKeyDown={function(event) if event.key == "escape" then set_open(false) end end}
+            style={shared.style({ display = "flex", alignItems = "center", focus = util.focus_ring }, props.triggerStyle, state())}
+            children={props} />
+        <Show when={open} style={{ position = "absolute", width = "100%", height = "100%", pointerEvents = "none" }}
+            render={function()
+                local body = props.renderContent and props.renderContent(state)
+                    or <text>{read(props, "content", "")}</text>
+                return <anchored side={read(props, "side", "top")} align={read(props, "align", "center")}
+                    gap={read(props, "sideOffset", 5)} fit="snap" snapMargin={read(props, "collisionPadding", 8)}
+                    deferred priority={read(props, "priority", 1)}>
+                    <div testId={util.test_id(props.testId, "-content")}
+                        onMouseEnter={function() if not read(props, "disableHoverableContent", false) then set_open(true) end end}
+                        onMouseLeave={function() set_open(false) end}
+                        style={shared.style({ maxWidth = 280, padding = 8, borderRadius = 6,
+                            background = "#27272a", color = "#fafafa" }, props.contentStyle, state())}>
+                        {body}
+                    </div>
+                </anchored>
+            end} />
+    </div>
+end

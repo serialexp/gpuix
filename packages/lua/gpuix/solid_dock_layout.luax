@@ -1,0 +1,314 @@
+--!gpuix solid
+local solid = require("gpuix.solid")
+local shared = require("gpuix.solid._util")
+local util = require("gpuix._util")
+local Drawer = require("gpuix.solid.drawer")
+local For, Show = solid.For, solid.Show
+local read = shared.read
+local group_style = { display = "flex", flexDirection = "row", alignItems = "center", gap = 2 }
+local button_style = { minWidth = 24, height = 22, display = "flex", flexDirection = "row",
+    alignItems = "center", justifyContent = "center", paddingLeft = 6, paddingRight = 6,
+    borderRadius = 4, hover = { background = "#27272a" }, active = { background = "#52525b" }, focus = util.focus_ring }
+local positions = { "left", "right", "bottom" }
+local function valid(position) return position == "left" or position == "right" or position == "bottom" end
+
+return function(props)
+    local overrides, set_overrides = solid.create_signal({})
+    local sizes, set_sizes = solid.create_signal({})
+    local menu, set_menu = solid.create_signal(nil)
+    local button_handles = {}
+    local panels = solid.create_memo(function()
+        local result, seen = {}, {}
+        for index, panel in ipairs(read(props, "panels", {})) do
+            assert((type(panel.id) == "string" or type(panel.id) == "number") and panel.id == panel.id,
+                "DockLayout panels require string or number ids")
+            assert(not seen[panel.id], "DockLayout panel ids must be unique")
+            assert(valid(panel.position or "right"), "DockLayout panel position must be left, right, or bottom")
+            seen[panel.id], result[index] = true, panel
+        end
+        return result
+    end)
+    local initial_active = {}
+    for _, panel in ipairs(panels()) do
+        local position = panel.position or "right"
+        if panel.defaultOpen == true and initial_active[position] == nil then initial_active[position] = panel.id end
+    end
+    local active, set_active = solid.create_signal(initial_active)
+    local function find(id)
+        for _, panel in ipairs(panels()) do if panel.id == id then return panel end end
+    end
+    local function position_of(panel) return overrides()[panel.id] or panel.position or "right" end
+    local function panel_open(panel) return active()[position_of(panel)] == panel.id end
+    local function panel_size(panel)
+        local fallback = position_of(panel) == "bottom" and 240 or 320
+        return math.max(panel.minSize or 160, math.min(panel.maxSize or 720,
+            tonumber(sizes()[panel.id] or panel.defaultSize) or fallback))
+    end
+    local function close(panel)
+        if not panel_open(panel) then return end
+        local position = position_of(panel)
+        local updated = shared.merge(active(), {})
+        updated[position] = nil
+        set_active(updated)
+        util.call(props.onPanelToggle, { id = panel.id, open = false, position = position })
+    end
+    local function toggle(panel)
+        local position = position_of(panel)
+        local opening = not panel_open(panel)
+        local previous = find(active()[position])
+        local updated = shared.merge(active(), {})
+        updated[position] = opening and panel.id or nil
+        set_active(updated)
+        if opening and previous and previous.id ~= panel.id then
+            util.call(props.onPanelToggle, { id = previous.id, open = false, position = position })
+        end
+        util.call(props.onPanelToggle, { id = panel.id, open = opening, position = position })
+    end
+    local function move_panel(panel, next_position)
+        assert(valid(next_position), "Invalid dock position")
+        local previous = position_of(panel)
+        if previous == next_position then
+            set_menu(nil)
+            if button_handles[panel.id] then gpuix.focus(button_handles[panel.id]) end
+            return
+        end
+        local was_open = panel_open(panel)
+        local next_overrides = shared.merge(overrides(), {})
+        local next_active = shared.merge(active(), {})
+        local displaced = was_open and find(next_active[next_position]) or nil
+        next_overrides[panel.id] = next_position
+        if was_open then next_active[previous], next_active[next_position] = nil, panel.id end
+        solid.batch(function() set_overrides(next_overrides); set_active(next_active); set_menu(nil) end)
+        if displaced and displaced.id ~= panel.id then
+            util.call(props.onPanelToggle, { id = displaced.id, open = false, position = next_position })
+        end
+        util.call(props.onPanelPositionChange, { id = panel.id, position = next_position, previousPosition = previous })
+        if button_handles[panel.id] then gpuix.focus(button_handles[panel.id]) end
+    end
+    local function set_size(panel, size)
+        local updated = shared.merge(sizes(), {})
+        updated[panel.id] = size
+        set_sizes(updated)
+        util.call(props.onPanelSizeChange, { id = panel.id, size = size })
+    end
+    local known = {}
+    for _, panel in ipairs(panels()) do known[panel.id] = true end
+    local function replace_map(previous, next_value, setter)
+        for key, value in pairs(previous) do
+            if next_value[key] ~= value then setter(next_value); return end
+        end
+        for key, value in pairs(next_value) do
+            if previous[key] ~= value then setter(next_value); return end
+        end
+    end
+    solid.create_effect(function()
+        local list = panels()
+        solid.untrack(function()
+            local present, next_sizes, next_overrides, next_active = {}, {}, {}, {}
+            for _, panel in ipairs(list) do
+                present[panel.id] = true
+                next_sizes[panel.id] = sizes()[panel.id]
+                next_overrides[panel.id] = overrides()[panel.id]
+            end
+            for _, position in ipairs(positions) do
+                local panel = find(active()[position])
+                if panel then next_active[position_of(panel)] = panel.id end
+            end
+            for _, panel in ipairs(list) do
+                local position = position_of(panel)
+                if not known[panel.id] and panel.defaultOpen and not next_active[position] then
+                    next_active[position] = panel.id
+                end
+            end
+            known = present
+            solid.batch(function()
+                replace_map(sizes(), next_sizes, set_sizes)
+                replace_map(overrides(), next_overrides, set_overrides)
+                replace_map(active(), next_active, set_active)
+            end)
+        end)
+    end)
+    local edges = solid.create_memo(function()
+        local result = { left = 0, right = 0, bottom = 0 }
+        for _, panel in ipairs(panels()) do
+            if panel_open(panel) then result[position_of(panel)] = panel_size(panel) end
+        end
+        return result
+    end)
+    local function button_panels(position)
+        local result = {}
+        local list = panels()
+        local start, finish, step = 1, #list, 1
+        if position == "right" then start, finish, step = #list, 1, -1 end
+        for index = start, finish, step do
+            local panel = list[index]
+            if position_of(panel) == position and panel.hideButton ~= true then result[#result + 1] = panel end
+        end
+        return result
+    end
+    local function status_items()
+        local result = {}
+        local function append(position)
+            for _, panel in ipairs(button_panels(position)) do
+                result[#result + 1] = { kind = "panel", panel = panel,
+                    key = "panel:" .. type(panel.id) .. ":" .. tostring(panel.id) }
+            end
+        end
+        append("left")
+        result[#result + 1] = { kind = "spacer", key = "spacer" }
+        append("bottom")
+        if #button_panels("bottom") > 0 and #button_panels("right") > 0 then
+            result[#result + 1] = { kind = "separator", key = "separator" }
+        end
+        append("right")
+        return result
+    end
+    local status = <For each={status_items} key={function(item) return item.key end}
+            style={shared.merge(group_style, { flexGrow = 1, width = "100%", height = "100%" })}
+            render={function(record)
+                if record().kind == "spacer" then return <div style={{ flexGrow = 1 }} /> end
+                if record().kind == "separator" then
+                    return <div style={{ width = 1, height = 16, marginLeft = 3, marginRight = 3, background = "#3f3f46" }} />
+                end
+                local function item() return record().panel end
+                local function state()
+                    return { id = item().id, active = panel_open(item()), position = position_of(item()) }
+                end
+                local body = item().renderButton and item().renderButton(state)
+                    or <text style={{ color = state().active and "#fafafa" or "#a1a1aa", fontSize = 11 }}>
+                        {item().buttonLabel or item().label or tostring(item().id)}
+                    </text>
+                local button = <div testId={util.test_id(props.testId, "-button-" .. item().id)}
+                    tabIndex={item().tabIndex or 0}
+                    onClick={function() toggle(item()) end}
+                    onAuxClick={function(event)
+                        if event.isRightClick and event.x ~= nil and event.y ~= nil then
+                            local index = util.option_index({
+                                { value = "left" }, { value = "right" }, { value = "bottom" },
+                            }, position_of(item()))
+                            set_menu({ id = item().id, x = event.x, y = event.y, active = index })
+                        end
+                    end}
+                    style={shared.style(shared.merge(button_style, { background = state().active and "#3f3f46" or nil }),
+                        state().active and (item().activeButtonStyle or props.activeButtonStyle)
+                            or (item().buttonStyle or props.buttonStyle), state().active
+                                and shared.merge(state(), { active = true }) or state())}>
+                    {body}
+                </div>
+                local id = item().id
+                button_handles[id] = button
+                solid.on_cleanup(function()
+                    if button_handles[id] == button then button_handles[id] = nil end
+                end)
+                return button
+            end} />
+    local function menu_rows()
+        local current = menu()
+        local panel = current and find(current.id)
+        return panel and { panel } or {}
+    end
+    local function current_menu() return menu() or { x = 0, y = 0, active = 1 } end
+    return <div testId={props.testId} style={shared.style({
+        width = "100%", height = "100%", minWidth = 0, minHeight = 0, display = "flex",
+        flexDirection = "column", position = "relative", background = "#18181b" }, props.style, {})}>
+        <div style={shared.style({ display = "flex", flexDirection = "row", position = "relative",
+            flexGrow = 1, minWidth = 0, minHeight = 0 }, props.workspaceStyle, {})}>
+            <div style={{ display = "flex", flexDirection = "column", flexGrow = 1,
+                minWidth = 0, minHeight = 0, marginLeft = edges().left,
+                marginRight = edges().right, marginBottom = edges().bottom }}>
+                <div style={shared.style({ display = "flex", flexDirection = "row",
+                    flexGrow = 1, minWidth = 0, minHeight = 0 }, props.contentStyle, {})} children={props} />
+            </div>
+            <For each={panels} key={function(panel) return panel.id end}
+                style={{ position = "absolute", width = "100%", height = "100%", pointerEvents = "none" }}
+                render={function(item)
+                    local function state()
+                        return { id = item().id, open = panel_open(item()), position = position_of(item()),
+                            size = panel_size(item()), close = function() close(item()) end,
+                            toggle = function() toggle(item()) end }
+                    end
+                    local function drawer_style()
+                        local result = shared.style({}, item().style, state())
+                        result.position = "absolute"
+                        result.top, result.bottom, result.left, result.right = nil, nil, nil, nil
+                        if state().position == "left" then result.left, result.top = 0, 0
+                        elseif state().position == "right" then result.right, result.top = 0, 0
+                        else result.left, result.right, result.bottom = edges().left, edges().right, 0 end
+                        return result
+                    end
+                    return <Drawer testId={util.test_id(props.testId, "-panel-" .. item().id)}
+                        side={function() return position_of(item()) end}
+                        open={function() return panel_open(item()) end}
+                        size={function() return panel_size(item()) end}
+                        defaultSize={item().defaultSize} keepMounted
+                        minSize={function() return item().minSize or 160 end}
+                        maxSize={function() return item().maxSize or 720 end}
+                        resizable={function() return item().resizable ~= false end}
+                        resizeHandleSize={function() return item().resizeHandleSize or 6 end}
+                        resizeTabIndex={function() return item().resizeTabIndex or 0 end}
+                        onSizeChange={function(size) set_size(item(), size) end}
+                        onResizeStart={function(size) util.call(item().onResizeStart, size) end}
+                        onResizeEnd={function(size) util.call(item().onResizeEnd, size) end}
+                        style={drawer_style}
+                        contentStyle={function(drawer_state)
+                            return util.resolve_style(item().contentStyle, drawer_state)
+                        end}
+                        resizeHandleStyle={function(drawer_state)
+                            return util.resolve_style(item().resizeHandleStyle, drawer_state)
+                        end}
+                        renderContent={function()
+                            if item().render then return item().render(state) end
+                            return <div />
+                        end} />
+                end} />
+        </div>
+        <div style={shared.style({ width = "100%", height = 28, flexShrink = 0, display = "flex",
+            flexDirection = "row", alignItems = "center", paddingLeft = 4, paddingRight = 4,
+            gap = 3, borderTopWidth = 1, borderColor = "#3f3f46", background = "#18181b" }, props.statusBarStyle, {})}>
+            {status}
+        </div>
+        <For each={menu_rows} key={function(panel) return panel.id end}
+            style={{ position = "absolute", width = "100%", height = "100%", pointerEvents = "none" }}
+            render={function(item)
+                local function menu_state() return { panel = item() } end
+                local function choose(index) move_panel(item(), positions[index]) end
+                local function handle_key(event)
+                    local current = menu()
+                    if not current then return end
+                    if event.key == "escape" then
+                        set_menu(nil)
+                        if button_handles[item().id] then gpuix.focus(button_handles[item().id]) end
+                    elseif event.key == "up" or event.key == "left" then
+                        set_menu(shared.merge(current, { active = ((current.active - 2) % 3) + 1 }))
+                    elseif event.key == "down" or event.key == "right" then
+                        set_menu(shared.merge(current, { active = (current.active % 3) + 1 }))
+                    elseif event.key == "enter" or event.key == "space" then choose(current.active) end
+                end
+                return <anchored position={{ x = current_menu().x, y = current_menu().y }} side="top" align="end" gap={4}
+                    fit="snap" snapMargin={8} deferred priority={10}>
+                    <div testId={util.test_id(props.testId, "-button-menu")} autoFocus tabIndex={0}
+                        onMouseDownOutside={function() set_menu(nil) end} onKeyDown={handle_key}
+                        style={shared.style({ width = 150, padding = 5, gap = 2, borderRadius = 7,
+                            borderWidth = 1, borderColor = "#52525b", background = "#27272a",
+                            focus = util.focus_ring }, props.menuStyle, menu_state())}>
+                        <For each={function() return positions end} key={function(position) return position end}
+                            render={function(position, index)
+                                local function state()
+                                    return { panel = item(), position = position(),
+                                        selected = position_of(item()) == position(),
+                                        highlighted = current_menu().active == index() }
+                                end
+                                return <div testId={util.test_id(props.testId, "-button-" .. item().id .. "-dock-" .. position())}
+                                    onMouseEnter={function() set_menu(shared.merge(menu(), { active = index() })) end}
+                                    onClick={function() choose(index()) end}
+                                    style={shared.style({ padding = 7, borderRadius = 4,
+                                        background = state().highlighted and "#3f3f46" or "#27272a",
+                                        hover = { background = "#3f3f46" }, focus = util.focus_ring }, props.menuItemStyle, state())}>
+                                    <text>{(state().selected and "✓  " or "   ") .. "Dock " .. position()}</text>
+                                </div>
+                            end} />
+                    </div>
+                </anchored>
+            end} />
+    </div>
+end

@@ -492,6 +492,22 @@ impl RetainedTree {
         destroyed
     }
 
+    /// Unlink an element from its parent without destroying it, so a later
+    /// `replace_children` or `append_child` can attach it elsewhere.
+    pub fn detach(&mut self, id: u64) {
+        let Some(parent_id) = self
+            .elements
+            .get_mut(&id)
+            .and_then(|element| element.parent.take())
+        else {
+            return;
+        };
+        if let Some(parent) = self.elements.get_mut(&parent_id) {
+            parent.children.retain(|child| *child != id);
+        }
+        self.mark_changed(parent_id);
+    }
+
     fn destroy_element_recursive(&mut self, id: u64, destroyed: &mut Vec<u64>) {
         if let Some(element) = self.elements.remove(&id) {
             self.motion_ids.remove(&id);
