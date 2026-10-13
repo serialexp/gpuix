@@ -31,3 +31,8 @@
   Both predate the QuickJS work and come from upstream code. Neither runs in
   CI, so they accumulate. Decide whether to fix them here or upstream, then
   add both checks to CI.
+- Offer the quickjs-ng `Map`/`Set` hash fix upstream (rust-js-vm
+  `patches/rquickjs-sys-0.14.0-map-hash-mix.diff`, repro in
+  `examples/map_hash.rs`): rebase onto quickjs-ng main, prepare the PR text,
+  and Bart opens it (the local `gh` token can't reach quickjs-ng). Once
+  rquickjs ships it, gpuix can drop its vendored rquickjs-sys.

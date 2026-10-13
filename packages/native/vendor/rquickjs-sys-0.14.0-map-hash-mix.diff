@@ -1,0 +1,64 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -36,6 +36,8 @@
+ [features]
+ bindgen = ["bindgen-rs"]
+ disable-assertions = []
++# Local patch: mix Map/Set key hashes before taking the bucket.
++map-hash-mix = []
+ dump-atoms = []
+ dump-bytecode = []
+ dump-free = []
+--- a/build.rs
++++ b/build.rs
+@@ -111,6 +111,7 @@
+         "dump-promise",
+         "dump-read-object",
+         "disable-assertions",
++        "map-hash-mix",
+     ];
+ 
+     for feature in &features {
+@@ -146,6 +147,8 @@
+ 
+     #[cfg(feature = "disable-assertions")]
+     defines.push(("NDEBUG".into(), None));
++    #[cfg(feature = "map-hash-mix")]
++    defines.push(("RQUICKJS_MAP_HASH_MIX".into(), None));
+ 
+     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap();
+@@ -154,6 +157,9 @@
+     builder
+         .extra_warnings(false)
+         .flag_if_supported("-Wno-implicit-const-int-float-conversion")
++        // Local patch: with NDEBUG some variables only feed asserts. Cargo
++        // shows C warnings for path dependencies, so keep the build quiet.
++        .flag_if_supported("-Wno-unused-but-set-variable")
+         //.flag("-Wno-array-bounds")
+         //.flag("-Wno-format-truncation")
+         ;
+--- a/quickjs/quickjs.c
++++ b/quickjs/quickjs.c
+@@ -53380,7 +53380,20 @@
+         h = 0;
+         break;
+     }
+-    return h ^ ctx->hash_seed ^ hash32(tag);
++    h ^= ctx->hash_seed ^ hash32(tag);
++#ifdef RQUICKJS_MAP_HASH_MIX
++    /* The multiplications above move entropy into the high bits, but the
++       bucket is taken from the low bits. Small integers and aligned object
++       pointers have constant low bits, so without this final mix (the
++       MurmurHash3 finalizer) most keys share a few buckets and Map/Set
++       lookups degrade towards a linear scan. */
++    h ^= h >> 16;
++    h *= 0x85ebca6b;
++    h ^= h >> 13;
++    h *= 0xc2b2ae35;
++    h ^= h >> 16;
++#endif
++    return h;
+ }
+ 
+ static JSMapRecord *map_find_record(JSContext *ctx, JSMapState *s,

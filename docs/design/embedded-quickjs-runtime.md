@@ -26,6 +26,23 @@ Tracking the gap between this design and what's on the main branch.
   used by the Lua runtime and `lua_app.rs` (same commit)
 - [x] Phase 1: Lua behavior unchanged: every existing Lua test passes, on
   Lua 5.4 and LuaJIT (same commit)
+- [x] Phase 2: `quickjs` cargo feature with vendored rquickjs-sys and the
+  Map hash fix (`packages/native/vendor/`), excluded from wasm builds and
+  from the default features until Phase 4 uses it (`feat(native): add the
+  embedded QuickJS host`)
+- [x] Phase 2: QuickJS host globals: timers (with Node's delay limits and
+  the browser's nesting clamp), microtasks, `console` (Node-style
+  formatting), `performance.now`, `queueMicrotask`, `structuredClone`
+  (`src/quickjs/prelude.js`, same commit)
+- [x] Phase 2: native `applyBatch` over `apply_batch_to_tree`, so
+  `createMutationQueue` runs unchanged (same commit)
+- [x] Phase 2: event dispatch into QuickJS: `QuickJsRuntime::dispatch_event`
+  sends an `EventPayload` to the handler JS registers with
+  `__gpuix.setEventHandler`, which Phase 3's `@gpuix/native` shim points at
+  `createRendererState(renderer).dispatch`. `preventDefault` and
+  `stopPropagation` stay in JS, as under Node, so nothing returns to Rust.
+  Connecting GPUI's event callback is the app loop's job (Phase 4) (same
+  commit)
 
 ### Outstanding
 
@@ -35,15 +52,17 @@ Tracking the gap between this design and what's on the main branch.
 - [ ] Phase 1 (dropped 2026-10-13): direct host and its swap-safe flush.
   Lua's Solid layer is not a direct host, and QuickJS reuses
   `apply_batch_to_tree` (see the Shared core update)
-- [ ] Phase 2: `quickjs` cargo feature with vendored rquickjs-sys and the
-  Map hash fix, excluded from wasm builds
-- [ ] Phase 2: QuickJS host globals: timers, microtasks, `console`,
-  `performance.now`, `queueMicrotask`, `structuredClone`
-- [ ] Phase 2: native `applyBatch` for QuickJS over `apply_batch_to_tree`,
-  so `createMutationQueue` runs unchanged (was: a 13-method binding into a
-  direct host; see the Shared core update)
-- [ ] Phase 2: event dispatch from GPUI into QuickJS, and the
-  `preventDefault` / `stopPropagation` return path
+- [ ] Phase 2 follow-up: React commits after a click wait for a timer
+  round. `@gpuix/react`'s host config doesn't set `supportsMicrotasks`, so
+  React schedules the work with `setImmediate`, and `dispatch_event`
+  returns before the commit. The app loop (Phase 4) must call `run_timers`
+  right after each event, or the host config could opt into microtasks,
+  which changes the Node path too (needs Bart's call)
+- [ ] Phase 2 follow-up: the optional `NativeRenderer` methods on
+  `__gpuix.renderer` (`focusNext`, `focusPrevious`, `getFocusedElementId`
+  and the rest), which `renderer-state.ts` uses for Tab and dismiss layers,
+  and a GC hook for `idle-gc.ts` and Solid 2.0's cycles. Due with Phase 4,
+  when a window exists to answer them
 - [ ] Phase 3: oxc compile of app `.ts`/`.tsx`/`.jsx` files (TypeScript strip,
   React automatic JSX with `importSource: "@gpuix/react"`)
 - [ ] Phase 3: ESM module loader: relative app modules compiled on load, bare
@@ -202,6 +221,17 @@ option, in which case they move into the core as well (rust-js-vm
   jobs run after each event, `console` to stderr, `performance.now`,
   `structuredClone`. React's scheduler falls back to `setTimeout` when
   `MessageChannel` is missing, so that isn't needed.
+> **2026-10-13 update:** Phase 2 shipped as `src/quickjs/mod.rs` and
+> `prelude.js`. JS reaches the tree through `__gpuix.renderer.applyBatch`
+> (JSON batches, as decided under Shared core) rather than a native
+> `MutationRenderer` object. The runtime borrows the caller's
+> `RetainedTree` for each call that runs JS, so windows keep owning their
+> trees. Timers are kept in JS and driven from Rust: `run_timers` runs the
+> due ones, `next_timer` says when to wake. An exception, a failed promise
+> job, an unhandled rejection or `reportError` fails the call it happened
+> in. A panic in a native function fails the call even if JS catches the
+> exception it turns into.
+
 - rust-js-vm's `src/js/raw.rs` fast path (reading props as atoms and integer
   tokens from value tags) took 10–15% off full renders. It only applies to
   the deferred Rust-reconciler option, since the `MutationRenderer` binding

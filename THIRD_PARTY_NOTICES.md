@@ -75,6 +75,17 @@ is in two-face's
 | fancy-regex | MIT | https://github.com/fancy-regex/fancy-regex |
 | two-face crate | MIT OR Apache-2.0 | https://codeberg.org/CosmicHarper/two-face |
 
+## Embedded JavaScript engine
+
+Native builds with the `quickjs` feature compile in
+**[quickjs-ng](https://github.com/quickjs-ng/quickjs)** (MIT, Copyright (c)
+2017-2026 Fabrice Bellard, 2017-2024 Charlie Gordon, 2023-2026 Ben Noordhuis
+and 2023-2026 Saúl Ibarra Corretgé)
+through **[rquickjs](https://github.com/DelSkayn/rquickjs)** (MIT). Its
+`rquickjs-sys` crate is vendored in `packages/native/vendor/` with a small
+patch to quickjs-ng's Map and Set hashing; `packages/native/vendor/README.md`
+describes it.
+
 ## Other dependencies
 
 | Component | License | Source |

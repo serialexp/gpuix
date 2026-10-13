@@ -26,6 +26,12 @@ mod markdown;
 mod motion;
 #[cfg(any(feature = "lua54", feature = "luajit"))]
 mod phosphor;
+// The embedded JavaScript engine. The browser build runs JS in the browser.
+#[cfg(all(
+    feature = "quickjs",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+mod quickjs;
 mod renderer;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod script;

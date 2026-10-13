@@ -65,6 +65,10 @@ url = { version = "2", features = ["serde"] }
 napi = { version = "3.12.7", features = ["napi8", "serde-json"] }
 napi-derive = "3.6.8"
 mlua = { version = "0.11", default-features = false, features = ["serialize", "send"] }
+# The embedded JavaScript engine, behind the `quickjs` feature. rquickjs-sys is
+# patched below.
+rquickjs = { version = "0.14", optional = true }
+rquickjs-sys = { version = "0.14", optional = true }
 
 # The slow half of the engine split above. fancy-regex is pure Rust, so it is
 # the only Syntect engine that builds here, and the browser still pays ~133ms on
@@ -101,6 +105,19 @@ default = ["test-support", "lua54"]
 test-support = ["gpui/test-support", "gpui_platform/test-support", "gpui_macos/test-support", "gpui_macos/font-kit"]
 lua54 = ["mlua/lua54", "mlua/vendored"]
 luajit = ["mlua/luajit", "mlua/vendored"]
+# The QuickJS engine (quickjs-ng through rquickjs). Not in wasm builds.
+# - map-hash-mix: quickjs-ng takes Map and Set buckets from the low bits of a
+#   hash whose low bits are constant for small integers and object pointers,
+#   so those maps degrade towards linear scans. Solid's `For` keys a Map by
+#   both: reversing 10,000 rows takes 75 ms without the fix and 13 ms with it.
+# - disable-assertions: quickjs-ng's C asserts are on unless this is set. The
+#   vendored Lua builds without API checks too.
+quickjs = ["dep:rquickjs", "rquickjs/disable-assertions", "dep:rquickjs-sys", "rquickjs-sys/map-hash-mix"]
+
+# rquickjs-sys 0.14.0 with vendor/rquickjs-sys-0.14.0-map-hash-mix.diff applied
+# behind its `map-hash-mix` feature. See vendor/README.md.
+[patch.crates-io]
+rquickjs-sys = { path = "vendor/rquickjs-sys" }
 
 [build-dependencies]
 napi-build = "2.4.4"

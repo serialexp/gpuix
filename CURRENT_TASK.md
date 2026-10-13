@@ -46,6 +46,10 @@ built-in JSX/TSX compilation) behind a shared core.
    measurements are done (in rust-js-vm; numbers under open question 1 and
    in rust-js-vm's README), and open question 1 is settled: real
    `@gpuix/react`. Phase 1 is done, rescoped: `src/script/app.rs` and
-   `reload.rs` (see the doc's 2026-10-13 notes). Next is Phase 2: the
-   `quickjs` feature, host globals, and a native `applyBatch` over
-   `apply_batch_to_tree`.
+   `reload.rs` (see the doc's 2026-10-13 notes). Phase 2 is done:
+   `src/quickjs/` behind the `quickjs` feature, tested from Rust with
+   `cargo test --lib --features quickjs --target-dir
+   /private/tmp/gpuix-quickjs-target quickjs::`. Two follow-ups are in the
+   doc's Outstanding list (React commits waiting for a timer round; the
+   optional `NativeRenderer` methods). Next is Phase 3: oxc compile,
+   module loader, embedded bundles.

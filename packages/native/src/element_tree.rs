@@ -9,15 +9,11 @@
 use napi_derive::napi;
 
 /// Event payload sent back to JS when a user interacts with an element.
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    all(target_arch = "wasm32", target_os = "unknown"),
-    derive(serde::Serialize)
-)]
-#[cfg_attr(
-    all(target_arch = "wasm32", target_os = "unknown"),
-    serde(rename_all = "camelCase")
-)]
+///
+/// napi converts it for Node. The browser build and the embedded QuickJS
+/// engine send it as JSON, where an absent field is `null`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), napi(object))]
 pub struct EventPayload {
     /// Numeric element ID (matches the ID assigned in JS via createElement).
@@ -178,11 +174,7 @@ impl Default for EventPayload {
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    all(target_arch = "wasm32", target_os = "unknown"),
-    derive(serde::Serialize)
-)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), napi(object))]
 pub struct EventModifiers {
     pub shift: bool,
