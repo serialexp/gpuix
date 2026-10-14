@@ -1218,14 +1218,10 @@ impl GpuixRenderer {
             ));
         }
 
-        let width = options.width.unwrap_or(800.0);
-        let height = options.height.unwrap_or(600.0);
-        let title = options.title.clone().unwrap_or_else(|| "GPUIX".to_string());
-        let app_name = options.app_name.clone().unwrap_or_else(|| title.clone());
-        // `focus: false` must also skip `cx.activate`: the window flag only
-        // decides key status inside the app, activation is what steals focus.
-        let activate = options.focus.unwrap_or(true);
-        let window_options = options.clone();
+        let app_name = options
+            .app_name
+            .clone()
+            .unwrap_or_else(|| options.title_or_default());
 
         let platform = Rc::new(gpui_macos::MacPlatform::new_embedded());
 
@@ -1242,34 +1238,10 @@ impl GpuixRenderer {
         let app = gpui::Application::with_platform(platform.clone())
             .with_quit_mode(gpui::QuitMode::LastWindowClosed);
         let app_handle = app.run_embedded(move |cx: &mut gpui::App| {
-            crate::custom_elements::input::init(cx);
-            crate::custom_elements::img::init(cx);
-            // After the other bindings: `set_menus` reads key equivalents out of
-            // the keymap, so every binding must exist before it runs.
-            crate::app_menu::init(&app_name, cx);
-            let bounds = gpui::Bounds::centered(
-                None,
-                gpui::size(gpui::px(width as f32), gpui::px(height as f32)),
-                cx,
-            );
-
-            match cx.open_window(
-                to_gpui_window_options(&window_options, bounds),
-                |_window, cx| {
-                    cx.new(|_| {
-                        GpuixView::new(tree.clone(), callback.clone(), title, selection.clone())
-                    })
-                },
-            ) {
-                Ok(window_handle) => {
-                    *opened_window_for_app.borrow_mut() = Some(window_handle);
-                    if activate {
-                        cx.activate(true);
-                    }
-                }
-                Err(error) => {
-                    *startup_error_for_app.borrow_mut() = Some(error.to_string());
-                }
+            init_app(&app_name, cx);
+            match open_main_window(&options, tree, callback, selection, cx) {
+                Ok(window_handle) => *opened_window_for_app.borrow_mut() = Some(window_handle),
+                Err(error) => *startup_error_for_app.borrow_mut() = Some(error),
             }
         });
 
@@ -1347,13 +1319,10 @@ impl GpuixRenderer {
             return Err(Error::from_reason("Renderer is already initialized"));
         }
 
-        let width = options.width.unwrap_or(800.0);
-        let height = options.height.unwrap_or(600.0);
-        let title = options.title.clone().unwrap_or_else(|| "GPUIX".to_string());
-        // `focus: false` must also skip `cx.activate`: the window flag only
-        // decides key status inside the app, activation is what steals focus.
-        let activate = options.focus.unwrap_or(true);
-        let window_options = options.clone();
+        let app_name = options
+            .app_name
+            .clone()
+            .unwrap_or_else(|| options.title_or_default());
         let tree = self.tree.clone();
         let selection = self.selection.clone();
         let callback = self.event_callback_for_view();
@@ -1375,44 +1344,25 @@ impl GpuixRenderer {
                     gpui_platform::application()
                         .with_quit_mode(gpui::QuitMode::LastWindowClosed)
                         .run(move |cx| {
-                            crate::custom_elements::input::init(cx);
-                            crate::custom_elements::img::init(cx);
-                            let size = gpui::size(gpui::px(width as f32), gpui::px(height as f32));
-                            // A layer-shell surface is positioned by the compositor from its
-                            // anchor, so it opens at the origin; a normal window is centered.
-                            let bounds = if window_options.layer_shell.is_some() {
-                                gpui::Bounds {
-                                    origin: gpui::point(gpui::px(0.0), gpui::px(0.0)),
-                                    size,
-                                }
-                            } else {
-                                gpui::Bounds::centered(None, size, cx)
-                            };
-                            let window = match cx.open_window(
-                                to_gpui_window_options(&window_options, bounds),
-                                |_window, cx| {
-                                    cx.new(|_| GpuixView::new(tree, callback, title, selection))
-                                },
-                            ) {
-                                Ok(window) => window,
-                                Err(error) => {
-                                    startup_sender
-                                        .send(Err(format!(
-                                            "Failed to open the GPUI window: {error}"
-                                        )))
-                                        .ok();
-                                    cx.quit();
-                                    return;
-                                }
-                            };
+                            init_app(&app_name, cx);
+                            let window =
+                                match open_main_window(&options, tree, callback, selection, cx) {
+                                    Ok(window) => window,
+                                    Err(error) => {
+                                        startup_sender
+                                            .send(Err(format!(
+                                                "Failed to open the GPUI window: {error}"
+                                            )))
+                                            .ok();
+                                        cx.quit();
+                                        return;
+                                    }
+                                };
 
                             cx.spawn(async move |cx| {
                                 run_ui_commands(command_receiver, window, cx).await;
                             })
                             .detach();
-                            if activate {
-                                cx.activate(true);
-                            }
                             ui_running_for_run.store(true, Ordering::Release);
                             startup_sender.send(Ok(())).ok();
                         });
@@ -7526,7 +7476,9 @@ pub struct DebugFrameOverlayStats {
 /// wallpaper) with no native titlebar instead of a normal floating window.
 /// `width` / `height` then only constrain the axis the surface is not
 /// stretched along by its `anchor`.
-#[derive(Debug, Clone, Default)]
+// Deserialize: the embedded QuickJS runtime gets these as JSON.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), napi(object))]
 pub struct LayerShellOptions {
     /// Compositor surface namespace, used for window rules. Cannot be changed
@@ -7554,7 +7506,8 @@ pub struct LayerShellOptions {
     pub keyboard_interactivity: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), napi(object))]
 pub struct WindowOptions {
     pub title: Option<String>,
@@ -7616,6 +7569,12 @@ impl Default for WindowOptions {
     }
 }
 
+impl WindowOptions {
+    pub(crate) fn title_or_default(&self) -> String {
+        self.title.clone().unwrap_or_else(|| "GPUIX".to_string())
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn layer_shell_anchor_bit(name: &str) -> gpui::layer_shell::Anchor {
     use gpui::layer_shell::Anchor;
@@ -7673,11 +7632,62 @@ fn to_layer_shell_options(options: &LayerShellOptions) -> gpui::layer_shell::Lay
     }
 }
 
+/// Installs what every desktop GPUIX app needs before its first window: the
+/// `input` element's key bindings, the `img` element's HTTP client and, on
+/// macOS, the app menu. The menu comes last because `set_menus` reads key
+/// equivalents out of the keymap, so every binding must exist by then.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) fn init_app(app_name: &str, cx: &mut gpui::App) {
+    crate::custom_elements::input::init(cx);
+    crate::custom_elements::img::init(cx);
+    #[cfg(target_os = "macos")]
+    crate::app_menu::init(app_name, cx);
+    #[cfg(not(target_os = "macos"))]
+    let _ = app_name;
+}
+
+/// Opens the one window a single-window GPUIX app draws `tree` in: centered,
+/// or at the origin for a Linux layer-shell surface, which the compositor
+/// places from its anchor (elsewhere `layerShell` is ignored). Activates the app unless `focus` is false: the window
+/// flag only decides key status inside the app, activation is what takes
+/// focus from the active app.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) fn open_main_window(
+    options: &WindowOptions,
+    tree: Arc<Mutex<RetainedTree>>,
+    callback: Option<EventCallback>,
+    selection: SharedSelection,
+    cx: &mut gpui::App,
+) -> std::result::Result<gpui::WindowHandle<GpuixView>, String> {
+    let size = gpui::size(
+        gpui::px(options.width.unwrap_or(800.0) as f32),
+        gpui::px(options.height.unwrap_or(600.0) as f32),
+    );
+    let bounds = if cfg!(target_os = "linux") && options.layer_shell.is_some() {
+        gpui::Bounds {
+            origin: gpui::point(gpui::px(0.0), gpui::px(0.0)),
+            size,
+        }
+    } else {
+        gpui::Bounds::centered(None, size, cx)
+    };
+    let title = options.title_or_default();
+    let window = cx
+        .open_window(to_gpui_window_options(options, bounds), |_window, cx| {
+            cx.new(|_| GpuixView::new(tree, callback, title, selection))
+        })
+        .map_err(|error| error.to_string())?;
+    if options.focus.unwrap_or(true) {
+        cx.activate(true);
+    }
+    Ok(window)
+}
+
 fn to_gpui_window_options(
     options: &WindowOptions,
     bounds: gpui::Bounds<gpui::Pixels>,
 ) -> gpui::WindowOptions {
-    let title = options.title.clone().unwrap_or_else(|| "GPUIX".to_string());
+    let title = options.title_or_default();
     let titlebar_transparent = options.titlebar_transparent.unwrap_or(false);
     let traffic_light_position = match (options.traffic_light_x, options.traffic_light_y) {
         (Some(x), Some(y)) => Some(gpui::point(gpui::px(x as f32), gpui::px(y as f32))),

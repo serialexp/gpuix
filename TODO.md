@@ -36,3 +36,7 @@
 - QuickJS app modules have `import.meta` but no `import.meta.url`, so
   `new URL("./icon.png", import.meta.url)` fails. Set it to the module's
   `file://` URL when the loader declares a module (Phase 4 or 5).
+- `gpx --watch` watches the files in the entry file's directory tree, so a
+  JavaScript app that imports from outside it (`../shared/x.ts`) doesn't
+  reload when that file changes. Watch the modules the QuickJS loader
+  actually loaded instead (it knows their paths).

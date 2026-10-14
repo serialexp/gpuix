@@ -32,6 +32,11 @@ mod phosphor;
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 mod quickjs;
+#[cfg(all(
+    feature = "quickjs",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+mod quickjs_app;
 mod renderer;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod script;
@@ -55,7 +60,14 @@ mod test_renderer;
 pub use element_tree::*;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use lua_app::*;
+#[cfg(all(
+    feature = "quickjs",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+pub use quickjs_app::*;
 pub use renderer::*;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub use script::AppOptions;
 pub use style::*;
 
 #[cfg(any(test, not(feature = "test-support")))]

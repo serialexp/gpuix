@@ -1,6 +1,6 @@
 # GPUIX Lua components
 
-These modules are bundled into `gpuix-lua` and loaded through ordinary Lua
+These modules are bundled into `gpx` and loaded through ordinary Lua
 imports:
 
 ```lua

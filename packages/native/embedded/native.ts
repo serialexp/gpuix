@@ -6,6 +6,7 @@
 import type { EventPayload, WindowOptions } from "../index.js"
 
 interface EmbeddedHost {
+  init(json: string): void
   renderer: { applyBatch(json: string): number[] }
   setEventHandler(handler: ((event: EventPayload) => unknown) | undefined): void
 }
@@ -17,8 +18,10 @@ export class GpuixRenderer {
     __gpuix.setEventHandler(eventCallback ? (event) => eventCallback(null, event) : undefined)
   }
 
-  /** The host opens the window from its own command line; options aren't applied yet. */
-  init(_options?: WindowOptions | null): void {}
+  /** The host opens the window with these options once the app has loaded. */
+  init(options?: WindowOptions | null): void {
+    __gpuix.init(JSON.stringify(options ?? {}))
+  }
 
   applyBatch(json: string): number[] {
     return __gpuix.renderer.applyBatch(json)

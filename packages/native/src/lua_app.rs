@@ -13,26 +13,8 @@ use crate::renderer::{EventCallback, GpuixView};
 use crate::retained_tree::RetainedTree;
 use crate::script::app::{AppCommand, WindowOptions};
 use crate::script::reload::{self, ReloadOutcome};
+use crate::script::{default_title, AppOptions};
 use crate::text::SharedSelection;
-
-#[derive(Clone, Debug)]
-pub struct LuaAppOptions {
-    pub title: Option<String>,
-    pub width: f32,
-    pub height: f32,
-    pub watch: bool,
-}
-
-impl Default for LuaAppOptions {
-    fn default() -> Self {
-        Self {
-            title: None,
-            width: 800.0,
-            height: 600.0,
-            watch: false,
-        }
-    }
-}
 
 pub fn check_lua_file(path: impl AsRef<Path>) -> Result<(), String> {
     let path = path.as_ref();
@@ -44,7 +26,7 @@ pub fn check_lua_file(path: impl AsRef<Path>) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<(), String> {
+pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), String> {
     let path = path.as_ref().to_path_buf();
     let runtime = LuaRuntime::load_application_file(&path)?;
     let application_entry = runtime.is_application_entry();
@@ -58,8 +40,8 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<()
             .title
             .clone()
             .unwrap_or_else(|| default_title(&path));
-        main.width = options.width;
-        main.height = options.height;
+        main.width = options.width.unwrap_or(main.width);
+        main.height = options.height.unwrap_or(main.height);
     }
     if !window_options.iter().any(|window| window.open) {
         return Err("Lua application must open at least one window at startup".to_string());
@@ -77,9 +59,7 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<()
         .with_quit_mode(gpui::QuitMode::LastWindowClosed)
         .run(move |cx| {
             crate::renderer::init_lua_focus_key_bindings(cx);
-            crate::custom_elements::input::init(cx);
-            #[cfg(target_os = "macos")]
-            crate::app_menu::init(&app_name, cx);
+            crate::renderer::init_app(&app_name, cx);
 
             let (event_sender, mut event_receiver) = futures::channel::mpsc::unbounded();
             let windows = Rc::new(LuaWindows::default());
@@ -128,12 +108,7 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<()
                     close_trees.borrow_mut().remove(&id);
                 }
                 close_runtime.lock().unwrap().unmount_window(&id);
-                reconcile_dirty_windows(
-                    &close_runtime,
-                    &close_windows,
-                    &close_trees,
-                    cx,
-                );
+                reconcile_dirty_windows(&close_runtime, &close_windows, &close_trees, cx);
             })
             .detach();
 
@@ -225,10 +200,6 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<()
             .detach();
 
             if options.watch {
-                let watch_root = path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .to_path_buf();
                 let watch_path = path.clone();
                 let runtime_for_reload = runtime.clone();
                 let windows_for_reload = windows.clone();
@@ -237,7 +208,7 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<()
                 let window_bounds_for_reload = window_bounds.clone();
                 let definitions_for_reload = definitions.clone();
                 let event_sender_for_reload = event_sender.clone();
-                let mut reload_receiver = watch_sources(watch_root);
+                let mut reload_receiver = watch_sources(&path);
                 cx.spawn(async move |cx| {
                     while reload_receiver.next().await.is_some() {
                         if application_entry {
@@ -248,7 +219,7 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<()
                             let reload = match reload {
                                 Ok(reload) => reload,
                                 Err(error) => {
-                                    eprintln!("gpuix-lua: reload failed: {error}");
+                                    eprintln!("gpx: reload failed: {error}");
                                     continue;
                                 }
                             };
@@ -284,11 +255,9 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<()
                                 };
                                 match result {
                                     Ok(ReloadOutcome::PreservedState) => {}
-                                    Ok(ReloadOutcome::ResetState) => {
-                                        reset_state = true
-                                    }
+                                    Ok(ReloadOutcome::ResetState) => reset_state = true,
                                     Err(error) => {
-                                        eprintln!("gpuix-lua: window {id:?} reload failed: {error}");
+                                        eprintln!("gpx: window {id:?} reload failed: {error}");
                                         continue;
                                     }
                                 }
@@ -323,15 +292,15 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<()
                                     )
                                 });
                                 if let Err(error) = result {
-                                    eprintln!("gpuix-lua: reload failed: {error}");
+                                    eprintln!("gpx: reload failed: {error}");
                                 }
                             }
                             if reset_state {
                                 eprintln!(
-                                    "gpuix-lua: reloaded (hook signature changed; affected state reset)"
+                                    "gpx: reloaded (hook signature changed; affected state reset)"
                                 );
                             } else {
-                                eprintln!("gpuix-lua: reloaded (state preserved)");
+                                eprintln!("gpx: reloaded (state preserved)");
                             }
                             continue;
                         }
@@ -344,13 +313,13 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<()
                             .reload_file(&watch_path, &mut tree.lock().unwrap());
                         match result {
                             Ok(ReloadOutcome::PreservedState) => {
-                                eprintln!("gpuix-lua: reloaded (state preserved)")
+                                eprintln!("gpx: reloaded (state preserved)")
                             }
                             Ok(ReloadOutcome::ResetState) => eprintln!(
-                                "gpuix-lua: reloaded (hook signature changed; affected state reset)"
+                                "gpx: reloaded (hook signature changed; affected state reset)"
                             ),
                             Err(error) => {
-                                eprintln!("gpuix-lua: reload failed: {error}");
+                                eprintln!("gpx: reload failed: {error}");
                                 continue;
                             }
                         }
@@ -361,7 +330,10 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: LuaAppOptions) -> Result<()
                 })
                 .detach();
             }
-            if initial_windows.iter().any(|window| window.open && window.focus) {
+            if initial_windows
+                .iter()
+                .any(|window| window.open && window.focus)
+            {
                 cx.activate(true);
             }
         });
@@ -618,24 +590,22 @@ fn reconcile_dirty_windows<C: gpui::AppContext>(
     }
 }
 
-fn watch_sources(root: std::path::PathBuf) -> futures::channel::mpsc::UnboundedReceiver<()> {
-    reload::watch_sources(root, is_lua_source, "gpuix-lua")
+fn watch_sources(entry: &Path) -> futures::channel::mpsc::UnboundedReceiver<()> {
+    reload::watch_sources(entry, is_lua_source, "gpx")
 }
 
-fn is_lua_source(path: &Path) -> bool {
+/// The extensions of the files the Lua runtime loads, in any case.
+pub const LUA_EXTENSIONS: [&str; 2] = ["lua", "luax"];
+
+/// Whether `path` is a Lua or LuaX source, which `gpx` runs as a Lua app.
+pub fn is_lua_source(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("lua") || extension.eq_ignore_ascii_case("luax")
+            LUA_EXTENSIONS
+                .iter()
+                .any(|lua| extension.eq_ignore_ascii_case(lua))
         })
-}
-
-fn default_title(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("GPUIX Lua")
-        .to_string()
 }
 
 #[cfg(test)]
@@ -644,12 +614,6 @@ mod tests {
 
     use super::*;
     use crate::element_tree::EventPayload;
-
-    #[test]
-    fn title_defaults_to_the_source_stem() {
-        assert_eq!(default_title(Path::new("examples/counter.luax")), "counter");
-        assert_eq!(default_title(Path::new("")), "GPUIX Lua");
-    }
 
     #[test]
     fn remembered_bounds_are_used_unless_repositioning_is_requested() {
@@ -990,7 +954,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let source = root.join("main.lua");
         std::fs::write(&source, "return function() end").unwrap();
-        let mut receiver = watch_sources(root.clone());
+        let mut receiver = watch_sources(&source);
         std::thread::sleep(Duration::from_millis(150));
         std::fs::write(&source, "return function() return nil end").unwrap();
 

@@ -6,6 +6,7 @@
 //   __gpuix.print(level, message)  console output
 //   __gpuix.reportError(message)   an error the app reported but didn't throw
 //   __gpuix.proxyTarget(value)     a proxy's target, or undefined
+//   __gpuix.init(json)             the window options `render()` passes
 //   __gpuix.renderer.applyBatch(json)
 //
 // It adds what Rust calls back into: `dispatchEvent`, `dueTimers`,

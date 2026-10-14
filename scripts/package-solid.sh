@@ -9,14 +9,15 @@ fi
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 export MACOSX_DEPLOYMENT_TARGET=14.0
-cargo build --release --manifest-path packages/native/Cargo.toml --no-default-features --features lua54 --bin gpuix-lua
+(cd packages/native && bun run build:embedded)
+cargo build --release --manifest-path packages/native/Cargo.toml --no-default-features --features lua54,quickjs --bin gpx
 
 mkdir -p dist
 stage="$(mktemp -d "$root/dist/.solid-package.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
 app="$stage/GPUIX Solid.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/app"
-cp packages/native/target/release/gpuix-lua "$app/Contents/MacOS/GPUIX Solid"
+cp packages/native/target/release/gpx "$app/Contents/MacOS/GPUIX Solid"
 cp -R examples/solid-workspace/. "$app/Contents/Resources/app/"
 
 cat > "$app/Contents/Info.plist" <<'PLIST'

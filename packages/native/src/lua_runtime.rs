@@ -2330,7 +2330,7 @@ impl LuaRuntime {
             let callback = match self.lua.registry_value::<Function>(callback.as_ref()) {
                 Ok(callback) => callback,
                 Err(error) => {
-                    eprintln!("gpuix-lua effect error: {error}");
+                    eprintln!("gpuix: Lua effect error: {error}");
                     continue;
                 }
             };
@@ -2339,7 +2339,7 @@ impl LuaRuntime {
                 Ok(Value::Function(cleanup)) => match self.lua.create_registry_value(cleanup) {
                     Ok(cleanup) => Some(Arc::new(cleanup)),
                     Err(error) => {
-                        eprintln!("gpuix-lua effect error: {error}");
+                        eprintln!("gpuix: Lua effect error: {error}");
                         continue;
                     }
                 },
@@ -2351,12 +2351,12 @@ impl LuaRuntime {
                     None
                 }
                 Err(error) => {
-                    eprintln!("gpuix-lua effect error: {error}");
+                    eprintln!("gpuix: Lua effect error: {error}");
                     None
                 }
             };
             if let Err(error) = self.hooks.lock().unwrap().set_effect_cleanup(&id, cleanup) {
-                eprintln!("gpuix-lua effect error: {error}");
+                eprintln!("gpuix: Lua effect error: {error}");
             }
         }
     }
@@ -2411,7 +2411,7 @@ fn run_effect_cleanups(lua: &Lua, jobs: &[EffectJob]) {
             .registry_value::<Function>(cleanup.as_ref())
             .and_then(|cleanup| cleanup.call::<()>(()))
         {
-            eprintln!("gpuix-lua effect cleanup error: {error}");
+            eprintln!("gpuix: Lua effect cleanup error: {error}");
         }
     }
 }
@@ -2447,7 +2447,7 @@ fn compile_entry(
     };
     let chunk_name = path
         .map(|path| format!("@{}", path.display()))
-        .unwrap_or_else(|| "=gpuix-lua".to_string());
+        .unwrap_or_else(|| "=gpuix".to_string());
     lua.load(&source)
         .set_name(chunk_name)
         .into_function()
@@ -2839,7 +2839,7 @@ fn dispatch_store(
             .registry_value::<Function>(listener.as_ref())
             .and_then(|listener| listener.call::<()>(()));
         if let Err(error) = result {
-            eprintln!("gpuix-lua store listener error: {error}");
+            eprintln!("gpuix: Lua store listener error: {error}");
         }
     }
     Ok(action)

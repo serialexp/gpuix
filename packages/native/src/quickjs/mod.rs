@@ -22,10 +22,6 @@
 //! `reportError`. The rest of the call's work still runs, and every failure
 //! is in the error, in order.
 
-// The app binary uses this from Phase 4 of the design; until then only the
-// tests do.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
@@ -42,13 +38,15 @@ use rquickjs::{
 };
 
 use crate::element_tree::EventPayload;
-use crate::renderer::apply_batch_to_tree;
+use crate::renderer::{apply_batch_to_tree, WindowOptions};
 use crate::retained_tree::RetainedTree;
 
 mod compile;
 mod modules;
 #[cfg(test)]
 mod tests;
+
+pub(crate) use compile::EXTENSIONS;
 
 const PRELUDE: &str = include_str!("prelude.js");
 
@@ -109,6 +107,10 @@ struct Shared {
     /// Each compiled app module's positions, by module name, for stack
     /// traces.
     positions: RefCell<HashMap<String, compile::PositionMap>>,
+    /// The options the app's renderer passed to `init`, once it has.
+    window_options: RefCell<Option<WindowOptions>>,
+    /// Whether a batch changed the tree since the host last asked.
+    tree_changed: Cell<bool>,
 }
 
 /// The prelude's hooks, saved before app code runs, so an app that writes to
@@ -183,6 +185,7 @@ impl Drop for QuickJsRuntime {
 impl QuickJsRuntime {
     /// Start a runtime and run `source` as a classic script. `file_name`
     /// names it in stack traces.
+    #[cfg(test)]
     pub(crate) fn load(
         source: &str,
         file_name: &str,
@@ -241,6 +244,8 @@ impl QuickJsRuntime {
             clock: options.clock,
             console: RefCell::new(options.console),
             positions: RefCell::new(HashMap::new()),
+            window_options: RefCell::new(None),
+            tree_changed: Cell::new(false),
         });
         let tracked = shared.clone();
         runtime.set_host_promise_rejection_tracker(Some(Box::new(
@@ -313,6 +318,17 @@ impl QuickJsRuntime {
         self.call(tree, |ctx, hooks| {
             hooks.dispatch_event.clone().restore(ctx)?.call((json,))
         })
+    }
+
+    /// The window options the app's renderer passed to `init`, once it has:
+    /// `render()` from `@gpuix/react` calls it as it mounts.
+    pub(crate) fn window_options(&self) -> Option<WindowOptions> {
+        self.shared.window_options.borrow().clone()
+    }
+
+    /// Whether a batch changed the tree since the last call.
+    pub(crate) fn take_tree_changed(&self) -> bool {
+        self.shared.tree_changed.replace(false)
     }
 
     /// Run the timers due now, earliest first, each followed by the
@@ -527,6 +543,30 @@ fn install_host<'js>(ctx: &Ctx<'js>, shared: &Rc<Shared>) -> rquickjs::Result<()
 
     host.set("proxyTarget", Function::new(ctx.clone(), proxy_target)?)?;
 
+    let window = shared.clone();
+    host.set(
+        "init",
+        Function::new(ctx.clone(), move |ctx: Ctx<'js>, json: String| {
+            guard(&window, &ctx, "init", || {
+                if window.window_options.borrow().is_some() {
+                    return Err(Exception::throw_message(
+                        &ctx,
+                        "Renderer is already initialized",
+                    ));
+                }
+                let options = serde_json::from_str::<WindowOptions>(&json).map_err(|error| {
+                    throw_whole(
+                        &ctx,
+                        ErrorKind::Type,
+                        &format!("invalid window options: {error}"),
+                    )
+                })?;
+                *window.window_options.borrow_mut() = Some(options);
+                Ok(())
+            })
+        })?,
+    )?;
+
     let renderer = Object::new(ctx.clone())?;
     let batches = shared.clone();
     renderer.set(
@@ -541,8 +581,10 @@ fn install_host<'js>(ctx: &Ctx<'js>, shared: &Rc<Shared>) -> rquickjs::Result<()
                             "applyBatch can only run while GPUIX is calling into the app",
                         ));
                     }
-                    apply_batch_to_tree(&mut batches.tree.borrow_mut(), json.as_bytes())
-                        .map_err(|error| Exception::throw_message(&ctx, &error))
+                    let ids = apply_batch_to_tree(&mut batches.tree.borrow_mut(), json.as_bytes())
+                        .map_err(|error| Exception::throw_message(&ctx, &error))?;
+                    batches.tree_changed.set(true);
+                    Ok(ids)
                 })
             },
         )?,
@@ -579,12 +621,13 @@ fn guard<'js, T>(
 
 pub(crate) enum ErrorKind {
     Syntax,
+    Type,
     Internal,
 }
 
-/// Throws a `SyntaxError` or `InternalError` with all of `message`.
-/// rquickjs's `Exception::throw_syntax` and `throw_internal` format it into
-/// a 256-byte buffer, which an absolute path and one note already fill.
+/// Throws a `SyntaxError`, `TypeError` or `InternalError` with all of
+/// `message`. rquickjs's `Exception::throw_syntax` and the like format it
+/// into a 256-byte buffer, which an absolute path and one note already fill.
 pub(crate) fn throw_whole(ctx: &Ctx<'_>, kind: ErrorKind, message: &str) -> rquickjs::Error {
     let raw = ctx.as_raw().as_ptr();
     // SAFETY: `raw` is this live context. The error comes back as a new
@@ -593,6 +636,7 @@ pub(crate) fn throw_whole(ctx: &Ctx<'_>, kind: ErrorKind, message: &str) -> rqui
     let error = unsafe {
         let value = match kind {
             ErrorKind::Syntax => qjs::JS_NewSyntaxError(raw, c"%s".as_ptr(), c"".as_ptr()),
+            ErrorKind::Type => qjs::JS_NewTypeError(raw, c"%s".as_ptr(), c"".as_ptr()),
             ErrorKind::Internal => qjs::JS_NewInternalError(raw, c"%s".as_ptr(), c"".as_ptr()),
         };
         Value::from_raw(ctx.clone(), value)

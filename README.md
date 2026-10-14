@@ -3857,6 +3857,33 @@ Two things avoid the rebuild entirely:
 
 The test renderer uses `VisualTestAppContext` with a `TestDispatcher` for deterministic scheduling. Event simulation goes through GPUI's coordinate-based hit testing and dispatch — not synthetic JS events.
 
+## Experimental embedded JavaScript runtime
+
+`gpx` runs a React app without Node or Bun. It compiles the app's TypeScript
+and JSX with oxc, runs it in an embedded QuickJS engine, and draws it with
+GPUI, all in one process:
+
+```bash
+(cd packages/native && bun run build:embedded)
+cargo run --release --manifest-path packages/native/Cargo.toml \
+  --features quickjs --bin gpx -- app.tsx
+```
+
+The entry file's extension picks the engine: `.tsx`, `.ts`, `.mts`, `.jsx`,
+`.js` and `.mjs` run in QuickJS, `.lua` and `.luax` in the Lua runtime below.
+`--check` loads the app without opening a window, and `--watch` restarts it
+when a JavaScript or TypeScript file in the entry file's directory changes
+(state is reset). The window uses the options the app passes to `render()`;
+`--title`, `--width` and `--height` beat them. Without a title, the window is
+named after the entry file.
+
+Apps import their own files, `react`, `@gpuix/react` and its components.
+Globals are the browser's basics: timers, `console`, `performance.now`,
+`queueMicrotask` and `structuredClone`. There is no `process`, file system or
+npm package loading yet. Keyboard focus helpers (`focusNext`, Tab navigation)
+and text-selection queries are not wired up in `gpx` yet. See
+`docs/design/embedded-quickjs-runtime.md` for the plan.
+
 ## Experimental LuaX runtime
 
 GPUIX also includes an experimental embedded Lua 5.4/LuaJIT renderer. LuaX
@@ -4138,7 +4165,8 @@ the old handles; only the replacement subtree is materialized, not the parent.
 Run the explicit-binding demo from the repository root:
 
 ```sh
-cargo run --release --manifest-path packages/native/Cargo.toml --bin gpuix-lua -- examples/solid-counter.lua
+(cd packages/native && bun run build:embedded)
+cargo run --release --manifest-path packages/native/Cargo.toml --features quickjs --bin gpx -- examples/solid-counter.lua
 ```
 
 Use `examples/solid-counter.luax` instead to try automatic bindings and compare

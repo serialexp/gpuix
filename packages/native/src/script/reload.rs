@@ -32,16 +32,18 @@ fn source_snapshot(root: &Path, is_source: fn(&Path) -> bool) -> std::io::Result
     Ok(SourceSnapshot(sources))
 }
 
-/// Watch the files under `root` that `is_source` accepts, and send `()`
+/// Watch the files in the entry file's directory tree that `is_source`
+/// accepts, outside `node_modules` and dot directories, and send `()`
 /// once they change and then hold still for one poll, so an editor that
 /// writes a file in several steps triggers one reload. Polls every 100 ms
 /// on a thread of its own, which ends when the receiver is dropped.
 /// `log_prefix` names the program in messages.
 pub(crate) fn watch_sources(
-    root: PathBuf,
+    entry: &Path,
     is_source: fn(&Path) -> bool,
     log_prefix: &'static str,
 ) -> futures::channel::mpsc::UnboundedReceiver<()> {
+    let root = entry_directory(entry);
     let (sender, receiver) = futures::channel::mpsc::unbounded();
     eprintln!("{log_prefix}: watching {}", root.display());
     std::thread::spawn(move || {
@@ -84,6 +86,23 @@ pub(crate) fn watch_sources(
     receiver
 }
 
+/// The directory an entry file is in. A bare file name's parent is the empty
+/// path, which `read_dir` rejects, so that becomes the current directory.
+fn entry_directory(entry: &Path) -> PathBuf {
+    match entry.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// Dependencies and dot directories (`.git`, editor state) aren't the app's
+/// own sources, and `node_modules` alone can hold many thousands of files.
+fn is_skipped_directory(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "node_modules" || name.starts_with('.'))
+}
+
 fn collect_sources(
     root: &Path,
     is_source: fn(&Path) -> bool,
@@ -94,7 +113,9 @@ fn collect_sources(
         let path = entry.path();
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            collect_sources(&path, is_source, sources)?;
+            if !is_skipped_directory(&path) {
+                collect_sources(&path, is_source, sources)?;
+            }
             continue;
         }
         if !file_type.is_file() || !is_source(&path) {
@@ -106,4 +127,42 @@ fn collect_sources(
         sources.push((path, hasher.finish()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_entry_is_watched_from_its_directory() {
+        assert_eq!(entry_directory(Path::new("app/main.tsx")), Path::new("app"));
+        assert_eq!(entry_directory(Path::new("main.tsx")), Path::new("."));
+        assert_eq!(entry_directory(Path::new("/main.tsx")), Path::new("/"));
+    }
+
+    #[test]
+    fn dependencies_and_dot_directories_are_not_watched() {
+        let root = std::env::temp_dir().join(format!("gpuix-snapshot-{}", std::process::id()));
+        for directory in ["src", "node_modules/react", ".git"] {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        for file in [
+            "main.ts",
+            "src/view.ts",
+            "node_modules/react/index.ts",
+            ".git/hook.ts",
+        ] {
+            std::fs::write(root.join(file), file).unwrap();
+        }
+        let is_ts = |path: &Path| path.extension().is_some_and(|extension| extension == "ts");
+        let snapshot = source_snapshot(&root, is_ts);
+        std::fs::remove_dir_all(&root).ok();
+        let watched: Vec<PathBuf> = snapshot
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        assert_eq!(watched, [root.join("main.ts"), root.join("src/view.ts")]);
+    }
 }

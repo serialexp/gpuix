@@ -264,7 +264,7 @@ declared windows whose `open` option is true.
 
 ```text
 GPUI event
-  -> in-process event channel (`gpuix-lua`)
+  -> in-process event channel (`gpx`)
      or the compatibility Node relay (`loadLua` / `loadLuax`)
   -> Lua handler inside Rust
   -> state setter or reducer dispatch marks affected roots dirty
@@ -376,17 +376,21 @@ that selector. Store names must be stable and unique within one runtime. Failed
 live reloads restore the previous state, reducer, and listener set.
 
 The Node addon remains available through `loadLua()` and `loadLuax()`, but a Lua
-application does not need it. `gpuix-lua` reads the source in Rust, owns the
+application does not need it. `gpx` reads the source in Rust, owns the
 normal GPUI application loop, and routes GPUI events through an in-process
 channel to Lua. The rendered tree never crosses napi or JavaScript.
 
 Run the worked LuaX app without Bun, Node, or JavaScript:
 
 ```bash
+(cd packages/native && bun run build:embedded)
 cargo run --release --manifest-path packages/native/Cargo.toml \
-  --no-default-features --features lua54 \
-  --bin gpuix-lua -- examples/luax-counter.luax
+  --no-default-features --features lua54,quickjs \
+  --bin gpx -- examples/luax-counter.luax
 ```
+
+`gpx` also runs JavaScript apps, so it needs the `quickjs` feature, and the
+embedded framework bundles must be built first (`bun run build:embedded`).
 
 Use `--check` to parse, execute every declared initial render, and exit without
 opening windows. `--title`, `--width`, and `--height` configure the implicit
@@ -559,7 +563,7 @@ handwritten Lua and 2.03 ms for LuaX on Lua 5.4.
   the current value. Handwritten Lua remains positional and same-kind,
   same-type swaps are therefore still ambiguous there.
 - Lua execution is desktop-only; the browser/WASM renderer has no embedded Lua.
-- The napi renderer still relays events through Node by design; `gpuix-lua`
+- The napi renderer still relays events through Node by design; `gpx`
   bypasses the Node renderer entirely.
 - LuaX currently covers the small syntax subset above rather than the complete
   JSX grammar.
@@ -579,9 +583,10 @@ list, the bundled form controls, and `memo_batch`. Its Inspector button opens a
 second native window subscribed to the same store:
 
 ```bash
+(cd packages/native && bun run build:embedded)
 cargo run --release --manifest-path packages/native/Cargo.toml \
-  --no-default-features --features lua54 \
-  --bin gpuix-lua -- examples/luax-workspace/main.luax
+  --no-default-features --features lua54,quickjs \
+  --bin gpx -- examples/luax-workspace/main.luax
 ```
 
 Pass `--watch` to poll the entry directory for `.lua` and `.luax` changes.

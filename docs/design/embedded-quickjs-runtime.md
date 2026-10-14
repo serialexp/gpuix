@@ -62,6 +62,16 @@ Tracking the gap between this design and what's on the main branch.
 - [x] Phase 3: embedded React, `@gpuix/react` and `@gpuix/native` bundles
   built by `bun run build:embedded` (`embedded/build.ts`), with a stale-bundle
   check in `build.rs` (same commit)
+- [x] Phase 4: one app binary, `gpx`, that picks the engine from the entry file's
+  extension (`.lua`/`.luax` or `.js`/`.jsx`/`.ts`/`.tsx`), replacing
+  `gpuix-lua`; same flags (`--check`, `--watch`, window options). `just
+  start`, `just start-solid` and `scripts/package-solid.sh` run `bun run
+  build:embedded` first, since `build.rs` needs the bundles
+  (`src/bin/gpx.rs`, `src/quickjs_app.rs`, `feat(native): add the gpx app
+  binary for Lua and JavaScript apps`)
+- [x] Phase 4: the embedded `@gpuix/native` shim's `init` passes the window
+  options `render()` gives it to the host, which opens the window with them
+  (same commit)
 
 ### Outstanding
 
@@ -81,12 +91,10 @@ Tracking the gap between this design and what's on the main branch.
 - [ ] Phase 3: compiled output cached by content hash (deferred to Phase 6,
   with hot reload: compiling is fast enough that only `--watch` restarts
   would notice)
-- [ ] Phase 4: one app binary, `gpx`, that picks the engine from the entry file's
-  extension (`.lua`/`.luax` or `.js`/`.jsx`/`.ts`/`.tsx`), replacing
-  `gpuix-lua`; same flags (`--check`, `--watch`, window options). Its build
-  runs `bun run build:embedded` first, since `build.rs` needs the bundles
-- [ ] Phase 4: the embedded `@gpuix/native` shim's `init` applies the window
-  options `render()` passes; it ignores them until a window exists
+- [ ] Phase 4: small Node/Bun shims so the example apps run under `gpx`: a
+  read-only `process.env`, `import.meta.main` true for the entry module, and
+  `with { type: "text" }` imports of the app's own files (decided by Bart on
+  2026-10-14; npm packages stay out)
 - [ ] Phase 4: React app parity tests (the React test suite's host-level cases
   run against the QuickJS host)
 - [ ] Phase 5: move `@gpuix/solid` and its components to Solid 2.0 (Node
@@ -357,6 +365,35 @@ name is still to be picked; `cli/` already ships the npm `gpuix` command.
 > **2026-10-14 update:** the binary is `gpx` (decided by Bart): short, and
 separate from the npm `gpuix` command that creates apps.
 
+> **2026-10-14 update:** shipped as `gpx` in `src/bin/gpx.rs`, with the
+JavaScript app loop in `src/quickjs_app.rs`. Details the design left open:
+> - `gpx` loads the app and runs its zero-delay timers (at most 1,000
+>   rounds, so an app that keeps queuing `setImmediate` still opens) before
+>   opening the window, so `render()` has passed its window options and
+>   committed its first tree by then. An app that never calls `render()`
+>   fails with an error instead of an empty window, on reload too.
+> - `--title`, `--width` and `--height` beat the options the app passes to
+>   `render()`. Without a title, the window is named after the entry file,
+>   as Lua windows are.
+> - `--watch` reloads JavaScript apps by starting a fresh runtime in the same
+>   window, so app state resets (Fast Refresh is Phase 6). It watches the
+>   JavaScript and TypeScript files in the entry file's directory tree,
+>   skipping `node_modules` and dot directories (for Lua apps too), so an
+>   import from outside that directory doesn't trigger a reload. Each view
+>   gets its own event channel, so a reloaded app never sees events meant
+>   for the old tree, and closing the window ends the app's task.
+> - In the window's loop, a zero-delay timer yields to GPUI once before it
+>   runs, so an app that keeps queuing them (React's scheduler during a long
+>   render) still paints and takes input.
+> - Window setup is shared with the napi renderer
+>   (`renderer::init_app`, `renderer::open_main_window`), which also gave Lua
+>   apps the `img` element's HTTP client they were missing.
+> - The `quickjs` feature stays out of the default features: the `gpx`
+>   binary requires it, and the napi addon builds don't need QuickJS or the
+>   embedded bundles.
+> - No napi `loadJs`/`loadTsx` yet; the React parity tests will decide
+>   whether they need one.
+
 ## Phasing
 
 0. Measure first. Bundle `@gpuix/react` and `@gpuix/solid` into a scratch
@@ -450,6 +487,10 @@ separate from the npm `gpuix` command that creates apps.
    currently have the Lua standard library, including `io`.
 
    > **2026-10-13 update:** nothing at first.
+
+   > **2026-10-14 update:** the example apps use `process.env`,
+   > `import.meta.main` and Bun text imports, so `gpx` gets small shims for
+   > those three (decided by Bart). npm packages stay out.
 5. **One binary or two?** `gpuix-js` next to `gpuix-lua`, or one `gpuix-run`
    that picks the engine from the file extension.
 

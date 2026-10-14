@@ -37,10 +37,10 @@ built-in JSX/TSX compilation) behind a shared core.
 
 ## Verification (macOS)
 
-- Rust lib tests: 367 passed with Lua 5.4, 428 with `--features quickjs`; the Lua runtime tests also pass with LuaJIT. Use a real path
+- Rust lib tests: 369 passed with Lua 5.4, 444 with `--features quickjs` (plus 5 `gpx` bin tests); the Lua runtime tests also pass with LuaJIT. Use a real path
   for `--target-dir` (`/private/tmp/...`, not `/tmp/...`); the updater tests
   reject a symlinked executable path.
-- React 538, Solid 19, native Vitest 23, examples 55, CLI pass;
+- React 540, Solid 19, native Vitest 23, examples 55, CLI pass;
   example-app typecheck and package builds pass.
 - `build:web` passes (nightly with `rust-src`, `wasm-bindgen-cli` 0.2.127).
   `/opt/homebrew/bin/cargo` comes first in PATH on this machine and does not
@@ -65,7 +65,22 @@ built-in JSX/TSX compilation) behind a shared core.
    (`embedded/build.ts`). The bundles aren't committed: run `bun run
    build:embedded` in `packages/native` before any `--features quickjs`
    build, and again after changing `@gpuix/react` or `@gpuix/native` sources
-   (`build.rs` fails with that command when they're stale). Next is Phase 4:
-   the `gpx` binary (name picked by Bart on 2026-10-14) that picks the
-   engine by file extension and replaces `gpuix-lua`, React parity tests,
-   the optional renderer methods, and window options from `render()`.
+   (`build.rs` fails with that command when they're stale). Phase 4 has
+   started: `gpx` (`src/bin/gpx.rs`, `src/quickjs_app.rs`) replaces
+   `gpuix-lua`, picks the engine by file extension, and opens the window
+   with the options `render()` passes. A release `gpx` ran a React app with
+   an interval timer in a real window. Phase 4 still needs the optional
+   renderer methods (Tab navigation in React `gpx` apps depends on them)
+   and the React parity tests. `quickjs_app.rs` tests the run loop
+   (events, zero-delay timers, reloads, window close) on a
+   `gpui::TestAppContext`; JS timers use the real clock there, so those
+   tests stick to zero-delay timers. React parity tests can use the same
+   setup. `init_threaded` (Linux and Windows) now uses the shared
+   `renderer::open_main_window`, but it couldn't be compiled on this Mac (no
+   Linux C cross-compiler), so CI is its first build.
+2. Most example apps don't pass `gpx --check` yet. They use
+   `process.env`, `import.meta.main`, Bun `type: "text"` imports or npm
+   packages, which the "no system APIs at first" decision leaves out. Bart
+   decided on 2026-10-14: small shims for `process.env` (read-only),
+   `import.meta.main` and text imports of the app's own files; npm packages
+   stay out. Listed in the design doc's Outstanding.

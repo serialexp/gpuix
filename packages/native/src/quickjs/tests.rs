@@ -1252,6 +1252,78 @@ fn a_react_app_renders_and_handles_clicks() {
 }
 
 #[test]
+fn render_passes_its_window_options_to_the_host() {
+    let dir = AppDir::new(&[(
+        "main.tsx",
+        r#"
+        import { render } from "@gpuix/react"
+        render(<text>one</text>, { title: "Mail", width: 640, minHeight: 200, focus: false,
+          windowBackground: "blurred", onKeyDown: () => {} })
+        // A second render remounts in the same window.
+        render(<text>two</text>, { title: "Ignored" })
+        "#,
+    )]);
+    let mut app = App::try_load_module(&dir.path("main.tsx")).unwrap();
+    app.settle();
+    let options = app.js.window_options().unwrap();
+    assert_eq!(options.title.as_deref(), Some("Mail"));
+    assert_eq!(options.width, Some(640.0));
+    assert_eq!(options.height, None);
+    assert_eq!(options.min_height, Some(200.0));
+    assert_eq!(options.focus, Some(false));
+    assert_eq!(options.window_background.as_deref(), Some("blurred"));
+    assert_eq!(app.texts(), ["two"]);
+}
+
+#[test]
+fn a_renderer_initializes_once_with_valid_options() {
+    let dir = AppDir::new(&[(
+        "main.ts",
+        r#"
+        import { GpuixRenderer } from "@gpuix/native"
+        const renderer = new GpuixRenderer()
+        try { renderer.init({ width: "wide" } as any) } catch (error) { console.log(String(error)) }
+        renderer.init()
+        try { renderer.init() } catch (error) { console.log(String(error)) }
+        "#,
+    )]);
+    let app = App::try_load_module(&dir.path("main.ts")).unwrap();
+    let log = app.log();
+    assert!(
+        log[0].starts_with("TypeError: invalid window options: "),
+        "{log:?}"
+    );
+    assert_eq!(log[1], "Error: Renderer is already initialized");
+    assert_eq!(app.js.window_options().unwrap().title, None);
+}
+
+#[test]
+fn the_host_hears_when_a_batch_changed_the_tree() {
+    let dir = AppDir::new(&[(
+        "main.tsx",
+        r#"
+        import { render } from "@gpuix/react"
+        import { useState } from "react"
+        function Counter() {
+          const [count, setCount] = useState(0)
+          return <div testId="counter" onClick={() => setCount(count + 1)}><text>{count}</text></div>
+        }
+        render(<Counter />)
+        "#,
+    )]);
+    let mut app = App::try_load_module(&dir.path("main.tsx")).unwrap();
+    app.settle();
+    assert!(app.js.take_tree_changed());
+    assert!(!app.js.take_tree_changed());
+    let counter = app.test_id("counter");
+    // A click on nothing commits nothing.
+    assert!(!app.click(counter + 1000).unwrap());
+    assert!(!app.js.take_tree_changed());
+    assert!(app.click(counter).unwrap());
+    assert!(app.js.take_tree_changed());
+}
+
+#[test]
 fn imports_resolve_the_way_bun_finds_files() {
     let dir = AppDir::new(&[
         (
