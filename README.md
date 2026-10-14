@@ -4005,13 +4005,31 @@ local doubled = solid.create_memo(function() return count() * 2 end)
 <text>Doubled: {doubled()}</text>
 ```
 
+`create_selector(source)` requires an owner and returns `is_selected(key)`,
+which tells whether `source()` equals `key` (Lua `==`). When the selection
+changes, only the computations that read the old or the new key re-run, so a
+list where every row asks whether it is selected updates two rows instead of
+all of them. Keys must not be nil or NaN. Outside a computation,
+`is_selected` compares without subscribing. Once the owner it was created in
+is disposed, it stops updating.
+
+```lua
+local is_selected = solid.create_selector(selected)
+-- In a For row:
+<div style={function() return is_selected(item().id) and active or idle end} />
+```
+
 The experimental native binding path supports `solid.mount(component)`,
 `solid.text(read)` and `solid.bind_style(handle, read)`. Use `mount` inside the
 entry render function: it constructs an owned subtree and disposes its effects
 when the window unmounts, the runtime drops, or the subtree is rebuilt.
 Text/style bindings update existing native nodes after event handling without
 rerunning the component or reconciling the tree. Styles replace the complete
-base style rather than merging a patch. Keep hooks out of these experimental
+base style rather than merging a patch. A binding whose value is unchanged
+(Lua `==`) skips the host call, so return a new style table rather than
+changing one in place. A binding assumes it is the only writer of its
+property: if something else sets it too, the binding won't set it back until
+its own value changes. Keep hooks out of these experimental
 subtrees; hook-driven renders still rebuild them.
 
 ```lua
@@ -4107,7 +4125,9 @@ should follow an item, and Index when it should stay with a slot.
 The shared host API provides `set_children(slot, handles)` (also
 `gpuix.set_children`) for ordered child replacement. It accepts fresh subtrees
 or handles already mounted directly in that slot, never another parent's
-children; duplicate handles are rejected when the batch is applied.
+children. A fresh subtree must come from the current render or event, which
+`set_children` checks when it is called; duplicate handles and handles
+mounted elsewhere are rejected when the batch is applied.
 Only newly added rows are materialized; retained rows are moved, not rebuilt.
 
 The shared host API also provides `set_child(slot, child)` (and

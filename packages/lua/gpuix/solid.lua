@@ -195,9 +195,23 @@ function api.batch(callback)
     return result
 end
 
+-- Keeps a host value in step with `read`, calling `set` only when the value
+-- changes. `current` is the value the host already has; leave it out when
+-- that isn't known.
+local function bind(set, read, ...)
+    local known, current = select("#", ...) > 0, ...
+    return api.create_effect(function()
+        local value = read()
+        if known and value == current then return end
+        set(value)
+        known, current = true, value
+    end)
+end
+
 function api.text(read)
-    local handle = host.text(api.untrack(read))
-    api.create_effect(function() host.set_text(handle, read()) end)
+    local value = api.untrack(read)
+    local handle = host.text(value)
+    bind(function(text) host.set_text(handle, text) end, read, value)
     return handle
 end
 
@@ -242,7 +256,41 @@ function api.use_store(store, selector, equality)
 end
 
 function api.bind_style(handle, read)
-    return api.create_effect(function() host.set_style(handle, read()) end)
+    return bind(function(style) host.set_style(handle, style) end, read)
+end
+
+function api.create_selector(source)
+    assert(current_owner, "create_selector requires an owner")
+    assert(type(source) == "function", "create_selector requires an accessor")
+    local entries = {}
+    -- The value the entries were last written for. It can lag `source` in
+    -- the flush that changes it, so new entries and untracked reads read
+    -- `source` itself.
+    local current = api.untrack(source)
+    api.create_effect(function()
+        local next_value = source()
+        if next_value == current then return end
+        local previous = current
+        current = next_value
+        if entries[previous] then entries[previous].write(false) end
+        if entries[next_value] then entries[next_value].write(true) end
+    end)
+    return function(key)
+        assert(key ~= nil and key == key, "create_selector keys must not be nil or NaN")
+        if not current_computation then return key == api.untrack(source) end
+        local entry = entries[key]
+        if not entry then
+            local read, write = api.create_signal(key == api.untrack(source))
+            entry = { read = read, write = write, readers = 0 }
+            entries[key] = entry
+        end
+        entry.readers = entry.readers + 1
+        api.on_cleanup(function()
+            entry.readers = entry.readers - 1
+            if entry.readers == 0 and entries[key] == entry then entries[key] = nil end
+        end)
+        return entry.read()
+    end
 end
 
 function api.h(kind, props)
@@ -262,16 +310,20 @@ function api.h(kind, props)
         end
     end
     local handle = gpuix.h(kind, props)
-    if style then api.bind_style(handle, style) end
-    for name, read in pairs(bindings) do api.bind_prop(handle, name, read) end
+    if style then
+        bind(function(value) host.set_style(handle, value) end, style, props.style)
+    end
+    for name, read in pairs(bindings) do
+        bind(function(value) host.set_prop(handle, name, value) end, read, props[name])
+    end
     if content then
-        api.create_effect(function() host.set_text(handle, content()) end)
+        bind(function(value) host.set_text(handle, value) end, content, props.content)
     end
     return handle
 end
 
 function api.bind_prop(handle, name, read)
-    return api.create_effect(function() host.set_prop(handle, name, read()) end)
+    return bind(function(value) host.set_prop(handle, name, value) end, read)
 end
 
 function api.Show(props)

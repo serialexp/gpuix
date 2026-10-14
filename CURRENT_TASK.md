@@ -19,12 +19,25 @@ built-in JSX/TSX compilation) behind a shared core.
 - `gpuix.icon` completed from the September stash (build.rs packer,
   `mod phosphor`, `_phosphor_icon`, `phosphor:` svg sources). The stash itself
   is untouched at `stash@{0}`.
-- Zed fork rebased locally onto upstream c2e9f882030 as branch `gpuix-rebase`
-  (not pushed).
+- Zed fork rebased onto upstream c2e9f882030 as branch `gpuix-rebase`, pushed
+  to Aeolun/zed (origin is now SSH). `.gitmodules` still names the old
+  `gpuix` branch; Bart hasn't chosen between force-pushing `gpuix` and
+  pointing `.gitmodules` at `gpuix-rebase`.
+- `wip` pushed to serialexp/gpuix (e42c991).
+- solid.lua: keyed `create_selector`; text/style/prop bindings skip unchanged
+  values. `lua_runtime.rs` keeps a per-window `RootIndex` (handlers, tokens,
+  memo aliases, element placements), so slot updates no longer walk the
+  tree, and a slot whose new child fails to mount stays unchanged. A
+  parent/child swap can't happen in Lua: a slot only takes fresh nodes or
+  its own children (`solid_slots_reject_children_mounted_elsewhere`).
+  Staged nodes keep their own arena generation and survive another window's
+  render while queued updates need them; each event drops the queued
+  updates that can never apply. One leftover is in TODO.md (a `solid.For`
+  list after a failed window render).
 
 ## Verification (macOS)
 
-- Rust lib tests: 353 passed with Lua 5.4 and with LuaJIT. Use a real path
+- Rust lib tests: 367 passed with Lua 5.4; the Lua runtime tests also pass with LuaJIT. Use a real path
   for `--target-dir` (`/private/tmp/...`, not `/tmp/...`); the updater tests
   reject a symlinked executable path.
 - React 538, Solid 19, native Vitest 23, examples 55, CLI pass;
@@ -37,12 +50,7 @@ built-in JSX/TSX compilation) behind a shared core.
 
 ## Next
 
-1. Push `wip` (force, after the rebase) and the zed `gpuix-rebase` branch to
-   Aeolun/zed, each only when asked.
-2. Port the rust-js-vm improvements: keyed `create_selector` in solid.lua;
-   skip unchanged values in `solid.text`, `bind_style`, `bind_prop`; check the
-   parent/child swap in one update; the full-tree-walk TODO.
-3. QuickJS: follow `docs/design/embedded-quickjs-runtime.md`. Phase 0's
+1. QuickJS: follow `docs/design/embedded-quickjs-runtime.md`. Phase 0's
    measurements are done (in rust-js-vm; numbers under open question 1 and
    in rust-js-vm's README), and open question 1 is settled: real
    `@gpuix/react`. Phase 1 is done, rescoped: `src/script/app.rs` and

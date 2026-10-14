@@ -166,7 +166,7 @@ enum HostUpdate {
     Text(i64, String),
     Style(i64, Arc<StyleDesc>),
     Prop(i64, String, serde_json::Value),
-    Child(i64, Option<usize>),
+    Child(i64, Option<NodeHandle>),
     Children(i64, Vec<i64>),
 }
 
@@ -1015,10 +1015,17 @@ impl ArenaNode {
     }
 }
 
+/// The nodes Lua stages, by index. Each render or event starts a new
+/// generation, and Lua can only pass a node to the host API in the
+/// generation it was made in. Staged nodes that queued host updates still
+/// need survive into later generations, so another window's render doesn't
+/// drop them before their own window flushes. `node_generations` keeps each
+/// node's own generation, so its handle stays the same.
 #[derive(Default)]
 struct RenderArena {
     generation: u64,
     nodes: Vec<Option<ArenaNode>>,
+    node_generations: Vec<u64>,
     child_lists: Vec<Option<Vec<usize>>>,
     parented: Vec<bool>,
     sibling_marks: Vec<u64>,
@@ -1027,35 +1034,75 @@ struct RenderArena {
 }
 
 impl RenderArena {
-    fn begin_render(&mut self) {
+    /// Starts a new generation. With `keep_nodes`, the staged nodes stay for
+    /// the host updates still queued.
+    fn begin_render(&mut self, keep_nodes: bool) {
         self.generation = if self.generation >= HANDLE_MAX_GENERATION {
             1
         } else {
             self.generation + 1
         };
-        self.nodes.clear();
         self.child_lists.clear();
-        self.parented.clear();
-        self.sibling_marks.clear();
-        self.sibling_epoch = 0;
         self.sibling_keys.clear();
+        if !keep_nodes {
+            self.nodes.clear();
+            self.node_generations.clear();
+            self.parented.clear();
+            self.sibling_marks.clear();
+            self.sibling_epoch = 0;
+        }
     }
 
+    /// Accepts a handle made in the current generation.
     fn validate_handle(&self, handle: NodeHandle) -> mlua::Result<()> {
         if handle.generation != self.generation {
             return Err(mlua::Error::runtime(
                 "host node came from an earlier render; use gpuix.memo for retained subtrees",
             ));
         }
-        if self
+        self.validate_staged(handle)
+    }
+
+    /// Accepts a handle to a node that is still staged, from any generation.
+    /// Queued host updates use this.
+    fn validate_staged(&self, handle: NodeHandle) -> mlua::Result<()> {
+        let staged = self
             .nodes
             .get(handle.index)
             .and_then(Option::as_ref)
-            .is_none()
-        {
-            return Err(mlua::Error::runtime("host node handle is no longer valid"));
+            .is_some()
+            && self.node_generations[handle.index] == handle.generation;
+        if staged {
+            Ok(())
+        } else {
+            Err(mlua::Error::runtime("host node handle is no longer valid"))
         }
-        Ok(())
+    }
+
+    /// The index of the node `token` names, if it is still staged.
+    fn staged_index(&self, token: i64) -> Option<usize> {
+        let handle = node_handle(&Value::Integer(token)).ok()?;
+        self.validate_staged(handle).ok()?;
+        Some(handle.index)
+    }
+
+    /// Adds the staged node at `index` and its staged descendants to `nodes`.
+    fn collect_subtree(&self, index: usize, nodes: &mut HashSet<usize>) {
+        let mut stack = vec![index];
+        while let Some(index) = stack.pop() {
+            if !nodes.insert(index) {
+                continue;
+            }
+            if let Some(Some(ArenaNode::Pending(node))) = self.nodes.get(index) {
+                stack.extend(&node.children);
+            }
+        }
+    }
+
+    /// The handle token of the staged node at `index`.
+    fn token(&self, index: usize) -> Result<i64, String> {
+        packed_handle_token(self.node_generations[index], index, "nodes")
+            .map_err(|error| error.to_string())
     }
 
     fn push_pending(&mut self, node: PendingNode) -> mlua::Result<NodeHandle> {
@@ -1093,6 +1140,7 @@ impl RenderArena {
         }
         let index = self.nodes.len();
         self.nodes.push(Some(ArenaNode::Pending(node)));
+        self.node_generations.push(self.generation);
         self.parented.push(false);
         self.sibling_marks.push(0);
         Ok(NodeHandle {
@@ -1104,6 +1152,7 @@ impl RenderArena {
     fn push_cached(&mut self, node: CachedNode) -> NodeHandle {
         let index = self.nodes.len();
         self.nodes.push(Some(ArenaNode::Cached(node)));
+        self.node_generations.push(self.generation);
         self.parented.push(false);
         self.sibling_marks.push(0);
         NodeHandle {
@@ -1197,8 +1246,7 @@ struct LuaRoot {
     options: WindowOptions,
     render: Function,
     node: Option<LuaNode>,
-    handlers: HashMap<(u64, String), Function>,
-    host_tokens: Vec<i64>,
+    index: RootIndex,
 }
 
 impl LuaRoot {
@@ -1207,8 +1255,100 @@ impl LuaRoot {
             options,
             render,
             node: None,
-            handlers: HashMap::new(),
-            host_tokens: Vec::new(),
+            index: RootIndex::default(),
+        }
+    }
+}
+
+/// Lookups into a root's node tree, kept up to date as it changes so that
+/// events and structural updates don't have to walk it.
+#[derive(Default)]
+struct RootIndex {
+    handlers: HashMap<(u64, String), Function>,
+    /// Every handle token that resolves to one of this root's elements.
+    host_tokens: HashSet<i64>,
+    /// Tokens besides a node's own `handle_token`, by element: a render that
+    /// reuses a memoized subtree resolves its new handle to the old node.
+    aliases: HashMap<u64, Vec<i64>>,
+    /// Each element's parent element and position among the parent's
+    /// children. The root element has no entry.
+    placements: HashMap<u64, (u64, usize)>,
+}
+
+impl RootIndex {
+    /// Forgets everything, including this root's tokens in `handles`.
+    fn clear(&mut self, handles: &mut MountedHostHandleMap) {
+        for token in self.host_tokens.drain() {
+            handles.remove(&token);
+        }
+        self.handlers.clear();
+        self.aliases.clear();
+        self.placements.clear();
+    }
+
+    /// Indexes a subtree that was just mounted at `placement` (its parent and
+    /// position), or as the root when that is `None`.
+    fn add(
+        &mut self,
+        root: &LuaRootId,
+        node: &LuaNode,
+        placement: Option<(u64, usize)>,
+        handles: &mut MountedHostHandleMap,
+    ) {
+        if let Some(placement) = placement {
+            self.placements.insert(node.id, placement);
+        }
+        self.add_token(root, node.handle_token, node.id, handles);
+        for (event_type, handler) in &node.events {
+            self.handlers
+                .insert((node.id, event_type.clone()), handler.clone());
+        }
+        for (position, child) in node.children.iter().enumerate() {
+            self.add(root, child, Some((node.id, position)), handles);
+        }
+    }
+
+    fn add_alias(
+        &mut self,
+        root: &LuaRootId,
+        token: i64,
+        element_id: u64,
+        handles: &mut MountedHostHandleMap,
+    ) {
+        self.aliases.entry(element_id).or_default().push(token);
+        self.add_token(root, token, element_id, handles);
+    }
+
+    fn add_token(
+        &mut self,
+        root: &LuaRootId,
+        token: i64,
+        element_id: u64,
+        handles: &mut MountedHostHandleMap,
+    ) {
+        self.host_tokens.insert(token);
+        handles.insert(
+            token,
+            MountedHostHandle {
+                root: root.clone(),
+                element_id,
+            },
+        );
+    }
+
+    /// Forgets a subtree that was removed from the tree.
+    fn remove(&mut self, node: &LuaNode, handles: &mut MountedHostHandleMap) {
+        self.placements.remove(&node.id);
+        let aliases = self.aliases.remove(&node.id).unwrap_or_default();
+        for token in aliases.into_iter().chain([node.handle_token]) {
+            self.host_tokens.remove(&token);
+            handles.remove(&token);
+        }
+        for event_type in node.events.keys() {
+            self.handlers.remove(&(node.id, event_type.clone()));
+        }
+        for child in &node.children {
+            self.remove(child, handles);
         }
     }
 }
@@ -1423,11 +1563,7 @@ impl LuaRuntime {
         run_effect_cleanups(&self.lua, &jobs);
         if let Some(root) = self.roots.get_mut(id) {
             root.node = None;
-            root.handlers.clear();
-            let mut handles = self.host_handles.lock().unwrap();
-            for token in root.host_tokens.drain(..) {
-                handles.remove(&token);
-            }
+            root.index.clear(&mut self.host_handles.lock().unwrap());
         }
         self.memo
             .lock()
@@ -1465,14 +1601,26 @@ impl LuaRuntime {
         }
     }
 
+    /// The windows to render: those with hook state to re-render, and those
+    /// that queued host updates change.
     pub(crate) fn dirty_window_ids(&self) -> Vec<String> {
-        self.hooks
+        let mut dirty: Vec<String> = self
+            .hooks
             .lock()
             .unwrap()
             .dirty_root_ids()
             .into_iter()
             .map(|root| root.to_string())
-            .collect()
+            .collect();
+        let handles = self.host_handles.lock().unwrap();
+        for update in self.host_updates.lock().unwrap().iter() {
+            if let Some(handle) = handles.get(&update.handle()) {
+                if !dirty.iter().any(|root| *root == *handle.root) {
+                    dirty.push(handle.root.to_string());
+                }
+            }
+        }
+        dirty
     }
 
     pub(crate) fn take_app_commands(&self) -> Vec<AppCommand> {
@@ -1610,18 +1758,12 @@ impl LuaRuntime {
                 continue;
             };
             next.node = previous.node;
-            next.handlers = previous.handlers;
-            next.host_tokens = previous.host_tokens;
+            next.index = previous.index;
         }
         let mut removed = Vec::with_capacity(previous_roots.len());
-        for (id, root) in previous_roots {
+        for (id, mut root) in previous_roots {
             let id = id.to_string();
-            {
-                let mut handles = self.host_handles.lock().unwrap();
-                for token in root.host_tokens {
-                    handles.remove(&token);
-                }
-            }
+            root.index.clear(&mut self.host_handles.lock().unwrap());
             let jobs = self.hooks.lock().unwrap().take_root_cleanup_jobs(&id);
             run_effect_cleanups(&self.lua, &jobs);
             self.memo
@@ -1696,31 +1838,70 @@ impl LuaRuntime {
         let Some(handler) = self
             .roots
             .get(root_id)
-            .and_then(|root| root.handlers.get(&(id, payload.event_type.clone())))
+            .and_then(|root| root.index.handlers.get(&(id, payload.event_type.clone())))
             .cloned()
         else {
             return Ok(Vec::new());
         };
         let event = event_table(&self.lua, &payload).map_err(lua_error)?;
-        if self.host_updates.lock().unwrap().is_empty() {
-            self.arena.lock().unwrap().begin_render();
-        }
+        self.drop_unmounted_updates();
+        self.begin_arena_generation();
         handler.call::<()>(event).map_err(lua_error)?;
-        let mut dirty: HashSet<String> = self
-            .hooks
-            .lock()
-            .unwrap()
-            .dirty_root_ids()
-            .into_iter()
-            .map(|root| root.to_string())
-            .collect();
+        Ok(self.dirty_window_ids())
+    }
+
+    /// Drops the queued updates that can never apply. An update for a
+    /// mounted node stays, and so does one for a staged node that an update
+    /// staying will mount. The rest wait on nodes that were never attached,
+    /// or whose parent failed to mount.
+    fn drop_unmounted_updates(&self) {
         let handles = self.host_handles.lock().unwrap();
-        for update in self.host_updates.lock().unwrap().iter() {
-            if let Some(handle) = handles.get(&update.handle()) {
-                dirty.insert(handle.root.to_string());
+        let arena = self.arena.lock().unwrap();
+        let mut updates = self.host_updates.lock().unwrap();
+        let mut keep = vec![false; updates.len()];
+        // The staged nodes the kept updates will mount.
+        let mut mounting = HashSet::new();
+        loop {
+            let mut changed = false;
+            for (update, keep) in updates.iter().zip(keep.iter_mut()) {
+                let target = update.handle();
+                let reachable = handles.contains_key(&target)
+                    || arena
+                        .staged_index(target)
+                        .is_some_and(|index| mounting.contains(&index));
+                if *keep || !reachable {
+                    continue;
+                }
+                *keep = true;
+                changed = true;
+                let children: Vec<usize> = match update {
+                    HostUpdate::Child(_, Some(child)) => arena
+                        .validate_staged(*child)
+                        .ok()
+                        .map(|()| child.index)
+                        .into_iter()
+                        .collect(),
+                    HostUpdate::Children(_, tokens) => tokens
+                        .iter()
+                        .filter_map(|token| arena.staged_index(*token))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                for index in children {
+                    arena.collect_subtree(index, &mut mounting);
+                }
+            }
+            if !changed {
+                break;
             }
         }
-        Ok(dirty.into_iter().collect())
+        let mut keep = keep.into_iter();
+        updates.retain(|_| keep.next().unwrap());
+    }
+
+    fn begin_arena_generation(&self) {
+        let keep_nodes = !self.host_updates.lock().unwrap().is_empty();
+        self.arena.lock().unwrap().begin_render(keep_nodes);
     }
 
     pub(crate) fn take_focus_request(&self) -> Option<FocusRequest> {
@@ -1762,6 +1943,9 @@ impl LuaRuntime {
 
     fn flush_host_updates(&mut self, root_id: &str, tree: &mut RetainedTree) -> Result<(), String> {
         let mut updates = std::mem::take(&mut *self.host_updates.lock().unwrap());
+        // A failed structural update leaves its slot as it was. The rest of
+        // the queue still applies, and the first failure is reported after.
+        let mut failure = None;
         loop {
             let mut deferred = Vec::new();
             let mut progressed = false;
@@ -1770,17 +1954,20 @@ impl LuaRuntime {
                     let token = update.handle();
                     let handle = self.host_handles.lock().unwrap().get(&token).cloned();
                     if let Some(handle) = handle.filter(|handle| handle.root.as_ref() == root_id) {
-                        match update {
+                        let result = match update {
                             HostUpdate::Child(_, index) => {
-                                self.replace_host_child(root_id, handle.element_id, index, tree)?
+                                self.replace_host_child(root_id, handle.element_id, index, tree)
                             }
                             HostUpdate::Children(_, children) => self.replace_host_children(
                                 root_id,
                                 handle.element_id,
                                 children,
                                 tree,
-                            )?,
+                            ),
                             _ => unreachable!(),
+                        };
+                        if let Err(error) = result {
+                            failure.get_or_insert(error);
                         }
                         progressed = true;
                     } else {
@@ -1801,7 +1988,7 @@ impl LuaRuntime {
             let Some(handle) = handles.get(&update.handle()) else {
                 let token = Value::Integer(update.handle());
                 if node_handle(&token)
-                    .and_then(|handle| self.arena.lock().unwrap().validate_handle(handle))
+                    .and_then(|handle| self.arena.lock().unwrap().validate_staged(handle))
                     .is_ok()
                 {
                     remaining.push(update);
@@ -1822,58 +2009,45 @@ impl LuaRuntime {
             }
         }
         self.host_updates.lock().unwrap().extend(remaining);
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 
     fn replace_host_child(
         &mut self,
         root_id: &str,
         parent_id: u64,
-        index: Option<usize>,
+        staged: Option<NodeHandle>,
         tree: &mut RetainedTree,
     ) -> Result<(), String> {
-        let root = self.roots.get_mut(root_id).ok_or("missing root")?;
-        let node = find_host_node(root.node.as_mut().ok_or("unmounted root")?, parent_id)
-            .ok_or("missing structural slot")?;
-        for child in node.children.drain(..) {
-            tree.destroy_element(child.id);
-        }
-        if let Some(index) = index {
-            let mut orphans = Orphans::new();
-            let child = reconcile_node(
-                tree,
-                &mut self.next_id,
-                None,
-                &mut self.arena.lock().unwrap(),
-                index,
-                &mut HostHandleMap::new(),
-                &mut orphans,
-            );
-            for orphan in orphans.into_values() {
-                tree.destroy_element(orphan.id);
+        let path = self.slot_path(root_id, parent_id)?;
+        let mounted = match staged {
+            Some(staged) => {
+                self.arena
+                    .lock()
+                    .unwrap()
+                    .validate_staged(staged)
+                    .map_err(lua_error)?;
+                Some(self.mount_host_subtree(staged.index, self.next_id, tree)?)
             }
-            let child = child?;
-            tree.append_child(parent_id, child.id);
-            node.children.push(child);
-        }
-        let mut aliases = HostHandleMap::new();
-        collect_host_handles(root.node.as_ref().unwrap(), &mut aliases);
+            None => None,
+        };
+        let (root_key, root) = root_entry(&mut self.roots, root_id)?;
+        let LuaRoot {
+            node,
+            index: root_index,
+            ..
+        } = root;
+        let slot = descend_mut(node.as_mut().expect("checked by slot_path"), &path);
+        tree.replace_children(parent_id, mounted.iter().map(|child| child.id).collect());
         let mut handles = self.host_handles.lock().unwrap();
-        for token in root.host_tokens.drain(..) {
-            handles.remove(&token);
+        for old in slot.children.drain(..) {
+            root_index.remove(&old, &mut handles);
+            tree.destroy_element(old.id);
         }
-        root.host_tokens = aliases.keys().copied().collect();
-        for (token, element_id) in aliases {
-            handles.insert(
-                token,
-                MountedHostHandle {
-                    root: Arc::from(root_id),
-                    element_id,
-                },
-            );
+        if let Some(child) = mounted {
+            root_index.add(&root_key, &child, Some((parent_id, 0)), &mut handles);
+            slot.children.push(child);
         }
-        root.handlers.clear();
-        collect_handlers(root.node.as_ref().unwrap(), &mut root.handlers);
         Ok(())
     }
 
@@ -1884,76 +2058,129 @@ impl LuaRuntime {
         tokens: Vec<i64>,
         tree: &mut RetainedTree,
     ) -> Result<(), String> {
-        let root = self.roots.get_mut(root_id).ok_or("missing root")?;
-        let node = find_host_node(root.node.as_mut().ok_or("unmounted root")?, parent_id)
-            .ok_or("missing structural slot")?;
-        let mut arena = self.arena.lock().unwrap();
+        let path = self.slot_path(root_id, parent_id)?;
+        let existing: HashSet<_> = {
+            let node = self.roots[root_id].node.as_ref();
+            descend(node.expect("checked by slot_path"), &path)
+                .children
+                .iter()
+                .map(|child| child.handle_token)
+                .collect()
+        };
         let mut seen = HashSet::new();
-        let existing: HashSet<_> = node
-            .children
-            .iter()
-            .map(|child| child.handle_token)
-            .collect();
-        for token in &tokens {
-            if !seen.insert(*token) {
-                return Err("duplicate child handle".into());
-            }
-            if !existing.contains(token) {
-                arena
-                    .validate_root(node_handle(&Value::Integer(*token)).map_err(lua_error)?)
-                    .map_err(lua_error)?;
+        {
+            let arena = self.arena.lock().unwrap();
+            for token in &tokens {
+                if !seen.insert(*token) {
+                    return Err("duplicate child handle".into());
+                }
+                if !existing.contains(token) {
+                    arena
+                        .validate_staged(node_handle(&Value::Integer(*token)).map_err(lua_error)?)
+                        .map_err(lua_error)?;
+                }
             }
         }
-        let mut previous: HashMap<_, _> = node
+        // Mount every new child before touching the slot, so a failure leaves
+        // it as it was.
+        let first_new_id = self.next_id;
+        let mut fresh = HashMap::new();
+        for token in &tokens {
+            if !existing.contains(token) {
+                let handle = node_handle(&Value::Integer(*token)).map_err(lua_error)?;
+                let child = self.mount_host_subtree(handle.index, first_new_id, tree)?;
+                fresh.insert(*token, child);
+            }
+        }
+        let (root_key, root) = root_entry(&mut self.roots, root_id)?;
+        let LuaRoot {
+            node,
+            index: root_index,
+            ..
+        } = root;
+        let slot = descend_mut(node.as_mut().expect("checked by slot_path"), &path);
+        let mut previous: HashMap<_, _> = slot
             .children
             .drain(..)
             .map(|child| (child.handle_token, child))
             .collect();
-        for token in tokens {
-            let child = if let Some(child) = previous.remove(&token) {
-                child
-            } else {
-                let handle = node_handle(&Value::Integer(token)).map_err(lua_error)?;
-                let mut orphans = Orphans::new();
-                let child = reconcile_node(
-                    tree,
-                    &mut self.next_id,
-                    None,
-                    &mut arena,
-                    handle.index,
-                    &mut HostHandleMap::new(),
-                    &mut orphans,
-                );
-                for orphan in orphans.into_values() {
-                    tree.destroy_element(orphan.id);
-                }
-                child?
-            };
-            tree.append_child(parent_id, child.id);
-            node.children.push(child);
-        }
-        for child in previous.into_values() {
-            tree.destroy_element(child.id);
-        }
-        let mut aliases = HostHandleMap::new();
-        collect_host_handles(root.node.as_ref().unwrap(), &mut aliases);
         let mut handles = self.host_handles.lock().unwrap();
-        for token in root.host_tokens.drain(..) {
-            handles.remove(&token);
+        let mut ids = Vec::with_capacity(tokens.len());
+        for (position, token) in tokens.into_iter().enumerate() {
+            let child = match previous.remove(&token) {
+                Some(child) => {
+                    root_index
+                        .placements
+                        .insert(child.id, (parent_id, position));
+                    child
+                }
+                None => {
+                    let child = fresh.remove(&token).expect("mounted above");
+                    root_index.add(&root_key, &child, Some((parent_id, position)), &mut handles);
+                    child
+                }
+            };
+            ids.push(child.id);
+            slot.children.push(child);
         }
-        root.host_tokens = aliases.keys().copied().collect();
-        for (token, element_id) in aliases {
-            handles.insert(
-                token,
-                MountedHostHandle {
-                    root: Arc::from(root_id),
-                    element_id,
-                },
-            );
+        // One write for the whole list: appending child by child searches the
+        // parent's children each time, which makes a reorder quadratic.
+        tree.replace_children(parent_id, ids);
+        for old in previous.into_values() {
+            root_index.remove(&old, &mut handles);
+            tree.destroy_element(old.id);
         }
-        root.handlers.clear();
-        collect_handlers(root.node.as_ref().unwrap(), &mut root.handlers);
         Ok(())
+    }
+
+    /// The child positions from the root element down to a structural slot,
+    /// or an error if the slot isn't mounted in `root_id`.
+    fn slot_path(&self, root_id: &str, slot_id: u64) -> Result<Vec<usize>, String> {
+        let root = self.roots.get(root_id).ok_or("missing root")?;
+        let node = root.node.as_ref().ok_or("unmounted root")?;
+        let mut path = Vec::new();
+        let mut current = slot_id;
+        while let Some(&(parent, position)) = root.index.placements.get(&current) {
+            path.push(position);
+            current = parent;
+        }
+        path.reverse();
+        let found = current == node.id
+            && path
+                .iter()
+                .try_fold(node, |node, &position| node.children.get(position))
+                .is_some_and(|slot| slot.id == slot_id);
+        if found {
+            Ok(path)
+        } else {
+            Err("missing structural slot".into())
+        }
+    }
+
+    /// Mounts a staged subtree that a structural update adds. On failure it
+    /// removes every element created since `first_new_id`, so subtrees
+    /// mounted earlier in the same update go too.
+    fn mount_host_subtree(
+        &mut self,
+        staged: usize,
+        first_new_id: u64,
+        tree: &mut RetainedTree,
+    ) -> Result<LuaNode, String> {
+        // A fresh subtree has no old nodes to set aside, so nothing is ever
+        // left in its `Orphans`.
+        let child = reconcile_node(
+            tree,
+            &mut self.next_id,
+            None,
+            &mut self.arena.lock().unwrap(),
+            staged,
+            &mut HostHandleMap::new(),
+            &mut Orphans::new(),
+        );
+        if child.is_err() {
+            destroy_new_elements(tree, first_new_id, self.next_id);
+        }
+        child
     }
 
     fn render_root_once(
@@ -1976,7 +2203,7 @@ impl LuaRuntime {
             snapshot
         };
         self.memo.lock().unwrap().seen.clear();
-        self.arena.lock().unwrap().begin_render();
+        self.begin_arena_generation();
 
         let value = match render.call::<Value>(()) {
             Ok(value) => value,
@@ -2018,10 +2245,7 @@ impl LuaRuntime {
             entries.retain(|key, _| key.root != root_key || seen.contains(key));
         }
 
-        let (old, old_host_tokens) = {
-            let root = self.roots.get_mut(root_id).unwrap();
-            (root.node.take(), std::mem::take(&mut root.host_tokens))
-        };
+        let old = self.roots.get_mut(root_id).unwrap().node.take();
         let arena = self.arena.clone();
         let mut arena = arena.lock().unwrap();
         let mut handle_aliases = HostHandleMap::new();
@@ -2051,24 +2275,18 @@ impl LuaRuntime {
                 for orphan in orphans.into_values() {
                     tree.destroy_element(orphan.id);
                 }
-                for id in first_new_id..self.next_id {
-                    if tree.elements.contains_key(&id) {
-                        tree.destroy_element(id);
-                    }
-                }
+                destroy_new_elements(tree, first_new_id, self.next_id);
                 tree.clear_root();
                 self.memo
                     .lock()
                     .unwrap()
                     .entries
                     .retain(|key, _| key.root != root_key);
-                {
-                    let mut handles = self.host_handles.lock().unwrap();
-                    for token in old_host_tokens {
-                        handles.remove(&token);
-                    }
-                }
-                self.roots.get_mut(root_id).unwrap().handlers.clear();
+                self.roots
+                    .get_mut(root_id)
+                    .unwrap()
+                    .index
+                    .clear(&mut self.host_handles.lock().unwrap());
                 self.hooks.lock().unwrap().rollback(hook_snapshot);
                 return Err(error);
             }
@@ -2087,29 +2305,17 @@ impl LuaRuntime {
             .entries
             .retain(|key, _| key.root != root_key || live_memo_keys.contains(&key.key));
         tree.set_root(root.id);
-        collect_host_handles(&root, &mut handle_aliases);
-        let host_tokens = handle_aliases.keys().copied().collect();
+        let root_state = self.roots.get_mut(root_id).unwrap();
         {
             let mut handles = self.host_handles.lock().unwrap();
-            for token in old_host_tokens {
-                handles.remove(&token);
+            let index = &mut root_state.index;
+            index.clear(&mut handles);
+            index.add(&root_key, &root, None, &mut handles);
+            for (token, element_id) in handle_aliases {
+                index.add_alias(&root_key, token, element_id, &mut handles);
             }
-            handles.extend(handle_aliases.into_iter().map(|(token, element_id)| {
-                (
-                    token,
-                    MountedHostHandle {
-                        root: root_key.clone(),
-                        element_id,
-                    },
-                )
-            }));
         }
-        let mut handlers = HashMap::new();
-        collect_handlers(&root, &mut handlers);
-        let root_state = self.roots.get_mut(root_id).unwrap();
         root_state.node = Some(root);
-        root_state.handlers = handlers;
-        root_state.host_tokens = host_tokens;
         let effects = self.hooks.lock().unwrap().commit_render();
         self.run_effect_jobs(effects);
         Ok(())
@@ -2893,7 +3099,7 @@ fn install_api(
                 let mut arena = child_arena.lock().unwrap();
                 arena.validate_root(handle)?;
                 arena.parented[handle.index] = true;
-                Some(handle.index)
+                Some(handle)
             };
             child_updates
                 .lock()
@@ -2904,6 +3110,8 @@ fn install_api(
     )?;
 
     let children_updates = host_updates.clone();
+    let children_arena = arena.clone();
+    let children_handles = host_handles.clone();
     api.set(
         "set_children",
         lua.create_function(move |_, (parent, children): (i64, Table)| {
@@ -2913,6 +3121,22 @@ fn install_api(
             let tokens = (1..=length)
                 .map(|index| children.raw_get::<i64>(index))
                 .collect::<mlua::Result<Vec<_>>>()?;
+            // Each child is already mounted, or new from this render, as
+            // `set_child` requires.
+            let handles = children_handles.lock().unwrap();
+            let mut arena = children_arena.lock().unwrap();
+            let mut staged = Vec::new();
+            for token in &tokens {
+                if !handles.contains_key(token) {
+                    let handle = node_handle(&Value::Integer(*token))?;
+                    arena.validate_root(handle)?;
+                    staged.push(handle.index);
+                }
+            }
+            for index in staged {
+                arena.parented[index] = true;
+            }
+            drop((handles, arena));
             children_updates
                 .lock()
                 .unwrap()
@@ -4109,8 +4333,7 @@ fn reconcile_node(
     handle_aliases: &mut HostHandleMap,
     orphans: &mut Orphans,
 ) -> Result<LuaNode, String> {
-    let handle_token =
-        packed_handle_token(arena.generation, index, "nodes").map_err(|error| error.to_string())?;
+    let handle_token = arena.token(index)?;
     match arena.take(index)? {
         ArenaNode::Cached(cached) => {
             let old = match old {
@@ -4306,28 +4529,34 @@ fn collect_memo_keys(node: &LuaNode, keys: &mut HashSet<MemoKey>) {
     }
 }
 
-fn collect_host_handles(node: &LuaNode, handles: &mut HostHandleMap) {
-    handles.insert(node.handle_token, node.id);
-    for child in &node.children {
-        collect_host_handles(child, handles);
-    }
+fn root_entry<'a>(
+    roots: &'a mut HashMap<LuaRootId, LuaRoot>,
+    root_id: &str,
+) -> Result<(LuaRootId, &'a mut LuaRoot), String> {
+    let key = roots
+        .get_key_value(root_id)
+        .map(|(key, _)| key.clone())
+        .ok_or("missing root")?;
+    Ok((key, roots.get_mut(root_id).unwrap()))
 }
 
-fn find_host_node(node: &mut LuaNode, id: u64) -> Option<&mut LuaNode> {
-    if node.id == id {
-        return Some(node);
-    }
-    node.children
-        .iter_mut()
-        .find_map(|child| find_host_node(child, id))
+fn descend<'a>(node: &'a LuaNode, path: &[usize]) -> &'a LuaNode {
+    path.iter()
+        .fold(node, |node, &position| &node.children[position])
 }
 
-fn collect_handlers(node: &LuaNode, handlers: &mut HashMap<(u64, String), Function>) {
-    for (event_type, handler) in &node.events {
-        handlers.insert((node.id, event_type.clone()), handler.clone());
-    }
-    for child in &node.children {
-        collect_handlers(child, handlers);
+fn descend_mut<'a>(node: &'a mut LuaNode, path: &[usize]) -> &'a mut LuaNode {
+    path.iter()
+        .fold(node, |node, &position| &mut node.children[position])
+}
+
+/// Removes the elements a failed mount created: ids from `first` up to
+/// `next`, the next id it would have used.
+fn destroy_new_elements(tree: &mut RetainedTree, first: u64, next: u64) {
+    for id in first..next {
+        if tree.elements.contains_key(&id) {
+            tree.destroy_element(id);
+        }
     }
 }
 
@@ -5556,6 +5785,7 @@ mod tests {
         assert!(has_text(&tree, "1:C:1"));
         assert!(!tree.elements.contains_key(&ids[1]));
         assert!(!runtime.roots[DEFAULT_ROOT_ID]
+            .index
             .handlers
             .contains_key(&(ids[1], "click".to_string())));
         assert_eq!(
@@ -5715,6 +5945,7 @@ mod tests {
         assert!(!tree.elements.contains_key(&branch));
         assert!(has_text(&tree, "Hidden"));
         assert!(!runtime.roots[DEFAULT_ROOT_ID]
+            .index
             .handlers
             .contains_key(&(branch, "click".to_string())));
         runtime
@@ -5820,6 +6051,616 @@ mod tests {
             .exec()
             .unwrap();
         assert!(runtime.host_updates.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn solid_bindings_skip_unchanged_values() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load(
+            r#"
+                local solid = require("gpuix.solid")
+                host_calls = { set_text = 0, set_style = 0, set_prop = 0 }
+                for name in pairs(host_calls) do
+                    local original = gpuix[name]
+                    gpuix[name] = function(...)
+                        host_calls[name] = host_calls[name] + 1
+                        return original(...)
+                    end
+                end
+                local count, set_count = solid.create_signal(0)
+                local function big() return count() % 4 >= 2 end
+                local function word() return big() and "big" or "small" end
+                local wide = { width = 200, height = 20 }
+                local narrow = { width = 100, height = 20 }
+                local function size() return big() and wide or narrow end
+                return function()
+                    return solid.mount(function()
+                        local field = solid.h("input", { testId = "field", value = word })
+                        local bound = gpuix.div { testId = "bound" }
+                        solid.bind_style(bound, size)
+                        solid.bind_prop(field, "placeholder", word)
+                        return solid.h("div", {
+                            testId = "root",
+                            style = size,
+                            onClick = function() set_count(function(value) return value + 1 end) end,
+                            children = {
+                                solid.text(word),
+                                field,
+                                solid.h("text", { content = word }),
+                                bound,
+                            },
+                        })
+                    end)
+                end
+            "#,
+            &mut tree,
+        )
+        .unwrap();
+        let calls = |runtime: &LuaRuntime| {
+            let calls: Table = runtime.lua.globals().get("host_calls").unwrap();
+            ["set_text", "set_style", "set_prop"].map(|name| calls.get::<i64>(name).unwrap())
+        };
+        // Only the explicit bindings, which can't know the host's value.
+        assert_eq!(calls(&runtime), [0, 1, 1]);
+        // A click that changes no value queues no update at all.
+        assert!(!dispatch_by_test_id(&mut runtime, &mut tree, "root").unwrap());
+        assert_eq!(calls(&runtime), [0, 1, 1]);
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "root").unwrap());
+        assert_eq!(calls(&runtime), [2, 3, 3]);
+        assert!(!dispatch_by_test_id(&mut runtime, &mut tree, "root").unwrap());
+        assert_eq!(calls(&runtime), [2, 3, 3]);
+        let texts = |tree: &RetainedTree, text: &str| {
+            tree.elements
+                .values()
+                .filter(|node| node.content.as_deref() == Some(text))
+                .count()
+        };
+        assert_eq!(texts(&tree, "big"), 2);
+        let field = tree
+            .elements
+            .values()
+            .find(|node| node.test_id.as_deref() == Some("field"))
+            .unwrap();
+        assert_eq!(field.custom_props()["value"], serde_json::json!("big"));
+        assert_eq!(
+            field.custom_props()["placeholder"],
+            serde_json::json!("big")
+        );
+        for test_id in ["root", "bound"] {
+            let node = tree
+                .elements
+                .values()
+                .find(|node| node.test_id.as_deref() == Some(test_id))
+                .unwrap();
+            assert!(matches!(
+                node.style.as_ref().unwrap().width,
+                Some(crate::style::DimensionValue::Pixels(200.0))
+            ));
+        }
+        // Back to the first value.
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "root").unwrap());
+        assert_eq!(calls(&runtime), [4, 5, 5]);
+        assert_eq!(texts(&tree, "small"), 2);
+        runtime.unmount_window(DEFAULT_ROOT_ID);
+    }
+
+    #[test]
+    fn a_binding_whose_host_call_fails_retries_the_same_value() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load(
+            r#"
+                local solid = require("gpuix.solid")
+                text_calls = 0
+                local set_text = gpuix.set_text
+                gpuix.set_text = function(...)
+                    text_calls = text_calls + 1
+                    return set_text(...)
+                end
+                local count, set_count = solid.create_signal(0)
+                return function()
+                    return solid.mount(function()
+                        return solid.h("div", {
+                            testId = "root",
+                            onClick = function() set_count(function(value) return value + 1 end) end,
+                            -- `true` isn't text, so the host call fails at 1 and 2.
+                            children = { solid.text(function()
+                                local n = count()
+                                return (n == 1 or n == 2) or "a"
+                            end) },
+                        })
+                    end)
+                end
+            "#,
+            &mut tree,
+        )
+        .unwrap();
+        let calls = |runtime: &LuaRuntime| runtime.lua.globals().get::<i64>("text_calls").unwrap();
+        for expected in [1, 2] {
+            let error = dispatch_by_test_id(&mut runtime, &mut tree, "root").unwrap_err();
+            assert!(error.contains("unsupported Lua text value"), "{error}");
+            assert_eq!(calls(&runtime), expected);
+        }
+        // The host still has "a", so going back to it needs no call.
+        assert!(!dispatch_by_test_id(&mut runtime, &mut tree, "root").unwrap());
+        assert_eq!(calls(&runtime), 2);
+        assert!(has_text(&tree, "a"));
+    }
+
+    #[test]
+    fn solid_selector_reruns_only_the_affected_keys() {
+        let lua = Lua::new();
+        install_builtin_modules(&lua).unwrap();
+        lua.load(
+            r#"
+            local solid = require("gpuix.solid")
+            local selected, set_selected = solid.create_signal(1)
+            local runs, states = {}, {}
+            local is_selected, memo4
+            local _, owner = solid.create_root(function()
+                is_selected = solid.create_selector(selected)
+                memo4 = solid.create_memo(function() return is_selected(4) end)
+                for key = 1, 4 do
+                    runs[key] = 0
+                    solid.create_effect(function()
+                        runs[key] = runs[key] + 1
+                        states[key] = is_selected(key)
+                    end)
+                end
+            end)
+            local function check(expected_runs, selected_key)
+                for key = 1, 4 do
+                    assert(runs[key] == expected_runs[key],
+                        "key " .. key .. " ran " .. runs[key] .. " times")
+                    assert(states[key] == (key == selected_key), "key " .. key)
+                end
+            end
+            check({ 1, 1, 1, 1 }, 1)
+            set_selected(3)
+            check({ 2, 1, 2, 1 }, 3)
+            set_selected(3)
+            check({ 2, 1, 2, 1 }, 3)
+            -- A key nothing reads.
+            set_selected(9)
+            check({ 2, 1, 3, 1 }, nil)
+            set_selected(1)
+            check({ 3, 1, 3, 1 }, 1)
+            -- Untracked reads compare without subscribing.
+            assert(is_selected(1) and not is_selected(2))
+            assert(not pcall(is_selected, nil))
+            assert(not pcall(is_selected, 0 / 0))
+
+            -- A reader that comes and goes starts from the current selection.
+            local late
+            local _, row = solid.create_root(function()
+                solid.create_effect(function() late = is_selected(7) end)
+            end)
+            assert(late == false)
+            set_selected(7)
+            assert(late == true)
+            solid.dispose(row)
+            set_selected(1)
+            assert(late == true)
+            _, row = solid.create_root(function()
+                solid.create_effect(function() late = is_selected(7) end)
+            end)
+            assert(late == false)
+            solid.dispose(row)
+
+            check({ 5, 1, 3, 1 }, 1)
+
+            -- A second reader of a key goes; the first keeps updating.
+            local _, other = solid.create_root(function()
+                solid.create_effect(function() is_selected(2) end)
+            end)
+            solid.dispose(other)
+            set_selected(2)
+            check({ 6, 2, 3, 1 }, 2)
+            set_selected(1)
+            check({ 7, 3, 3, 1 }, 1)
+
+            -- Memos read it too.
+            assert(memo4() == false)
+            set_selected(4)
+            assert(memo4() == true)
+            check({ 8, 3, 3, 2 }, 4)
+            set_selected(1)
+            assert(memo4() == false)
+            check({ 9, 3, 3, 3 }, 1)
+
+            -- Inside a batch the selector hasn't caught up yet, but reads and
+            -- new readers already see the new selection.
+            local runs5, state5, row5 = 0, nil, nil
+            solid.batch(function()
+                set_selected(5)
+                assert(is_selected(5) and not is_selected(1))
+                _, row5 = solid.create_root(function()
+                    solid.create_effect(function()
+                        runs5 = runs5 + 1
+                        state5 = is_selected(5)
+                    end)
+                end)
+            end)
+            assert(runs5 == 1 and state5 == true)
+            check({ 10, 3, 3, 3 }, 5)
+            solid.dispose(row5)
+            set_selected(1)
+            check({ 11, 3, 3, 3 }, 1)
+
+            -- Once its owner is disposed, the selector stops updating.
+            solid.dispose(owner)
+            set_selected(2)
+            check({ 11, 3, 3, 3 }, 1)
+            assert(not pcall(solid.create_selector, selected))
+        "#,
+        )
+        .exec()
+        .unwrap();
+    }
+
+    #[test]
+    fn solid_nested_slots_update_after_their_rows_move() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(
+            r#"--!gpuix solid
+            local solid = require("gpuix.solid")
+            local For, Show = solid.For, solid.Show
+            local order, set_order = solid.create_signal({ "a", "b", "c" })
+            local open, set_open = solid.create_signal({})
+            return function()
+                return solid.mount(function()
+                    return <div>
+                        <For testId="rows" each={order} key={function(name) return name end}
+                            render={function(item)
+                                local name = item()
+                                return <div testId={"row-" .. name}>
+                                    <Show when={function() return open()[name] end}
+                                        render={function()
+                                            return <div testId={"open-" .. name}
+                                                onClick={function() clicked = name end} />
+                                        end} />
+                                </div>
+                            end} />
+                        <div testId="reverse-and-open" onClick={function()
+                            solid.batch(function()
+                                set_order({ "c", "b", "a" })
+                                set_open({ a = true, c = true })
+                            end)
+                        end} />
+                        <div testId="close-a" onClick={function() set_open({ c = true }) end} />
+                    </div>
+                end)
+            end
+        "#,
+            &mut tree,
+        )
+        .unwrap();
+        let find = |tree: &RetainedTree, test_id: &str| {
+            tree.elements
+                .values()
+                .find(|node| node.test_id.as_deref() == Some(test_id))
+                .map(|node| node.id)
+        };
+        let rows = ["a", "b", "c"].map(|name| find(&tree, &format!("row-{name}")).unwrap());
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "reverse-and-open").unwrap());
+        let slot = find(&tree, "rows").unwrap();
+        assert_eq!(tree.elements[&slot].children, [rows[2], rows[1], rows[0]]);
+        for name in ["a", "c"] {
+            dispatch_by_test_id(&mut runtime, &mut tree, &format!("open-{name}")).unwrap();
+            assert_eq!(
+                runtime.lua.globals().get::<String>("clicked").unwrap(),
+                name
+            );
+        }
+        let opened = find(&tree, "open-a").unwrap();
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "close-a").unwrap());
+        assert_eq!(find(&tree, "open-a"), None);
+        assert!(!runtime.roots[DEFAULT_ROOT_ID]
+            .index
+            .handlers
+            .contains_key(&(opened, "click".to_string())));
+        assert!(find(&tree, "open-c").is_some());
+        runtime.unmount_window(DEFAULT_ROOT_ID);
+        assert!(runtime.host_handles.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn solid_slots_reject_children_mounted_elsewhere() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load(
+            r#"
+            local solid = require("gpuix.solid")
+            return function()
+                return solid.mount(function()
+                    local row = gpuix.div { testId = "row" }
+                    local left = gpuix.div { testId = "left" }
+                    local right = gpuix.div { testId = "right" }
+                    gpuix.set_children(left, { row })
+                    return gpuix.div {
+                        testId = "move",
+                        onClick = function() gpuix.set_children(right, { row }) end,
+                        children = { left, right },
+                    }
+                end)
+            end
+        "#,
+            &mut tree,
+        )
+        .unwrap();
+        let find = |tree: &RetainedTree, test_id: &str| {
+            tree.elements
+                .values()
+                .find(|node| node.test_id.as_deref() == Some(test_id))
+                .unwrap()
+                .id
+        };
+        let (row, left, right) = (
+            find(&tree, "row"),
+            find(&tree, "left"),
+            find(&tree, "right"),
+        );
+        assert_eq!(tree.elements[&left].children, [row]);
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "move").is_err());
+        assert_eq!(tree.elements[&left].children, [row]);
+        assert!(tree.elements[&right].children.is_empty());
+    }
+
+    #[test]
+    fn a_failed_slot_update_leaves_its_slot_and_applies_the_rest() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load(
+            r#"
+            local ui = gpuix
+            return function()
+                local step, set_step = ui.use_state(0)
+                local slot = ui.div { testId = "slot", children = { ui.div { testId = "kept" } } }
+                local single = ui.div {
+                    testId = "single",
+                    children = { ui.div { testId = "kept-single" } },
+                }
+                local after = ui.div { testId = "after" }
+                local row = ui.memo("row", true, function()
+                    return ui.text { content = "row" }
+                end)
+                local other_row = ui.memo("other-row", true, function()
+                    return ui.text { content = "other row" }
+                end)
+                if step == 1 then
+                    -- The memoized rows pass the checks but can't be mounted
+                    -- fresh, the first after "other" already was.
+                    ui.set_children(slot, { ui.div { testId = "other" }, row })
+                    ui.set_child(single, other_row)
+                    ui.set_children(after, { ui.div { testId = "applied" } })
+                end
+                local children = { slot, single, after }
+                if step == 0 then
+                    children[4], children[5] = row, other_row
+                end
+                return ui.div {
+                    testId = "step",
+                    onClick = function() set_step(step + 1) end,
+                    children = children,
+                }
+            end
+        "#,
+            &mut tree,
+        )
+        .unwrap();
+        let error = dispatch_by_test_id(&mut runtime, &mut tree, "step").unwrap_err();
+        assert!(error.contains("moved ahead"), "{error}");
+        let slot = test_id_element(&tree, "slot");
+        assert_eq!(
+            tree.elements[&slot].children,
+            [test_id_element(&tree, "kept")]
+        );
+        let single = test_id_element(&tree, "single");
+        assert_eq!(
+            tree.elements[&single].children,
+            [test_id_element(&tree, "kept-single")]
+        );
+        assert!(!has_test_id(&tree, "other"));
+        let after = test_id_element(&tree, "after");
+        assert_eq!(
+            tree.elements[&after].children,
+            [test_id_element(&tree, "applied")]
+        );
+        assert_tree_has_no_orphans(&tree);
+    }
+
+    #[test]
+    fn updates_for_nodes_that_never_mount_are_dropped_by_the_next_event() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load(
+            r#"
+            local solid = require("gpuix.solid")
+            return function()
+                return solid.mount(function()
+                    return solid.h("div", {
+                        testId = "root",
+                        onClick = function()
+                            -- Staged but never attached, so it never applies.
+                            gpuix.set_text(gpuix.text("loose"), "changed")
+                        end,
+                    })
+                end)
+            end
+        "#,
+            &mut tree,
+        )
+        .unwrap();
+        for _ in 0..3 {
+            assert!(!dispatch_by_test_id(&mut runtime, &mut tree, "root").unwrap());
+            assert_eq!(runtime.host_updates.lock().unwrap().len(), 1);
+            assert_eq!(runtime.arena.lock().unwrap().nodes.len(), 1);
+        }
+    }
+
+    #[test]
+    fn updates_for_nodes_a_queued_update_mounts_survive_the_next_event() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load(
+            r#"
+            local solid = require("gpuix.solid")
+            local slot
+            local done = false
+            return function()
+                return solid.mount(function()
+                    slot = solid.h("div", { testId = "slot" })
+                    return solid.h("div", {
+                        testId = "root",
+                        onClick = function()
+                            if done then return end
+                            done = true
+                            local label = gpuix.text("before")
+                            gpuix.set_children(slot, {
+                                gpuix.div { testId = "row", children = { label } },
+                            })
+                            gpuix.set_text(label, "after")
+                            error("stopped partway")
+                        end,
+                        children = { slot },
+                    })
+                end)
+            end
+        "#,
+            &mut tree,
+        )
+        .unwrap();
+        let error = dispatch_by_test_id(&mut runtime, &mut tree, "root").unwrap_err();
+        assert!(error.contains("stopped partway"), "{error}");
+        assert_eq!(runtime.host_updates.lock().unwrap().len(), 2);
+        // The text update waits on a node the slot update mounts, so the next
+        // event keeps both.
+        assert!(dispatch_by_test_id(&mut runtime, &mut tree, "root").unwrap());
+        assert!(has_test_id(&tree, "row"));
+        assert!(has_text(&tree, "after"));
+        assert!(runtime.host_updates.lock().unwrap().is_empty());
+        assert_tree_has_no_orphans(&tree);
+    }
+
+    #[test]
+    fn set_children_rejects_nodes_from_an_earlier_render_when_called() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load(
+            r#"
+            local solid = require("gpuix.solid")
+            local slot, stash
+            return function()
+                return solid.mount(function()
+                    slot = solid.h("div", { testId = "slot" })
+                    return solid.h("div", {
+                        testId = "root",
+                        onClick = function()
+                            if not stash then
+                                stash = gpuix.div {}
+                                return
+                            end
+                            local ok, message = pcall(gpuix.set_children, slot, { stash })
+                            assert(not ok)
+                            stash_error = tostring(message)
+                        end,
+                        children = { slot },
+                    })
+                end)
+            end
+        "#,
+            &mut tree,
+        )
+        .unwrap();
+        assert!(!dispatch_by_test_id(&mut runtime, &mut tree, "root").unwrap());
+        assert!(!dispatch_by_test_id(&mut runtime, &mut tree, "root").unwrap());
+        let error: String = runtime.lua.globals().get("stash_error").unwrap();
+        assert!(error.contains("earlier render"), "{error}");
+        assert!(runtime.host_updates.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn updates_queued_outside_an_event_mark_their_window_dirty() {
+        let mut runtime = LuaRuntime::load_source_unrendered(
+            r#"--!gpuix solid
+                local solid = require("gpuix.solid")
+                local label, set_label = solid.create_signal("one")
+                test_set_label = set_label
+                local app = gpuix.create_app()
+                gpuix.define_window(app, { id = "main", render = function()
+                    return solid.mount(function()
+                        return solid.h("text", { content = label })
+                    end)
+                end })
+                return app
+            "#,
+            None,
+            true,
+        )
+        .unwrap();
+        let mut main = RetainedTree::new();
+        runtime.mount_window("main", &mut main).unwrap();
+        assert!(runtime.dirty_window_ids().is_empty());
+        runtime.lua.load(r#"test_set_label("two")"#).exec().unwrap();
+        assert_eq!(runtime.dirty_window_ids(), ["main"]);
+        runtime.mount_window("main", &mut main).unwrap();
+        assert!(has_text(&main, "two"));
+        assert!(runtime.dirty_window_ids().is_empty());
+    }
+
+    #[test]
+    fn another_windows_render_keeps_the_nodes_a_slot_update_waits_for() {
+        let mut runtime = LuaRuntime::load_source_unrendered(
+            r#"--!gpuix solid
+                local solid = require("gpuix.solid")
+                local Show = solid.Show
+                local store = gpuix.create_store("shared", function(state)
+                    return { count = state.count + 1 }
+                end, { count = 0 })
+                local app = gpuix.create_app()
+                gpuix.define_window(app, { id = "main", render = function()
+                    return solid.mount(function()
+                        local state = solid.use_store(store)
+                        return <div>
+                            <div testId="increment" onClick={function() store.dispatch({}) end} />
+                            <Show when={function() return state().count > 0 end} render={function()
+                                return <text>Shown {tostring(state().count)}</text>
+                            end} />
+                        </div>
+                    end)
+                end })
+                gpuix.define_window(app, { id = "inspector", render = function()
+                    local count = store.use_state(function(state) return state.count end)
+                    return gpuix.div {
+                        children = { gpuix.text("Hook " .. count), gpuix.text("Other") },
+                    }
+                end })
+                return app
+            "#,
+            None,
+            true,
+        )
+        .unwrap();
+        let mut main = RetainedTree::new();
+        let mut inspector = RetainedTree::new();
+        runtime.mount_window("main", &mut main).unwrap();
+        runtime.mount_window("inspector", &mut inspector).unwrap();
+        let element_id = test_id_element(&main, "increment");
+        let dirty = runtime
+            .dispatch_window_event(
+                "main",
+                EventPayload {
+                    element_id: element_id as f64,
+                    event_type: "click".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(dirty.len(), 2);
+        // The inspector's render stages new nodes before main mounts the
+        // ones its `Show` staged.
+        runtime.mount_window("inspector", &mut inspector).unwrap();
+        runtime.mount_window("main", &mut main).unwrap();
+        assert!(has_text(&main, "Shown 1"));
+        assert!(!has_text(&main, "Other"));
+        assert!(has_text(&inspector, "Hook 1"));
+        assert!(runtime.host_updates.lock().unwrap().is_empty());
+        assert_tree_has_no_orphans(&main);
+        assert_tree_has_no_orphans(&inspector);
     }
 
     #[test]
