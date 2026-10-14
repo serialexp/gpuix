@@ -112,6 +112,7 @@ fn main() {
         "dump-read-object",
         "disable-assertions",
         "map-hash-mix",
+        "source-position",
     ];
 
     for feature in &features {
@@ -149,6 +150,8 @@ fn main() {
     defines.push(("NDEBUG".into(), None));
     #[cfg(feature = "map-hash-mix")]
     defines.push(("RQUICKJS_MAP_HASH_MIX".into(), None));
+    #[cfg(feature = "source-position")]
+    defines.push(("RQUICKJS_SOURCE_POSITION".into(), None));
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap();

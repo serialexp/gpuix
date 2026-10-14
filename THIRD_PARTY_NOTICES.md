@@ -86,6 +86,13 @@ through **[rquickjs](https://github.com/DelSkayn/rquickjs)** (MIT). Its
 patch to quickjs-ng's Map and Set hashing; `packages/native/vendor/README.md`
 describes it.
 
+The same builds compile apps' TypeScript and JSX with
+**[oxc](https://github.com/oxc-project/oxc)** (MIT, Copyright (c) 2024-present
+VoidZero Inc. & Contributors and 2023 Boshen), and embed bundles of
+**[React](https://github.com/facebook/react)** 19.2.4, react-reconciler 0.33.0
+and scheduler 0.27.0 (MIT, Copyright (c) Meta Platforms, Inc. and affiliates),
+which `packages/native/embedded/build.ts` builds.
+
 ## Other dependencies
 
 | Component | License | Source |

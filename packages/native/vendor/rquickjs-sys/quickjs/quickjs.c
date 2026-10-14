@@ -374,6 +374,10 @@ struct JSRuntime {
     bool in_out_of_memory;
     /* true if inside build_backtrace, to avoid recursing */
     bool in_build_stack_trace;
+#ifdef RQUICKJS_SOURCE_POSITION
+    JSSourcePositionFunc *source_position_func;
+    void *source_position_opaque;
+#endif
     /* true if inside JS_FreeRuntime */
     bool in_free;
 
@@ -8070,6 +8074,28 @@ static int get_sleb128(int32_t *pval, const uint8_t *buf,
     return ret;
 }
 
+#ifdef RQUICKJS_SOURCE_POSITION
+void JS_SetSourcePositionFunc(JSRuntime *rt, JSSourcePositionFunc *func,
+                              void *opaque)
+{
+    rt->source_position_func = func;
+    rt->source_position_opaque = opaque;
+}
+#endif
+
+/* Local patch: the embedder's position, for every position a stack trace
+   shows. */
+static void map_source_position(JSContext *ctx, const char *filename,
+                                int *line_num, int *col_num)
+{
+#ifdef RQUICKJS_SOURCE_POSITION
+    JSRuntime *rt = ctx->rt;
+    if (rt->source_position_func && filename && *line_num > 0)
+        rt->source_position_func(rt->source_position_opaque, filename,
+                                 line_num, col_num);
+#endif
+}
+
 static int find_line_num(JSContext *ctx, JSFunctionBytecode *b,
                          uint32_t pc_value, int *col)
 {
@@ -8204,6 +8230,11 @@ static void build_backtrace(JSContext *ctx, JSValueConst error_val,
         return;
     rt->in_build_stack_trace = true;
     error_obj = js_dup(error_val);
+    /* A parse error's position. It only shows when the error has no stack
+       yet: an error thrown with no JS frame running (a module the embedder
+       declares, say) already has an empty one. */
+    if (filename && line_num != -1)
+        map_source_position(ctx, filename, &line_num, &col_num);
 
     // Save exception because conversion to double may fail.
     saved_exception = JS_GetException(ctx);
@@ -8304,6 +8335,7 @@ static void build_backtrace(JSContext *ctx, JSValueConst error_val,
                 pc = sf->cur_pc - b->byte_code_buf - 1;
                 line_num1 = find_line_num(ctx, b, pc, &col_num1);
                 atom_str = b->filename ? JS_AtomToCString(ctx, b->filename) : NULL;
+                map_source_position(ctx, atom_str, &line_num1, &col_num1);
                 dbuf_printf(&dbuf, " (%s", atom_str ? atom_str : "<null>");
                 JS_FreeCString(ctx, atom_str);
                 if (line_num1 != -1)
@@ -63511,13 +63543,21 @@ static void js_new_callsite_data(JSContext *ctx, JSCallSiteData *csd, JSStackFra
                                   sf->cur_pc - b->byte_code_buf - 1,
                                   &col_num1);
         csd->native = false;
-        csd->line_num = line_num1;
-        csd->col_num = col_num1;
         csd->filename = JS_AtomToString(ctx, b->filename);
         if (JS_IsException(csd->filename)) {
             csd->filename = JS_NULL;
             JS_FreeValue(ctx, JS_GetException(ctx)); // Clear exception.
+        } else {
+            const char *filename = JS_ToCString(ctx, csd->filename);
+            if (filename) {
+                map_source_position(ctx, filename, &line_num1, &col_num1);
+                JS_FreeCString(ctx, filename);
+            } else {
+                JS_FreeValue(ctx, JS_GetException(ctx)); // Clear exception.
+            }
         }
+        csd->line_num = line_num1;
+        csd->col_num = col_num1;
     } else {
         csd->native = true;
         csd->line_num = -1;

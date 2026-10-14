@@ -508,6 +508,17 @@ typedef struct JSGCObjectHeader JSGCObjectHeader;
 JS_EXTERN JSRuntime *JS_NewRuntime(void);
 /* info lifetime must exceed that of rt */
 JS_EXTERN void JS_SetRuntimeInfo(JSRuntime *rt, const char *info);
+#ifdef RQUICKJS_SOURCE_POSITION
+/* Local patch: maps a position in a stack trace, from one, to where it came
+   from, for code compiled from another source. It runs while a trace is
+   built, possibly with the stack nearly full, so it must not call into the
+   runtime. It leaves positions it doesn't know unchanged. */
+typedef void JSSourcePositionFunc(void *opaque, const char *filename,
+                                  int *line_num, int *col_num);
+JS_EXTERN void JS_SetSourcePositionFunc(JSRuntime *rt,
+                                        JSSourcePositionFunc *func,
+                                        void *opaque);
+#endif
 /* use 0 to disable memory limit */
 JS_EXTERN void JS_SetMemoryLimit(JSRuntime *rt, size_t limit);
 JS_EXTERN void JS_SetDumpFlags(JSRuntime *rt, uint64_t flags);

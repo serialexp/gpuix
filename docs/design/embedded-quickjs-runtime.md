@@ -1,7 +1,7 @@
 # Embedded QuickJS runtime
 
 **Status:** In progress
-**Last updated:** 2026-10-13
+**Last updated:** 2026-10-14
 
 ## Implementation status
 
@@ -50,6 +50,18 @@ Tracking the gap between this design and what's on the main branch.
   `window.event`; mouse movement and scrolling stay continuous. Decided by
   Bart on 2026-10-13, for Node and QuickJS alike (`feat(react): give event
   updates React DOM's priorities`)
+- [x] Phase 3: oxc compile of app `.ts`/`.tsx`/`.mts`/`.js`/`.jsx`/`.mjs`
+  files: TypeScript stripped, React automatic JSX with
+  `importSource: "@gpuix/react"`, errors as `path:line:column`
+  (`src/quickjs/compile.rs`, `feat(native): load TypeScript and JSX app modules in QuickJS`)
+- [x] Phase 3: ESM module loader: relative and absolute app imports found the
+  way Bun finds them and compiled on load, bare `react` and `@gpuix/*`
+  imports resolved to the embedded bundles, anything else rejected with the
+  list of what is bundled (`src/quickjs/modules.rs`,
+  `QuickJsRuntime::load_module`, same commit)
+- [x] Phase 3: embedded React, `@gpuix/react` and `@gpuix/native` bundles
+  built by `bun run build:embedded` (`embedded/build.ts`), with a stale-bundle
+  check in `build.rs` (same commit)
 
 ### Outstanding
 
@@ -63,23 +75,26 @@ Tracking the gap between this design and what's on the main branch.
   `__gpuix.renderer` (`focusNext`, `focusPrevious`, `getFocusedElementId`
   and the rest), which `renderer-state.ts` uses for Tab and dismiss layers,
   and a GC hook for `idle-gc.ts` and Solid 2.0's cycles. Due with Phase 4,
-  when a window exists to answer them
-- [ ] Phase 3: oxc compile of app `.ts`/`.tsx`/`.jsx` files (TypeScript strip,
-  React automatic JSX with `importSource: "@gpuix/react"`)
-- [ ] Phase 3: ESM module loader: relative app modules compiled on load, bare
-  `@gpuix/*`, `react` and `solid-js`/`@solidjs/*` imports resolved to
-  embedded bundles
-- [ ] Phase 3: embedded framework bundles built at package build time, with a
-  stale-bundle check in `build.rs`
-- [ ] Phase 4: one app binary that picks the engine from the entry file's
+  when a window exists to answer them. The embedded `@gpuix/native` shim
+  (`embedded/native.ts`) must forward them too, and `getSelectedText`, which
+  `observeSelectedText` calls without `?.`, throws until then
+- [ ] Phase 3: compiled output cached by content hash (deferred to Phase 6,
+  with hot reload: compiling is fast enough that only `--watch` restarts
+  would notice)
+- [ ] Phase 4: one app binary, `gpx`, that picks the engine from the entry file's
   extension (`.lua`/`.luax` or `.js`/`.jsx`/`.ts`/`.tsx`), replacing
-  `gpuix-lua`; same flags (`--check`, `--watch`, window options)
+  `gpuix-lua`; same flags (`--check`, `--watch`, window options). Its build
+  runs `bun run build:embedded` first, since `build.rs` needs the bundles
+- [ ] Phase 4: the embedded `@gpuix/native` shim's `init` applies the window
+  options `render()` passes; it ignores them until a window exists
 - [ ] Phase 4: React app parity tests (the React test suite's host-level cases
   run against the QuickJS host)
 - [ ] Phase 5: move `@gpuix/solid` and its components to Solid 2.0 (Node
   and Bun apps included), compiled with `@solidjs/compiler`
 - [ ] Phase 5: Solid JSX compile for app files with `@solidjs/compiler`'s
   Rust crate in universal mode, pinned to a git revision
+- [ ] Phase 5: embedded `solid-js`, `@solidjs/*` and `@gpuix/solid` bundles,
+  added to `embedded/build.ts`
 - [ ] Phase 5: Solid app parity tests
 - [ ] Phase 6: hot reload: React Fast Refresh via oxc's refresh transform;
   Solid remounts
@@ -90,6 +105,9 @@ Tracking the gap between this design and what's on the main branch.
   only if apps need it)
 - [ ] Bundle any npm package an app imports (deferred: a later goal, see
   open question 3)
+- [ ] Decorators in app code (deferred: quickjs-ng can't run them, so they
+  are a compile error; oxc's decorator transform could lower them if apps
+  need them)
 - [ ] System APIs for apps (deferred: none at first, see open question 4)
 
 ## Why this exists
@@ -255,6 +273,33 @@ option, in which case they move into the core as well (rust-js-vm
 - Compiled output is cached by content hash under the app's cache directory,
   so a `--watch` restart only recompiles changed files.
 
+> **2026-10-14 update:** shipped in `packages/native/src/quickjs/compile.rs`.
+`.mts` compiles too; `.d.ts` files and other extensions are rejected, and
+`.js` files may hold JSX, as in Bun. Nothing is lowered, since QuickJS runs
+current JavaScript. `enum`, `namespace` and constructor parameter properties
+compile. What QuickJS can't run (decorators, `accessor` fields) and
+TypeScript's CommonJS forms (`import x = require()`, `export =`) fail the
+compile at their position. Imports are kept unless they are marked `type`, as
+`verbatimModuleSyntax` (which GPUIX's own packages use) keeps them, so an
+import that only looks unused still runs; oxc's default would drop it. Bart
+chose this over dropping unused imports or reading the app's tsconfig
+(2026-10-14). A type imported without `type` fails at load. Errors read
+`path:line:column: message`, then one line for each other place the error
+points to; columns count UTF-16 code units, as editors do. Each compile also
+keeps a source map, and the prelude's `Error.prepareStackTrace` maps stack
+trace positions in app files back to the source. The cache moved to Phase 6.
+
+> **2026-10-14 update:** the mapping moved from the prelude's
+> `Error.prepareStackTrace` into a C hook, `JS_SetSourcePositionFunc`, added
+> by a second vendored rquickjs-sys patch (`source-position`, see
+> `packages/native/vendor/README.md`). A JavaScript hook can't run when the
+> stack is full, so QuickJS left a stack overflow with no stack at all. The
+> C hook also maps the positions an app's own `Error.prepareStackTrace`
+> gets; an app that sets one still loses a stack overflow's frames, as in
+> stock QuickJS. oxc now checks regular expressions too, so a bad one fails
+> the compile at its position rather than in QuickJS with none. Bart chose this over a fallback-only patch or mapping only in
+> GPUIX's own error output.
+
 ### Modules
 
 QuickJS runs ES modules natively. A loader resolves:
@@ -273,6 +318,30 @@ Lua runtime's bundled `gpuix.*` modules.
 > **2026-10-13 update:** only the embedded framework bundles for the first version.
 Bundling any package an app imports is a later goal (open question 3).
 
+> **2026-10-14 update:** shipped as `packages/native/src/quickjs/modules.rs`
+and `packages/native/embedded/build.ts`:
+>
+> - One `Bun.build` with code splitting covers every importable module, so
+>   React exists once: `react`, `react/jsx-runtime`, `@gpuix/react` and its
+>   subpaths, and `@gpuix/native` and its subpaths except `./testing` and
+>   `./automation`, which need Node. 16 modules, about 500 KiB, built from
+>   React's production build. `react-reconciler` and `scheduler` are inside
+>   the bundles but aren't importable themselves.
+> - React is CommonJS, so its entries re-export the names its production
+>   build has.
+> - `@gpuix/native` is a shim (`embedded/native.ts`) over the host's
+>   `__gpuix` object. The automation client is replaced by a stub that
+>   throws, which keeps zod out of the bundle.
+> - The output (`embedded/dist/`) isn't committed, like `build:js`'s. Its
+>   manifest records a hash of every file the build read, and `build.rs`
+>   fails with the command to run when the bundle is missing or stale.
+> - App files are named by their real path, so one file reached two ways is
+>   one module. Relative imports resolve as Bun resolves them: the exact
+>   file, `.js` naming `.ts` or `.tsx`, an added extension, then `index.*`,
+>   trying extensions in Bun's order for `import` (tsx, jsx, mts, ts, mjs,
+>   js). `with { type: ... }` imports are rejected.
+> - The Solid bundles come with Phase 5.
+
 ### The `gpuix-js` binary
 
 Mirrors `gpuix-lua`: `gpuix-js [--check] [--watch] [--title] [--width]
@@ -284,6 +353,9 @@ the Lua tests use.
 > **2026-10-13 update:** one binary for both engines instead, picking the engine from
 the entry file's extension (open question 5). It replaces `gpuix-lua`. The
 name is still to be picked; `cli/` already ships the npm `gpuix` command.
+
+> **2026-10-14 update:** the binary is `gpx` (decided by Bart): short, and
+separate from the npm `gpuix` command that creates apps.
 
 ## Phasing
 

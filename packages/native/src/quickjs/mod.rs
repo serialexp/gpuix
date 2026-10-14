@@ -13,6 +13,10 @@
 //! left. [`QuickJsRuntime::run_timers`] runs the timers that are due, and
 //! [`QuickJsRuntime::next_timer`] says when to call it again.
 //!
+//! Apps are ES modules: [`QuickJsRuntime::load_module`] imports the entry
+//! file, and `modules.rs` resolves its imports to app files (compiled by
+//! `compile.rs`) or to the embedded framework bundles.
+//!
 //! A call fails if JS threw into it, a promise job threw, a promise was
 //! rejected with no handler by the time the jobs ran out, or the app called
 //! `reportError`. The rest of the call's work still runs, and every failure
@@ -23,18 +27,26 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::ffi::{c_char, c_int, c_void, CStr};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use rquickjs::context::EvalOptions;
-use rquickjs::{qjs, Context, Ctx, Exception, Function, Object, Persistent, Runtime, Value};
+use rquickjs::function::This;
+use rquickjs::{
+    qjs, Context, Ctx, Exception, Function, Module, Object, Persistent, Promise, Runtime, Value,
+};
 
 use crate::element_tree::EventPayload;
 use crate::renderer::apply_batch_to_tree;
 use crate::retained_tree::RetainedTree;
 
+mod compile;
+mod modules;
 #[cfg(test)]
 mod tests;
 
@@ -94,6 +106,9 @@ struct Shared {
     rejections: RefCell<Vec<(Persistent<Value<'static>>, Persistent<Value<'static>>)>>,
     clock: Box<dyn Fn() -> f64>,
     console: RefCell<ConsoleSink>,
+    /// Each compiled app module's positions, by module name, for stack
+    /// traces.
+    positions: RefCell<HashMap<String, compile::PositionMap>>,
 }
 
 /// The prelude's hooks, saved before app code runs, so an app that writes to
@@ -104,6 +119,8 @@ struct Hooks {
     run_timer: Persistent<Function<'static>>,
     next_timer: Persistent<Function<'static>>,
     describe: Persistent<Function<'static>>,
+    /// The global `reportError`.
+    report_error: Persistent<Function<'static>>,
 }
 
 impl Hooks {
@@ -118,6 +135,7 @@ impl Hooks {
             run_timer: hook("runTimer")?,
             next_timer: hook("nextTimer")?,
             describe: hook("describe")?,
+            report_error: Persistent::save(ctx, ctx.globals().get::<_, Function>("reportError")?),
         })
     }
 }
@@ -153,6 +171,8 @@ pub(crate) struct QuickJsRuntime {
 
 impl Drop for QuickJsRuntime {
     fn drop(&mut self) {
+        // The hook points at `shared`, which may go before the runtime.
+        self.set_source_position_hook(std::ptr::null());
         // The runtime's rejection tracker owns a handle to `shared`, so these
         // would otherwise outlive the runtime. Each call clears them, but a
         // call that unwound may not have.
@@ -169,6 +189,47 @@ impl QuickJsRuntime {
         tree: &mut RetainedTree,
         options: QuickJsOptions,
     ) -> Result<Self, String> {
+        let js = Self::start(options)?;
+        js.call(tree, |ctx, _| {
+            let mut options = EvalOptions::default();
+            options.strict = false;
+            options.filename = Some(file_name.to_string());
+            ctx.eval_with_options::<(), _>(source, options)
+        })?;
+        Ok(js)
+    }
+
+    /// Start a runtime and import the app module at `entry`, with the
+    /// modules it imports. It fails if one can't be found or compiled, or
+    /// the entry throws while it runs. An entry still waiting on top-level
+    /// `await` keeps running, and a failure after that fails the call it
+    /// happens in.
+    pub(crate) fn load_module(
+        entry: &Path,
+        tree: &mut RetainedTree,
+        options: QuickJsOptions,
+    ) -> Result<Self, String> {
+        let entry = std::path::absolute(entry)
+            .map_err(|error| format!("cannot load {}: {error}", entry.display()))?;
+        let entry = entry
+            .to_str()
+            .ok_or_else(|| format!("cannot load {}: the path isn't UTF-8", entry.display()))?;
+        let js = Self::start(options)?;
+        js.call(tree, |ctx, hooks| {
+            // The entry runs inside `import`, so its failure is reported
+            // with the prelude's `reportError`, which the app can't replace.
+            let report = hooks.report_error.clone().restore(ctx)?;
+            let promise: Promise = Module::import(ctx, entry)?;
+            promise
+                .catch()?
+                .call::<_, Value>((This(promise.clone()), report))?;
+            Ok(())
+        })?;
+        Ok(js)
+    }
+
+    /// A runtime with the prelude run and the module loader installed.
+    fn start(options: QuickJsOptions) -> Result<Self, String> {
         let runtime = Runtime::new().map_err(|error| format!("cannot start QuickJS: {error}"))?;
         let context =
             Context::full(&runtime).map_err(|error| format!("cannot start QuickJS: {error}"))?;
@@ -179,6 +240,7 @@ impl QuickJsRuntime {
             rejections: RefCell::new(Vec::new()),
             clock: options.clock,
             console: RefCell::new(options.console),
+            positions: RefCell::new(HashMap::new()),
         });
         let tracked = shared.clone();
         runtime.set_host_promise_rejection_tracker(Some(Box::new(
@@ -202,19 +264,40 @@ impl QuickJsRuntime {
                 other => format!("the QuickJS prelude failed: {other}"),
             })
         })?;
+        runtime.set_loader(
+            modules::AppResolver(shared.clone()),
+            modules::AppLoader(shared.clone()),
+        );
         let js = Self {
             hooks,
             shared,
             context,
             runtime,
         };
-        js.call(tree, |ctx, _| {
-            let mut options = EvalOptions::default();
-            options.strict = false;
-            options.filename = Some(file_name.to_string());
-            ctx.eval_with_options::<(), _>(source, options)
-        })?;
+        js.set_source_position_hook(Rc::as_ptr(&js.shared));
         Ok(js)
+    }
+
+    /// Maps stack trace positions with `shared`'s position maps, or stops
+    /// mapping them when `shared` is null.
+    fn set_source_position_hook(&self, shared: *const Shared) {
+        self.context.with(|ctx| {
+            // SAFETY: the context's runtime is live. The hook only reads
+            // through `shared` while the runtime builds a stack trace, and
+            // `drop` unsets it before `shared` can go.
+            unsafe {
+                let runtime = qjs::JS_GetRuntime(ctx.as_raw().as_ptr());
+                if shared.is_null() {
+                    JS_SetSourcePositionFunc(runtime, None, std::ptr::null_mut());
+                } else {
+                    JS_SetSourcePositionFunc(
+                        runtime,
+                        Some(map_source_position),
+                        shared.cast_mut().cast(),
+                    );
+                }
+            }
+        });
     }
 
     /// Deliver one GPUI event to the handler the app registered with
@@ -350,6 +433,65 @@ impl QuickJsRuntime {
     }
 }
 
+// From the vendored rquickjs-sys's `source-position` patch; see
+// `vendor/README.md`.
+type SourcePositionFunc = unsafe extern "C" fn(
+    opaque: *mut c_void,
+    file: *const c_char,
+    line: *mut c_int,
+    column: *mut c_int,
+);
+
+extern "C" {
+    fn JS_SetSourcePositionFunc(
+        runtime: *mut qjs::JSRuntime,
+        func: Option<SourcePositionFunc>,
+        opaque: *mut c_void,
+    );
+}
+
+/// Maps a position in a compiled app module back to its source, for every
+/// stack trace QuickJS builds, `Error.prepareStackTrace`'s call sites
+/// included. It runs in C with the stack possibly nearly full, so it only
+/// reads the position maps, and leaves a position it can't map unchanged.
+unsafe extern "C" fn map_source_position(
+    opaque: *mut c_void,
+    file: *const c_char,
+    line: *mut c_int,
+    column: *mut c_int,
+) {
+    // SAFETY: `opaque` is the runtime's live `Shared` (see
+    // `set_source_position_hook`), and QuickJS passes a valid file name and
+    // position.
+    let (shared, file, line, column) = unsafe {
+        (
+            &*opaque.cast::<Shared>(),
+            CStr::from_ptr(file),
+            &mut *line,
+            &mut *column,
+        )
+    };
+    let (Ok(file), Ok(positions)) = (file.to_str(), shared.positions.try_borrow()) else {
+        return;
+    };
+    let (Ok(compiled_line), Ok(compiled_column)) = (u32::try_from(*line), u32::try_from(*column))
+    else {
+        return;
+    };
+    let Some((source_line, source_column)) = positions
+        .get(file)
+        .and_then(|map| map.source_position(compiled_line, compiled_column))
+    else {
+        return;
+    };
+    if let (Ok(source_line), Ok(source_column)) =
+        (c_int::try_from(source_line), c_int::try_from(source_column))
+    {
+        *line = source_line;
+        *column = source_column;
+    }
+}
+
 fn install_host<'js>(ctx: &Ctx<'js>, shared: &Rc<Shared>) -> rquickjs::Result<()> {
     let host = Object::new(ctx.clone())?;
 
@@ -430,9 +572,40 @@ fn guard<'js, T>(
                 .unwrap_or("no message");
             let error = format!("GPUIX panicked in {name}: {message}");
             shared.errors.borrow_mut().push(error.clone());
-            Err(Exception::throw_internal(ctx, &error))
+            Err(throw_whole(ctx, ErrorKind::Internal, &error))
         }
     }
+}
+
+pub(crate) enum ErrorKind {
+    Syntax,
+    Internal,
+}
+
+/// Throws a `SyntaxError` or `InternalError` with all of `message`.
+/// rquickjs's `Exception::throw_syntax` and `throw_internal` format it into
+/// a 256-byte buffer, which an absolute path and one note already fill.
+pub(crate) fn throw_whole(ctx: &Ctx<'_>, kind: ErrorKind, message: &str) -> rquickjs::Error {
+    let raw = ctx.as_raw().as_ptr();
+    // SAFETY: `raw` is this live context. The error comes back as a new
+    // reference, which `from_raw` takes; on failure it is the exception
+    // marker, with the exception already pending.
+    let error = unsafe {
+        let value = match kind {
+            ErrorKind::Syntax => qjs::JS_NewSyntaxError(raw, c"%s".as_ptr(), c"".as_ptr()),
+            ErrorKind::Internal => qjs::JS_NewInternalError(raw, c"%s".as_ptr(), c"".as_ptr()),
+        };
+        Value::from_raw(ctx.clone(), value)
+    };
+    if error.is_exception() {
+        return rquickjs::Error::Exception;
+    }
+    if let Some(object) = error.as_object() {
+        if let Err(failure) = object.set("message", message) {
+            return failure;
+        }
+    }
+    ctx.throw(error)
 }
 
 /// A proxy's target (`null` once revoked), or `undefined` for anything else.

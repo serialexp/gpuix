@@ -1,7 +1,9 @@
 use std::cell::{Cell, RefCell};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
+use super::compile::compile;
 use super::{ConsoleLevel, QuickJsOptions, QuickJsRuntime};
 use crate::element_tree::{EventModifiers, EventPayload};
 use crate::retained_tree::RetainedTree;
@@ -21,14 +23,25 @@ struct App {
 
 impl App {
     fn try_load(source: &str) -> Result<Self, String> {
+        Self::start(|tree, options| {
+            QuickJsRuntime::load(&format!("{BATCH}{source}"), "app.js", tree, options)
+        })
+    }
+
+    fn try_load_module(entry: &Path) -> Result<Self, String> {
+        Self::start(|tree, options| QuickJsRuntime::load_module(entry, tree, options))
+    }
+
+    /// A runtime from `load`, on a fake clock, with its console captured.
+    fn start(
+        load: impl FnOnce(&mut RetainedTree, QuickJsOptions) -> Result<QuickJsRuntime, String>,
+    ) -> Result<Self, String> {
         let time = Rc::new(Cell::new(0.0));
         let output = Output::default();
         let clock = time.clone();
         let console = output.clone();
         let mut tree = RetainedTree::new();
-        let js = QuickJsRuntime::load(
-            &format!("{BATCH}{source}"),
-            "app.js",
+        let js = load(
             &mut tree,
             QuickJsOptions {
                 clock: Box::new(move || clock.get()),
@@ -849,4 +862,481 @@ fn writing_to_the_host_object_does_not_change_the_runtime() {
     );
     app.advance_to(5.0).unwrap();
     assert_eq!(app.log(), ["5"]);
+}
+
+// ── Modules ──────────────────────────────────────────────────────────────
+
+/// A directory of app files under the system temp directory, removed on drop.
+struct AppDir(PathBuf);
+
+impl AppDir {
+    fn new(files: &[(&str, &str)]) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let unique = format!(
+            "gpuix-quickjs-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let dir = Self(std::env::temp_dir().join(unique));
+        for (name, source) in files {
+            let path = dir.0.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, source).unwrap();
+        }
+        dir
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+}
+
+impl Drop for AppDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl App {
+    /// Run timers that are due now until none is: React's scheduler works
+    /// in `setImmediate` slices.
+    fn settle(&mut self) {
+        while self.js.next_timer().unwrap() == Some(Duration::ZERO) {
+            self.js.run_timers(&mut self.tree).unwrap();
+        }
+    }
+
+    fn test_id(&self, test_id: &str) -> u64 {
+        self.tree
+            .elements
+            .values()
+            .find(|element| element.test_id.as_deref() == Some(test_id))
+            .unwrap_or_else(|| panic!("no element with test id {test_id:?}"))
+            .id
+    }
+
+    fn texts(&self) -> Vec<String> {
+        let mut texts: Vec<String> = self
+            .tree
+            .elements
+            .values()
+            .filter_map(|element| element.content.clone())
+            .collect();
+        texts.sort();
+        texts
+    }
+}
+
+#[test]
+fn typescript_and_jsx_compile_to_plain_javascript() {
+    let code = compile(
+        "const size: number = 2;\nexport const view = <div style={{ width: size }}>{'hi'}</div>;\n",
+        Path::new("view.tsx"),
+    )
+    .unwrap()
+    .code;
+    assert!(
+        code.contains(r#"from "@gpuix/react/jsx-runtime""#),
+        "{code}"
+    );
+    assert!(!code.contains(": number"), "{code}");
+    assert!(compile("export const a = 1 as const;", Path::new("a.mts")).is_ok());
+    for name in ["a.jsx", "a.js", "a.mjs"] {
+        assert!(compile("export const a = <b />;", Path::new(name)).is_ok());
+    }
+    // TypeScript's own `<Type>value` casts stay unambiguous in `.ts`.
+    assert!(compile("export const a = <number>1;", Path::new("a.ts")).is_ok());
+}
+
+#[test]
+fn what_quickjs_cant_run_fails_the_compile_where_it_is() {
+    let error = |source: &str| match compile(source, Path::new("app.ts")) {
+        Ok(compiled) => panic!("{source:?} compiled to {}", compiled.code),
+        Err(error) => error,
+    };
+    let decorator = error("const sealed = (c: unknown) => c;\n@sealed class A {}\n");
+    assert!(
+        decorator.starts_with("app.ts:2:1: Decorators aren't supported"),
+        "{decorator}"
+    );
+    let accessor = error("class B { accessor x = 1 }");
+    assert!(
+        accessor.starts_with("app.ts:1:11: `accessor` fields aren't supported"),
+        "{accessor}"
+    );
+    let require = error("import fs = require('fs')");
+    assert!(
+        require.starts_with("app.ts:1:1: `import ... = require(...)`"),
+        "{require}"
+    );
+    assert!(require.contains("help: apps are ES modules"), "{require}");
+    let export = error("export = 1");
+    assert!(
+        export.starts_with("app.ts:1:1: `export =` isn't supported"),
+        "{export}"
+    );
+    // An alias of a namespace member is fine: it is plain TypeScript. So is
+    // what TypeScript removes: `declare` blocks, abstract members and
+    // type-only imports.
+    for source in [
+        "namespace N { export const x = 1 }\nimport x = N.x",
+        "declare module \"untyped\" { const x: any; export = x }",
+        "declare class D { accessor x: number }",
+        "export declare namespace E { class F { accessor g: number } }",
+        "abstract class C { abstract accessor x: number }",
+        "import type fs = require(\"fs\")",
+    ] {
+        if let Err(error) = compile(source, Path::new("ok.ts")) {
+            panic!("{source:?} failed: {error}");
+        }
+    }
+}
+
+#[test]
+fn imports_stay_unless_marked_as_types() {
+    let code = compile(
+        r#"
+        import unused from "./unused"
+        import { used, type Shape } from "./used"
+        import type { Only } from "./types"
+        import "./effects"
+        export const value: Shape | Only = used
+        "#,
+        Path::new("main.ts"),
+    )
+    .unwrap()
+    .code;
+    assert!(code.contains(r#"from "./unused""#), "{code}");
+    assert!(code.contains(r#"import { used } from "./used""#), "{code}");
+    assert!(code.contains(r#"import "./effects""#), "{code}");
+    assert!(!code.contains("./types"), "{code}");
+}
+
+#[test]
+fn compile_errors_give_the_file_line_and_column() {
+    let error = compile("const a = 1;\nconst b = ;\n", Path::new("src/bad.ts"))
+        .err()
+        .unwrap();
+    assert!(error.starts_with("src/bad.ts:2:11: "), "{error}");
+    let error = compile("let a = 1;\nlet a = 2;\n", Path::new("twice.ts"))
+        .err()
+        .unwrap();
+    assert_eq!(
+        error,
+        "twice.ts:1:5: Identifier `a` has already been declared\n  \
+         twice.ts:1:5: `a` has already been declared here\n  \
+         twice.ts:2:5: It can not be redeclared here"
+    );
+    for name in ["types.d.ts", "old.cjs", "data.json"] {
+        let error = compile("", Path::new(name)).err().unwrap();
+        assert!(error.contains("an app module must be"), "{error}");
+    }
+    // A byte-order mark isn't a column.
+    let error = compile("\u{FEFF}const b = ;", Path::new("bom.ts"))
+        .err()
+        .unwrap();
+    assert!(error.starts_with("bom.ts:1:11: "), "{error}");
+    // Columns count UTF-16 code units, as editors do: the emoji is two.
+    let error = compile("const a = \"😀\" + ;", Path::new("e.ts"))
+        .err()
+        .unwrap();
+    assert!(error.starts_with("e.ts:1:18: "), "{error}");
+}
+
+#[test]
+fn enums_namespaces_and_parameter_properties_run() {
+    let dir = AppDir::new(&[(
+        "main.ts",
+        r#"
+        enum Color { Red, Green = "g" }
+        namespace Sizes { export const small = 1 }
+        class Point { constructor(public x: number) {} }
+        console.log(Color.Red, Color.Green, Sizes.small, new Point(3).x)
+        "#,
+    )]);
+    let app = App::try_load_module(&dir.path("main.ts")).unwrap();
+    assert_eq!(app.log(), ["0 g 1 3"]);
+}
+
+#[test]
+fn stack_traces_point_at_the_source_lines() {
+    let dir = AppDir::new(&[(
+        "main.ts",
+        r#"interface Shape {
+  width: number
+  height: number
+}
+type Size = number
+export function fail(size: Size): never {
+  throw new Error(`mapped ${size}`)
+}
+try { fail(1) } catch (error) { console.log((error as Error).stack) }
+fail(2)
+"#,
+    )]);
+    let main = std::fs::canonicalize(dir.path("main.ts")).unwrap();
+    let main = main.display();
+    let app = App::try_load_module(&dir.path("main.ts"));
+    let error = app.err().unwrap();
+    assert!(error.contains("Error: mapped 2"), "{error}");
+    assert!(error.contains(&format!("at fail ({main}:7:")), "{error}");
+    assert!(error.contains(&format!("({main}:10:")), "{error}");
+}
+
+#[test]
+fn stack_traces_map_lines_and_columns_past_unusual_line_breaks() {
+    // A line separator inside a template is one line to oxc but not to
+    // QuickJS or an editor; a lone `\r` is one line to all three.
+    let dir = AppDir::new(&[(
+        "main.ts",
+        "const a: string = `x\u{2028}y`\nconst b = `p\rq`\nfunction fail() {\n  const s = \"😀\"; throw new Error(a + b + s)\n}\nfail()\n",
+    )]);
+    let main = std::fs::canonicalize(dir.path("main.ts")).unwrap();
+    let error = App::try_load_module(&dir.path("main.ts")).err().unwrap();
+    // The lone `\r` makes the `throw` line 5. QuickJS puts a `new` call at
+    // its last argument, `s`, here after the emoji's two UTF-16 units.
+    assert!(
+        error.contains(&format!("at fail ({}:5:43)", main.display())),
+        "{error}"
+    );
+    assert!(
+        error.contains(&format!("({}:7:1)", main.display())),
+        "{error}"
+    );
+}
+
+#[test]
+fn stack_traces_keep_quickjs_frames_and_limits() {
+    let app = App::try_load(
+        r#"
+        try { [1].map(() => { throw new Error("in map") }) }
+        catch (error) { console.log(error.stack) }
+        Error.stackTraceLimit = 1
+        console.log(new Error("one").stack)
+        Error.stackTraceLimit = 0
+        console.log(new Error("none").stack)
+        "#,
+    )
+    .unwrap();
+    let log = app.log();
+    assert!(log[0].contains("    at map (native)\n"), "{}", log[0]);
+    assert_eq!(log[1].matches("    at ").count(), 1, "{}", log[1]);
+    // quickjs-ng's stack holds only the frames, not the message.
+    assert_eq!(log[2], "");
+}
+
+#[test]
+fn a_stack_overflow_keeps_its_mapped_frames() {
+    let dir = AppDir::new(&[(
+        "main.ts",
+        "type N = number\nfunction deep(n: N): N {\n  return deep(n + 1) + 1\n}\ndeep(0)\n",
+    )]);
+    let main = std::fs::canonicalize(dir.path("main.ts")).unwrap();
+    let error = App::try_load_module(&dir.path("main.ts")).err().unwrap();
+    assert!(
+        error.contains("Maximum call stack size exceeded"),
+        "{error}"
+    );
+    assert!(
+        error.contains(&format!("at deep ({}:3:", main.display())),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_apps_own_stack_format_gets_source_positions() {
+    let dir = AppDir::new(&[(
+        "main.ts",
+        r#"type Site = { getLineNumber(): number; getColumnNumber(): number }
+Error.prepareStackTrace = (_error, sites: Site[]) =>
+  sites.map((site) => `${site.getLineNumber()}:${site.getColumnNumber()}`).join(" ")
+function make(): Error {
+  return new Error("here")
+}
+console.log(make().stack)
+"#,
+    )]);
+    let app = App::try_load_module(&dir.path("main.ts")).unwrap();
+    // QuickJS puts `new Error(...)` at `Error`, and the call at `make`.
+    assert_eq!(app.log(), ["5:14 7:13"]);
+}
+
+#[test]
+fn a_bad_regex_fails_the_compile_where_it_is() {
+    let error = compile("type T = number\nconst r = /[z-a]/\n", Path::new("re.ts"))
+        .err()
+        .unwrap();
+    assert!(error.starts_with("re.ts:2:"), "{error}");
+}
+
+#[test]
+fn a_long_compile_error_reaches_the_app_whole() {
+    let dir = AppDir::new(&[("main.ts", "let a = 1;\nlet a = 2;\n")]);
+    let error = App::try_load_module(&dir.path("main.ts")).err().unwrap();
+    assert!(error.contains("SyntaxError: "), "{error}");
+    assert!(error.contains("It can not be redeclared here"), "{error}");
+}
+
+#[test]
+fn a_caught_dynamic_import_doesnt_fail_the_load() {
+    let dir = AppDir::new(&[
+        (
+            "main.ts",
+            r#"
+            import("./missing").catch((error) => console.log(`missing: ${error.message}`))
+            import("./broken").catch((error) => console.log(`broken: ${error.message}`))
+            "#,
+        ),
+        ("broken.ts", "const = 1"),
+    ]);
+    let app = App::try_load_module(&dir.path("main.ts")).unwrap();
+    let log = app.log();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert!(
+        log.iter()
+            .any(|line| line.starts_with("missing: Cannot find")),
+        "{log:?}"
+    );
+    assert!(
+        log.iter().any(|line| line.contains("broken.ts:1:7")),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn an_app_cant_hide_a_failed_load_by_replacing_report_error() {
+    let dir = AppDir::new(&[(
+        "main.ts",
+        "globalThis.reportError = () => {}\nthrow new Error('still reported')\n",
+    )]);
+    let error = App::try_load_module(&dir.path("main.ts")).err().unwrap();
+    assert!(error.contains("still reported"), "{error}");
+}
+
+#[test]
+fn a_react_app_renders_and_handles_clicks() {
+    let dir = AppDir::new(&[
+        (
+            "main.tsx",
+            r#"
+            import { render } from "@gpuix/react"
+            import { Counter } from "./counter"
+            render(<Counter label="Count" />)
+            "#,
+        ),
+        (
+            "counter.tsx",
+            r#"
+            import { useState } from "react"
+            export function Counter({ label }: { label: string }) {
+              const [count, setCount] = useState(0)
+              return (
+                <div testId="counter" onClick={() => setCount((value) => value + 1)}>
+                  <text>{`${label}: ${count}`}</text>
+                </div>
+              )
+            }
+            "#,
+        ),
+    ]);
+    let mut app = App::try_load_module(&dir.path("main.tsx")).unwrap();
+    app.settle();
+    assert_eq!(app.texts(), ["Count: 0"]);
+    let counter = app.test_id("counter");
+    // A click commits in a microtask, before the call returns, and says
+    // whether a handler took it.
+    assert!(app.click(counter).unwrap());
+    assert_eq!(app.texts(), ["Count: 1"]);
+    assert!(!app.click(counter + 1000).unwrap());
+    assert!(app.log().contains(&"[gpuix] mount complete".to_string()));
+}
+
+#[test]
+fn imports_resolve_the_way_bun_finds_files() {
+    let dir = AppDir::new(&[
+        (
+            "main.ts",
+            r#"
+            import { a } from "./lib/a.js"
+            import { b } from "./lib/b"
+            import { c } from "./lib"
+            import { a as again } from "./lib/../lib/a.ts"
+            import { useState } from "react"
+            console.log(a, b, c, again === a, typeof useState)
+            "#,
+        ),
+        ("lib/a.ts", "export const a = 'a' as string"),
+        ("lib/b.tsx", "export const b = 'b'"),
+        ("lib/index.mjs", "export const c = 'c'"),
+    ]);
+    let app = App::try_load_module(&dir.path("main.ts")).unwrap();
+    assert_eq!(app.log(), ["a b c true function"]);
+}
+
+#[test]
+fn an_import_without_an_extension_tries_them_in_buns_order() {
+    let dir = AppDir::new(&[
+        (
+            "main.ts",
+            r#"
+            import { from as exact } from "./exact.js"
+            import { from as first } from "./first"
+            import { from as second } from "./second"
+            console.log(exact, first, second)
+            "#,
+        ),
+        ("exact.js", "export const from = 'js'"),
+        ("exact.ts", "export const from = 'ts'"),
+        ("first.ts", "export const from = 'ts'"),
+        ("first.tsx", "export const from = 'tsx'"),
+        ("second.ts", "export const from = 'ts'"),
+        ("second.jsx", "export const from = 'jsx'"),
+    ]);
+    let app = App::try_load_module(&dir.path("main.ts")).unwrap();
+    assert_eq!(app.log(), ["js tsx jsx"]);
+}
+
+#[test]
+fn importing_anything_else_fails_the_load() {
+    let dir = AppDir::new(&[
+        ("package.ts", "import 'lodash'"),
+        ("node.ts", "import 'node:fs'"),
+        ("missing.ts", "import './nowhere'"),
+        (
+            "json.ts",
+            "import data from './data.json' with { type: 'json' }",
+        ),
+        ("data.json", "{}"),
+        ("broken.ts", "import './syntax'"),
+        ("syntax.ts", "export const a = 1;\nexport const = 2;\n"),
+    ]);
+    let error = |name: &str| match App::try_load_module(&dir.path(name)) {
+        Ok(app) => panic!("{name} loaded: {:?}", app.log()),
+        Err(error) => error,
+    };
+    let package = error("package.ts");
+    assert!(package.contains(r#"Cannot import "lodash""#), "{package}");
+    assert!(package.contains("@gpuix/react/jsx-runtime"), "{package}");
+    assert!(error("node.ts").contains(r#"Cannot import "node:fs""#));
+    assert!(error("missing.ts").contains(r#"Cannot find "./nowhere""#));
+    assert!(error("json.ts").contains("aren't supported"));
+    let syntax = error("broken.ts");
+    assert!(syntax.contains("syntax.ts:2:"), "{syntax}");
+    let entry = error("absent.ts");
+    assert!(entry.contains("Cannot find /"), "{entry}");
+    assert!(!entry.contains("imported from"), "{entry}");
+}
+
+#[test]
+fn a_module_failing_after_top_level_await_fails_that_call() {
+    let dir = AppDir::new(&[(
+        "main.ts",
+        r#"
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        throw new Error("after the wait")
+        "#,
+    )]);
+    let mut app = App::try_load_module(&dir.path("main.ts")).unwrap();
+    let error = app.advance_to(10.0).unwrap_err();
+    assert!(error.contains("Error: after the wait"), "{error}");
 }

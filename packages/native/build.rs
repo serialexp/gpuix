@@ -12,6 +12,80 @@ fn main() {
     {
         pack_phosphor_icons();
     }
+    let browser = std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32")
+        && std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("unknown");
+    if std::env::var_os("CARGO_FEATURE_QUICKJS").is_some() && !browser {
+        embed_modules();
+    }
+}
+
+/// Checks the framework bundles `embedded/build.ts` wrote against the files
+/// they were built from, and writes the table `src/quickjs/` embeds them
+/// with. A stale bundle fails the build rather than being embedded.
+fn embed_modules() {
+    let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let manifest_path = manifest_dir.join("embedded/dist/manifest.txt");
+    let rebuild = "run `bun run build:embedded` in packages/native";
+    println!("cargo:rerun-if-changed={}", manifest_path.display());
+    let manifest = fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|error| panic!("reading {}: {error}; {rebuild}", manifest_path.display()));
+    let mut recorded = None;
+    let mut inputs = Vec::new();
+    let mut modules = Vec::new();
+    let mut files = Vec::new();
+    for line in manifest.lines().filter(|line| !line.starts_with('#')) {
+        let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
+        match kind {
+            "hash" => recorded = Some(rest),
+            "input" => inputs.push(rest),
+            "module" => modules.push(rest.split_once(' ').expect("module <specifier> <file>")),
+            "file" => files.push(rest),
+            _ => panic!(
+                "{}: unexpected line {line:?}; {rebuild}",
+                manifest_path.display()
+            ),
+        }
+    }
+    let recorded =
+        recorded.unwrap_or_else(|| panic!("{} has no hash; {rebuild}", manifest_path.display()));
+
+    // FNV-1a, 64-bit, over each input's path and bytes, each followed by a
+    // zero byte, as `embedded/build.ts` computes it.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for input in &inputs {
+        let path = manifest_dir.join(input);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("reading {}: {error}; {rebuild}", path.display()));
+        for byte in input.bytes().chain([0]).chain(bytes).chain([0]) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    let expected = format!("{hash:016x}");
+    if recorded != expected {
+        panic!("the embedded framework bundles are stale (built from {recorded}, sources are {expected}); {rebuild}");
+    }
+
+    let mut table = String::from("/// Import specifiers and the embedded file each one loads.\n");
+    table.push_str("pub(crate) static MODULES: &[(&str, &str)] = &[\n");
+    for (specifier, file) in &modules {
+        table.push_str(&format!("    ({specifier:?}, {file:?}),\n"));
+    }
+    table.push_str("];\n\n/// Every embedded file, by its path under `embedded/dist/modules`.\n");
+    table.push_str("pub(crate) static FILES: &[(&str, &str)] = &[\n");
+    for file in &files {
+        let path = manifest_dir.join("embedded/dist/modules").join(file);
+        println!("cargo:rerun-if-changed={}", path.display());
+        table.push_str(&format!(
+            "    ({file:?}, include_str!({:?})),\n",
+            path.display().to_string()
+        ));
+    }
+    table.push_str("];\n");
+    let output = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("embedded_modules.rs");
+    fs::write(&output, table)
+        .unwrap_or_else(|error| panic!("failed to write {}: {error}", output.display()));
 }
 
 fn pack_phosphor_icons() {

@@ -69,6 +69,9 @@ mlua = { version = "0.11", default-features = false, features = ["serialize", "s
 # patched below.
 rquickjs = { version = "0.14", optional = true }
 rquickjs-sys = { version = "0.14", optional = true }
+# Compiles app TypeScript and JSX for QuickJS. Pinned to the oxc that Solid
+# 2.0's compiler (`@solidjs/compiler`) builds on, so the two can share it.
+oxc = { version = "=0.144.0", optional = true, features = ["ast_visit", "codegen", "regular_expression", "semantic", "transformer"] }
 
 # The slow half of the engine split above. fancy-regex is pure Rust, so it is
 # the only Syntect engine that builds here, and the browser still pays ~133ms on
@@ -110,12 +113,15 @@ luajit = ["mlua/luajit", "mlua/vendored"]
 #   hash whose low bits are constant for small integers and object pointers,
 #   so those maps degrade towards linear scans. Solid's `For` keys a Map by
 #   both: reversing 10,000 rows takes 75 ms without the fix and 13 ms with it.
+# - source-position: lets the runtime map stack trace positions in compiled
+#   app modules back to their source, even for a stack overflow.
 # - disable-assertions: quickjs-ng's C asserts are on unless this is set. The
 #   vendored Lua builds without API checks too.
-quickjs = ["dep:rquickjs", "rquickjs/disable-assertions", "dep:rquickjs-sys", "rquickjs-sys/map-hash-mix"]
+quickjs = ["dep:rquickjs", "rquickjs/disable-assertions", "rquickjs/loader", "dep:rquickjs-sys", "rquickjs-sys/map-hash-mix", "rquickjs-sys/source-position", "dep:oxc"]
 
-# rquickjs-sys 0.14.0 with vendor/rquickjs-sys-0.14.0-map-hash-mix.diff applied
-# behind its `map-hash-mix` feature. See vendor/README.md.
+# rquickjs-sys 0.14.0 with vendor/rquickjs-sys-0.14.0-map-hash-mix.diff and
+# vendor/rquickjs-sys-0.14.0-source-position.diff applied, behind its
+# `map-hash-mix` and `source-position` features. See vendor/README.md.
 [patch.crates-io]
 rquickjs-sys = { path = "vendor/rquickjs-sys" }
 

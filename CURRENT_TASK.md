@@ -37,7 +37,7 @@ built-in JSX/TSX compilation) behind a shared core.
 
 ## Verification (macOS)
 
-- Rust lib tests: 367 passed with Lua 5.4; the Lua runtime tests also pass with LuaJIT. Use a real path
+- Rust lib tests: 367 passed with Lua 5.4, 428 with `--features quickjs`; the Lua runtime tests also pass with LuaJIT. Use a real path
   for `--target-dir` (`/private/tmp/...`, not `/tmp/...`); the updater tests
   reject a symlinked executable path.
 - React 538, Solid 19, native Vitest 23, examples 55, CLI pass;
@@ -59,5 +59,13 @@ built-in JSX/TSX compilation) behind a shared core.
    `cargo test --lib --features quickjs --target-dir
    /private/tmp/gpuix-quickjs-target quickjs::`. React updates now get React
    DOM's priorities (a click commits in a microtask). One follow-up is in
-   the doc's Outstanding list: the optional `NativeRenderer` methods. Next is Phase 3: oxc compile,
-   module loader, embedded bundles.
+   the doc's Outstanding list: the optional `NativeRenderer` methods. Phase 3
+   is done: oxc compile (`src/quickjs/compile.rs`), the module loader
+   (`modules.rs`, `QuickJsRuntime::load_module`) and the embedded bundles
+   (`embedded/build.ts`). The bundles aren't committed: run `bun run
+   build:embedded` in `packages/native` before any `--features quickjs`
+   build, and again after changing `@gpuix/react` or `@gpuix/native` sources
+   (`build.rs` fails with that command when they're stale). Next is Phase 4:
+   the `gpx` binary (name picked by Bart on 2026-10-14) that picks the
+   engine by file extension and replaces `gpuix-lua`, React parity tests,
+   the optional renderer methods, and window options from `render()`.

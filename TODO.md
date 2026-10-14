@@ -16,11 +16,23 @@
 - Offer the quickjs-ng `Map`/`Set` hash fix upstream (rust-js-vm
   `patches/rquickjs-sys-0.14.0-map-hash-mix.diff`, repro in
   `examples/map_hash.rs`): rebase onto quickjs-ng main, prepare the PR text,
-  and Bart opens it (the local `gh` token can't reach quickjs-ng). Once
-  rquickjs ships it, gpuix can drop its vendored rquickjs-sys.
+  and Bart opens it (the local `gh` token can't reach quickjs-ng). Offer the
+  `source-position` hook (`packages/native/vendor/README.md`) the same way.
+  Once rquickjs ships both, gpuix can drop its vendored rquickjs-sys.
 - Lua Solid slots after a failed window render: the rows a `solid.For`
   queued stay staged, and the next change to that list passes them to
   `set_children`, which rejects them because they are neither mounted nor
   from the current render. Accept staged nodes that a queued structural
   update already claimed, or flush the window's queued updates before its
   next event (`packages/native/src/lua_runtime.rs`, `set_children`).
+- CI runs no Rust tests: `cargo test --lib` in `packages/native` (Lua 5.4,
+  LuaJIT, and `--features quickjs` after `bun run build:embedded`) only runs
+  locally, so the 417 lib tests aren't checked on push. Adding a job means
+  building GPUI on a runner; decide whether that cost is worth it.
+- QuickJS cuts module names to 64 bytes (`ATOM_GET_STR_BUF_SIZE`) in some
+  of its own messages, such as "Could not find export 'x' in module ...",
+  and app module names are absolute paths. Show them in full, by a patch or
+  by rewriting the message where GPUIX reports it.
+- QuickJS app modules have `import.meta` but no `import.meta.url`, so
+  `new URL("./icon.png", import.meta.url)` fails. Set it to the module's
+  `file://` URL when the loader declares a module (Phase 4 or 5).

@@ -38,6 +38,8 @@ bindgen = ["bindgen-rs"]
 disable-assertions = []
 # Local patch: mix Map/Set key hashes before taking the bucket.
 map-hash-mix = []
+# Local patch: let the embedder map stack trace positions.
+source-position = []
 dump-atoms = []
 dump-bytecode = []
 dump-free = []

@@ -25,15 +25,20 @@ export function createNativeRenderer(
   options: CreateNativeRendererOptions = {}
 ): GpuixRenderer {
   let renderer!: GpuixRenderer
+  // Returns whether a handler took the event. The napi addon ignores it;
+  // the embedded runtime passes it back to the Rust host.
   renderer = new GpuixRenderer((error, event) => {
     if (error) {
       options.onError?.(error)
-      return
+      return false
     }
     try {
-      if (createRendererState(renderer).dispatch(event)) options.onEvent?.(event)
+      const handled = createRendererState(renderer).dispatch(event)
+      if (handled) options.onEvent?.(event)
+      return handled
     } catch (dispatchError) {
       options.onError?.(dispatchError)
+      return false
     }
   })
   if (typeof process !== "undefined" && process.stdin && !process.stdin.isTTY) {
