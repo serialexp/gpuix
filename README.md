@@ -3888,9 +3888,11 @@ can import one of its own files as a string:
 import notes from "./notes.md" with { type: "text" }
 ```
 
-There is no file system or npm package loading yet. Keyboard focus helpers
-(`focusNext`, Tab navigation) and text-selection queries are not wired up in
-`gpx` yet. See `docs/design/embedded-quickjs-runtime.md` for the plan.
+The renderer's window methods work as under Node: focus and Tab navigation,
+the text selection, scrolling, images, fonts, window controls and
+`promptForPaths`. `gc()` runs a full collection, as Node's does under
+`--expose-gc`. There is no file system or npm package loading yet. See
+`docs/design/embedded-quickjs-runtime.md` for the plan.
 
 ## Experimental LuaX runtime
 

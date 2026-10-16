@@ -143,7 +143,7 @@ pub(crate) type EventCallback = Arc<dyn Fn(EventPayload) + Send + Sync>;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub(crate) type EventCallback = Rc<dyn Fn(EventPayload)>;
 
-fn raw_dimension_u32(value: f64, label: &str) -> std::result::Result<u32, String> {
+pub(crate) fn raw_dimension_u32(value: f64, label: &str) -> std::result::Result<u32, String> {
     if !value.is_finite() || value <= 0.0 || value.fract() != 0.0 || value > u32::MAX as f64 {
         return Err(format!(
             "Image {label} must be a positive integer, got {value}"
@@ -157,7 +157,7 @@ pub(crate) fn dimension_u32(value: f64, label: &str) -> Result<u32> {
     raw_dimension_u32(value, label).map_err(Error::from_reason)
 }
 
-fn raw_element_id(id: f64) -> std::result::Result<u64, String> {
+pub(crate) fn raw_element_id(id: f64) -> std::result::Result<u64, String> {
     if !id.is_finite() || id < 0.0 || id.fract() != 0.0 || id > 9_007_199_254_740_991.0 {
         return Err(format!("Invalid element id: {id}"));
     }
@@ -260,7 +260,75 @@ pub(crate) fn queue_virtual_list_scroll(id: u64, index: usize, offset_in_item: f
     });
 }
 
-fn parse_debug_frame_overlay_mode_str(
+/// Set the scroll offset of a `<virtual-list>` or scroll container; x and y
+/// are negative pixels. Returns before the next render paints it.
+pub(crate) fn scroll_element_to(id: u64, x: f32, y: f32) {
+    let offset = gpui::point(gpui::px(x), gpui::px(y));
+    let list = VIRTUAL_LIST_STATES.with(|cell| {
+        let states = cell.borrow();
+        let state = states.get(&id)?;
+        state.set_offset_from_scrollbar(offset);
+        Some(())
+    });
+    if list.is_none() {
+        SCROLL_HANDLES.with(|cell| {
+            if let Some(handle) = cell.borrow().get(&id) {
+                handle.set_offset(offset);
+            }
+        });
+    }
+}
+
+/// Scroll the child at `index` into view: queued for a `<virtual-list>` (see
+/// [`queue_virtual_list_scroll`]), at once for a scroll container.
+pub(crate) fn scroll_element_to_item(id: u64, index: usize, offset_in_item: f32) {
+    if VIRTUAL_LIST_STATES.with(|cell| cell.borrow().contains_key(&id)) {
+        queue_virtual_list_scroll(id, index, offset_in_item);
+        return;
+    }
+    SCROLL_HANDLES.with(|cell| {
+        if let Some(handle) = cell.borrow().get(&id) {
+            handle.scroll_to_item(index);
+        }
+    });
+}
+
+/// `[x, y]` of a `<virtual-list>` or scroll container, or `None` for
+/// anything else.
+pub(crate) fn element_scroll_offset(id: u64) -> Option<[f64; 2]> {
+    let pixels = |offset: gpui::Point<gpui::Pixels>| {
+        [
+            f64::from(f32::from(offset.x)),
+            f64::from(f32::from(offset.y)),
+        ]
+    };
+    VIRTUAL_LIST_STATES
+        .with(|cell| {
+            cell.borrow()
+                .get(&id)
+                .map(|state| pixels(state.scroll_px_offset_for_scrollbar()))
+        })
+        .or_else(|| {
+            SCROLL_HANDLES.with(|cell| cell.borrow().get(&id).map(|handle| pixels(handle.offset())))
+        })
+}
+
+/// A `<virtual-list>`'s `[itemIndex, offsetInItemPx, viewportHeightPx]`, or
+/// `None` for anything else.
+pub(crate) fn list_scroll_top(id: u64) -> Option<[f64; 3]> {
+    VIRTUAL_LIST_STATES.with(|cell| {
+        cell.borrow().get(&id).map(|state| {
+            let top = state.logical_scroll_top();
+            [
+                top.item_ix as f64,
+                f64::from(f32::from(top.offset_in_item)),
+                f64::from(f32::from(state.viewport_bounds().size.height)),
+            ]
+        })
+    })
+}
+
+pub(crate) fn parse_debug_frame_overlay_mode_str(
     mode: &str,
 ) -> std::result::Result<gpui::DebugFrameOverlayMode, String> {
     match mode {
@@ -624,36 +692,11 @@ async fn run_ui_commands(
                 window.reset_debug_frame_overlay_stats();
             }),
             UiCommand::ScrollTo { id, x, y } => {
-                if !VIRTUAL_LIST_STATES.with(|cell| {
-                    let states = cell.borrow();
-                    let Some(state) = states.get(&id) else {
-                        return false;
-                    };
-                    state.set_offset_from_scrollbar(gpui::point(gpui::px(x), gpui::px(y)));
-                    true
-                }) {
-                    SCROLL_HANDLES.with(|cell| {
-                        if let Some(handle) = cell.borrow().get(&id) {
-                            handle.set_offset(gpui::point(gpui::px(x), gpui::px(y)));
-                        }
-                    });
-                }
+                scroll_element_to(id, x, y);
                 refresh_ui_window(window, cx)
             }
             UiCommand::ScrollToItem { id, index, offset } => {
-                if !VIRTUAL_LIST_STATES.with(|cell| {
-                    if !cell.borrow().contains_key(&id) {
-                        return false;
-                    }
-                    queue_virtual_list_scroll(id, index, offset);
-                    true
-                }) {
-                    SCROLL_HANDLES.with(|cell| {
-                        if let Some(handle) = cell.borrow().get(&id) {
-                            handle.scroll_to_item(index);
-                        }
-                    });
-                }
+                scroll_element_to_item(id, index, offset);
                 refresh_ui_window(window, cx)
             }
             UiCommand::ScrollIntoView { id } => window.update(cx, |view, window, cx| {
@@ -689,42 +732,11 @@ async fn run_ui_commands(
                 })
             }
             UiCommand::GetScrollOffset { id, response } => {
-                let offset = VIRTUAL_LIST_STATES
-                    .with(|cell| {
-                        cell.borrow().get(&id).map(|state| {
-                            let offset = state.scroll_px_offset_for_scrollbar();
-                            [
-                                f64::from(f32::from(offset.x)),
-                                f64::from(f32::from(offset.y)),
-                            ]
-                        })
-                    })
-                    .or_else(|| {
-                        SCROLL_HANDLES.with(|cell| {
-                            cell.borrow().get(&id).map(|handle| {
-                                let offset = handle.offset();
-                                [
-                                    f64::from(f32::from(offset.x)),
-                                    f64::from(f32::from(offset.y)),
-                                ]
-                            })
-                        })
-                    });
-                response.send(offset).ok();
+                response.send(element_scroll_offset(id)).ok();
                 Ok(())
             }
             UiCommand::GetListScrollTop { id, response } => {
-                let top = VIRTUAL_LIST_STATES.with(|cell| {
-                    cell.borrow().get(&id).map(|state| {
-                        let top = state.logical_scroll_top();
-                        [
-                            top.item_ix as f64,
-                            f64::from(f32::from(top.offset_in_item)),
-                            f64::from(f32::from(state.viewport_bounds().size.height)),
-                        ]
-                    })
-                });
-                response.send(top).ok();
+                response.send(list_scroll_top(id)).ok();
                 Ok(())
             }
             UiCommand::GetWindowSize { response } => {
@@ -2060,23 +2072,10 @@ impl GpuixRenderer {
     pub fn scroll_to(&self, element_id: f64, x: f64, y: f64) -> Result<()> {
         let id = to_element_id(element_id)?;
         #[cfg(target_os = "macos")]
-        if !VIRTUAL_LIST_STATES.with(|cell| {
-            let states = cell.borrow();
-            let Some(state) = states.get(&id) else {
-                return false;
-            };
-            state.set_offset_from_scrollbar(gpui::point(gpui::px(x as f32), gpui::px(y as f32)));
-            true
-        }) {
-            SCROLL_HANDLES.with(|cell| {
-                let handles = cell.borrow();
-                if let Some(handle) = handles.get(&id) {
-                    handle.set_offset(gpui::point(gpui::px(x as f32), gpui::px(y as f32)));
-                }
-            });
+        {
+            scroll_element_to(id, x as f32, y as f32);
+            return invalidate_window();
         }
-        #[cfg(target_os = "macos")]
-        return invalidate_window();
 
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
         return self.send_ui_command(UiCommand::ScrollTo {
@@ -2112,22 +2111,10 @@ impl GpuixRenderer {
         let index = index as usize;
         let offset = offset_in_item.unwrap_or(0.0) as f32;
         #[cfg(target_os = "macos")]
-        if !VIRTUAL_LIST_STATES.with(|cell| {
-            if !cell.borrow().contains_key(&id) {
-                return false;
-            }
-            queue_virtual_list_scroll(id, index, offset);
-            true
-        }) {
-            SCROLL_HANDLES.with(|cell| {
-                let handles = cell.borrow();
-                if let Some(handle) = handles.get(&id) {
-                    handle.scroll_to_item(index);
-                }
-            });
+        {
+            scroll_element_to_item(id, index, offset);
+            return invalidate_window();
         }
-        #[cfg(target_os = "macos")]
-        return invalidate_window();
 
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
         return self.send_ui_command(UiCommand::ScrollToItem { id, index, offset });
@@ -2154,16 +2141,7 @@ impl GpuixRenderer {
     pub fn get_list_scroll_top(&self, element_id: f64) -> Result<Option<Vec<f64>>> {
         let id = to_element_id(element_id)?;
         #[cfg(target_os = "macos")]
-        return Ok(VIRTUAL_LIST_STATES.with(|cell| {
-            cell.borrow().get(&id).map(|state| {
-                let top = state.logical_scroll_top();
-                vec![
-                    top.item_ix as f64,
-                    f64::from(f32::from(top.offset_in_item)),
-                    f64::from(f32::from(state.viewport_bounds().size.height)),
-                ]
-            })
-        }));
+        return Ok(list_scroll_top(id).map(|top| top.to_vec()));
 
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
         {
@@ -2189,28 +2167,7 @@ impl GpuixRenderer {
     pub fn get_scroll_offset(&self, element_id: f64) -> Result<Option<Vec<f64>>> {
         let id = to_element_id(element_id)?;
         #[cfg(target_os = "macos")]
-        return Ok(VIRTUAL_LIST_STATES
-            .with(|cell| {
-                cell.borrow().get(&id).map(|state| {
-                    let offset = state.scroll_px_offset_for_scrollbar();
-                    vec![
-                        f64::from(f32::from(offset.x)),
-                        f64::from(f32::from(offset.y)),
-                    ]
-                })
-            })
-            .or_else(|| {
-                SCROLL_HANDLES.with(|cell| {
-                    let handles = cell.borrow();
-                    handles.get(&id).map(|handle| {
-                        let offset = handle.offset();
-                        vec![
-                            f64::from(f32::from(offset.x)),
-                            f64::from(f32::from(offset.y)),
-                        ]
-                    })
-                })
-            }));
+        return Ok(element_scroll_offset(id).map(|offset| offset.to_vec()));
 
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
         {
@@ -3181,20 +3138,7 @@ impl WebGpuixRenderer {
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = scrollTo)]
     pub fn scroll_to(&self, element_id: f64, x: f64, y: f64) -> Result<(), wasm_bindgen::JsValue> {
         let id = web_element_id(element_id)?;
-        if !VIRTUAL_LIST_STATES.with(|states| {
-            let states = states.borrow();
-            let Some(state) = states.get(&id) else {
-                return false;
-            };
-            state.set_offset_from_scrollbar(gpui::point(gpui::px(x as f32), gpui::px(y as f32)));
-            true
-        }) {
-            SCROLL_HANDLES.with(|handles| {
-                if let Some(handle) = handles.borrow().get(&id) {
-                    handle.set_offset(gpui::point(gpui::px(x as f32), gpui::px(y as f32)));
-                }
-            });
-        }
+        scroll_element_to(id, x as f32, y as f32);
         notify_web();
         Ok(())
     }
@@ -3209,19 +3153,7 @@ impl WebGpuixRenderer {
         let id = web_element_id(element_id)?;
         let index = index as usize;
         let offset = offset_in_item.unwrap_or(0.0) as f32;
-        if !VIRTUAL_LIST_STATES.with(|states| {
-            if !states.borrow().contains_key(&id) {
-                return false;
-            }
-            queue_virtual_list_scroll(id, index, offset);
-            true
-        }) {
-            SCROLL_HANDLES.with(|handles| {
-                if let Some(handle) = handles.borrow().get(&id) {
-                    handle.scroll_to_item(index);
-                }
-            });
-        }
+        scroll_element_to_item(id, index, offset);
         notify_web();
         Ok(())
     }
@@ -3280,17 +3212,7 @@ impl WebGpuixRenderer {
         element_id: f64,
     ) -> Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue> {
         let id = web_element_id(element_id)?;
-        let top = VIRTUAL_LIST_STATES.with(|states| {
-            states.borrow().get(&id).map(|state| {
-                let top = state.logical_scroll_top();
-                [
-                    top.item_ix as f64,
-                    f64::from(f32::from(top.offset_in_item)),
-                    f64::from(f32::from(state.viewport_bounds().size.height)),
-                ]
-            })
-        });
-        let Some(top) = top else {
+        let Some(top) = list_scroll_top(id) else {
             return Ok(wasm_bindgen::JsValue::NULL);
         };
         Ok(web_number_array(top))
@@ -3302,28 +3224,7 @@ impl WebGpuixRenderer {
         element_id: f64,
     ) -> Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue> {
         let id = web_element_id(element_id)?;
-        let offset = VIRTUAL_LIST_STATES
-            .with(|states| {
-                states.borrow().get(&id).map(|state| {
-                    let offset = state.scroll_px_offset_for_scrollbar();
-                    [
-                        f64::from(f32::from(offset.x)),
-                        f64::from(f32::from(offset.y)),
-                    ]
-                })
-            })
-            .or_else(|| {
-                SCROLL_HANDLES.with(|handles| {
-                    handles.borrow().get(&id).map(|handle| {
-                        let offset = handle.offset();
-                        [
-                            f64::from(f32::from(offset.x)),
-                            f64::from(f32::from(offset.y)),
-                        ]
-                    })
-                })
-            });
-        let Some([x, y]) = offset else {
+        let Some([x, y]) = element_scroll_offset(id) else {
             return Ok(wasm_bindgen::JsValue::NULL);
         };
         Ok(web_number_array([x, y]))
@@ -7225,8 +7126,17 @@ type PathPromptDeferred = JsDeferred<Option<Vec<String>>, PathPromptResolver>;
 fn path_prompt_result(
     result: anyhow::Result<Option<Vec<std::path::PathBuf>>>,
 ) -> Result<Option<Vec<String>>> {
+    path_prompt_paths(result).map_err(Error::from_reason)
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+/// The paths a prompt picked, as `promptForPaths` resolves them: null when
+/// it was cancelled or picked nothing.
+pub(crate) fn path_prompt_paths(
+    result: anyhow::Result<Option<Vec<std::path::PathBuf>>>,
+) -> std::result::Result<Option<Vec<String>>, String> {
     result
-        .map_err(|error| Error::from_reason(error.to_string()))?
+        .map_err(|error| error.to_string())?
         .filter(|paths| !paths.is_empty())
         .map(|paths| {
             paths
@@ -7234,7 +7144,7 @@ fn path_prompt_result(
                 .map(|path| {
                     path.into_os_string()
                         .into_string()
-                        .map_err(|_| Error::from_reason("The selected path is not valid Unicode"))
+                        .map_err(|_| "The selected path is not valid Unicode".to_string())
                 })
                 .collect()
         })
@@ -7277,18 +7187,25 @@ pub struct PathPromptOptions {
 impl PathPromptOptions {
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub(crate) fn to_gpui(options: Option<Self>) -> Result<gpui::PathPromptOptions> {
+        Self::to_gpui_options(options).map_err(Error::from_reason)
+    }
+
+    /// The options with their defaults filled in, or why GPUI can't prompt
+    /// with them.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    pub(crate) fn to_gpui_options(
+        options: Option<Self>,
+    ) -> std::result::Result<gpui::PathPromptOptions, String> {
         let options = options.unwrap_or_default();
         let directories = options.directories.unwrap_or(false);
         let files = options.files.unwrap_or(!directories);
         if !files && !directories {
-            return Err(Error::from_reason(
-                "promptForPaths requires files or directories",
-            ));
+            return Err("promptForPaths requires files or directories".to_string());
         }
         if files && directories && !cfg!(target_os = "macos") {
-            return Err(Error::from_reason(
-                "Selecting files and directories together is only supported on macOS",
-            ));
+            return Err(
+                "Selecting files and directories together is only supported on macOS".to_string(),
+            );
         }
         Ok(gpui::PathPromptOptions {
             files,

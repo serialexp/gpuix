@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use super::compile::compile;
-use super::{ConsoleLevel, QuickJsOptions, QuickJsRuntime};
+use super::{ConsoleLevel, Host, QuickJsOptions, QuickJsRuntime, TreeHost, WindowCall};
 use crate::element_tree::{EventModifiers, EventPayload};
 use crate::retained_tree::RetainedTree;
 
@@ -13,9 +13,51 @@ const BATCH: &str = "const batch = (...ops) => __gpuix.renderer.applyBatch(JSON.
 
 type Output = Rc<RefCell<Vec<(ConsoleLevel, String)>>>;
 
+/// A host whose tree and window calls the test can see. Each window call
+/// gets `reply`.
+#[derive(Clone)]
+struct TestHost {
+    tree: Rc<RefCell<RetainedTree>>,
+    calls: Rc<RefCell<Vec<WindowCall>>>,
+    reply: Rc<RefCell<Result<serde_json::Value, String>>>,
+    /// The path prompts opened, by id.
+    prompts: Rc<RefCell<Vec<(u64, gpui::PathPromptOptions)>>>,
+}
+
+impl Default for TestHost {
+    fn default() -> Self {
+        Self {
+            tree: Rc::default(),
+            calls: Rc::default(),
+            reply: Rc::new(RefCell::new(Ok(serde_json::Value::Null))),
+            prompts: Rc::default(),
+        }
+    }
+}
+
+impl Host for TestHost {
+    fn with_tree(&mut self, change: &mut dyn FnMut(&mut RetainedTree)) {
+        change(&mut self.tree.borrow_mut());
+    }
+
+    fn window(&mut self, call: WindowCall) -> Result<serde_json::Value, String> {
+        self.calls.borrow_mut().push(call);
+        self.reply.borrow().clone()
+    }
+
+    fn prompt_for_paths(
+        &mut self,
+        id: u64,
+        options: gpui::PathPromptOptions,
+    ) -> Result<(), String> {
+        self.prompts.borrow_mut().push((id, options));
+        Ok(())
+    }
+}
+
 struct App {
     js: QuickJsRuntime,
-    tree: RetainedTree,
+    host: TestHost,
     /// What the runtime's clock reads, in milliseconds.
     time: Rc<Cell<f64>>,
     output: Output,
@@ -23,41 +65,41 @@ struct App {
 
 impl App {
     fn try_load(source: &str) -> Result<Self, String> {
-        Self::start(|tree, options| {
-            QuickJsRuntime::load(&format!("{BATCH}{source}"), "app.js", tree, options)
-        })
+        Self::start(|options| QuickJsRuntime::load(&format!("{BATCH}{source}"), "app.js", options))
     }
 
     fn try_load_module(entry: &Path) -> Result<Self, String> {
-        Self::start(|tree, options| QuickJsRuntime::load_module(entry, tree, options))
+        Self::start(|options| QuickJsRuntime::load_module(entry, options))
     }
 
-    /// A runtime from `load`, on a fake clock, with its console captured and
-    /// a fixed environment.
+    /// A runtime from `load`, on a fake clock, with its console captured, a
+    /// fixed environment and a [`TestHost`].
     fn start(
-        load: impl FnOnce(&mut RetainedTree, QuickJsOptions) -> Result<QuickJsRuntime, String>,
+        load: impl FnOnce(QuickJsOptions) -> Result<QuickJsRuntime, String>,
     ) -> Result<Self, String> {
         let time = Rc::new(Cell::new(0.0));
         let output = Output::default();
         let clock = time.clone();
         let console = output.clone();
-        let mut tree = RetainedTree::new();
-        let js = load(
-            &mut tree,
-            QuickJsOptions {
-                clock: Box::new(move || clock.get()),
-                console: Box::new(move |level, message| {
-                    console.borrow_mut().push((level, message.to_string()));
-                }),
-                env: vec![("GPX_TEST".to_string(), "on".to_string())],
-            },
-        )?;
+        let host = TestHost::default();
+        let js = load(QuickJsOptions {
+            clock: Box::new(move || clock.get()),
+            console: Box::new(move |level, message| {
+                console.borrow_mut().push((level, message.to_string()));
+            }),
+            env: vec![("GPX_TEST".to_string(), "on".to_string())],
+            host: Box::new(host.clone()),
+        })?;
         Ok(Self {
             js,
-            tree,
+            host,
             time,
             output,
         })
+    }
+
+    fn tree(&self) -> std::cell::Ref<'_, RetainedTree> {
+        self.host.tree.borrow()
     }
 
     fn load(source: &str) -> Self {
@@ -65,7 +107,7 @@ impl App {
     }
 
     fn dispatch(&mut self, payload: EventPayload) -> Result<bool, String> {
-        self.js.dispatch_event(&payload, &mut self.tree)
+        self.js.dispatch_event(&payload)
     }
 
     fn click(&mut self, element_id: u64) -> Result<bool, String> {
@@ -75,15 +117,15 @@ impl App {
     /// Move the clock to `time` and run the timers due then.
     fn advance_to(&mut self, time: f64) -> Result<(), String> {
         self.time.set(time);
-        self.js.run_timers(&mut self.tree)
+        self.js.run_timers()
     }
 
-    fn text(&self, id: u64) -> Option<&str> {
-        self.tree.elements.get(&id)?.content.as_deref()
+    fn text(&self, id: u64) -> Option<String> {
+        self.tree().elements.get(&id)?.content.clone()
     }
 
     fn children(&self, id: u64) -> Vec<u64> {
-        self.tree.elements[&id].children.clone()
+        self.tree().elements[&id].children.clone()
     }
 
     fn printed(&self) -> Vec<(ConsoleLevel, String)> {
@@ -125,13 +167,13 @@ fn batches_reach_the_retained_tree() {
         );
         "#,
     );
-    assert_eq!(app.tree.root_id, Some(1));
+    assert_eq!(app.tree().root_id, Some(1));
     assert_eq!(app.children(1), [2, 3]);
-    assert_eq!(app.text(2), Some("first"));
-    assert_eq!(app.text(3), Some("second"));
-    assert!(app.tree.elements[&1].style.is_some());
-    assert!(app.tree.elements[&2].events().contains("click"));
-    assert_eq!(app.tree.elements[&1].test_id.as_deref(), Some("list"));
+    assert_eq!(app.text(2).as_deref(), Some("first"));
+    assert_eq!(app.text(3).as_deref(), Some("second"));
+    assert!(app.tree().elements[&1].style.is_some());
+    assert!(app.tree().elements[&2].events().contains("click"));
+    assert_eq!(app.tree().elements[&1].test_id.as_deref(), Some("list"));
 }
 
 #[test]
@@ -159,7 +201,7 @@ fn apply_batch_returns_destroyed_ids_and_throws_on_a_bad_batch() {
     assert_eq!(log[0], "[2,3]");
     assert!(log[1].contains("noSuchOp"), "{log:?}");
     // The batch is atomic: the valid op before the bad one didn't apply.
-    assert_eq!(app.text(1), None);
+    assert_eq!(app.text(1).as_deref(), None);
     assert_eq!(app.children(1), Vec::<u64>::new());
 }
 
@@ -179,10 +221,10 @@ fn events_reach_the_registered_handler_and_microtasks_run_before_returning() {
         "#,
     );
     assert_eq!(app.click(1), Ok(true));
-    assert_eq!(app.text(1), Some("1"));
+    assert_eq!(app.text(1).as_deref(), Some("1"));
     assert_eq!(app.click(2), Ok(false));
     assert_eq!(app.click(1), Ok(true));
-    assert_eq!(app.text(1), Some("2"));
+    assert_eq!(app.text(1).as_deref(), Some("2"));
 }
 
 #[test]
@@ -315,7 +357,7 @@ fn timers_change_the_tree() {
         "#,
     );
     app.advance_to(30.0).unwrap();
-    assert_eq!(app.text(1), Some("later"));
+    assert_eq!(app.text(1).as_deref(), Some("later"));
 }
 
 #[test]
@@ -350,7 +392,7 @@ fn a_throwing_handler_fails_the_event_with_its_stack() {
     assert!(error.contains("explode"), "{error}");
     assert!(error.contains("app.js"), "{error}");
     // What ran before the throw stays applied.
-    assert_eq!(app.text(1), Some("before the throw"));
+    assert_eq!(app.text(1).as_deref(), Some("before the throw"));
 }
 
 #[test]
@@ -389,7 +431,7 @@ fn every_failure_of_a_call_is_reported_and_the_rest_still_runs() {
         .find("Uncaught (in promise) Error: never handled")
         .unwrap();
     assert!(reported < microtask && microtask < rejection, "{error}");
-    assert_eq!(app.text(1), Some("still ran"));
+    assert_eq!(app.text(1).as_deref(), Some("still ran"));
     // The failures were reported once; the next event starts clean.
     assert_eq!(app.click(1), Ok(true));
 }
@@ -508,15 +550,27 @@ fn structured_clone_copies_plain_data() {
 }
 
 #[test]
-fn the_tree_goes_back_to_its_owner_after_each_call() {
-    let mut app = App::load(r#"batch(["createElement", 1, "div"], ["setRoot", 1]);"#);
-    assert_eq!(app.tree.root_id, Some(1));
-    // A failed call hands it back too.
-    let mut other = App::load(r#"__gpuix.setEventHandler(() => { throw new Error("no"); });"#);
-    std::mem::swap(&mut app.tree, &mut other.tree);
-    other.click(1).unwrap_err();
-    assert_eq!(other.tree.root_id, Some(1));
-    assert!(app.click(1).is_ok());
+fn batches_go_to_the_host_the_app_has_now() {
+    let mut app = App::load(
+        r#"
+        let next = 1;
+        __gpuix.setEventHandler(() => {
+          const id = next++;
+          batch(["createElement", id, "div"], ["setRoot", id]);
+          return true;
+        });
+        "#,
+    );
+    app.click(1).unwrap();
+    assert_eq!(app.tree().root_id, Some(1));
+    // `gpx` hands the app to its window's host once that opens.
+    let window = TestHost::default();
+    let before = app.js.set_host(Box::new(window.clone()));
+    app.click(1).unwrap();
+    assert_eq!(window.tree.borrow().root_id, Some(2));
+    assert_eq!(app.tree().root_id, Some(1));
+    assert!(before.into_pending().is_empty());
+    assert_eq!(app.js.with_tree(|tree| tree.root_id), Some(2));
 }
 
 #[test]
@@ -677,7 +731,6 @@ fn a_rejection_made_while_describing_one_fails_the_same_call() {
 
 #[test]
 fn a_panic_in_a_native_function_fails_the_call_even_if_js_catches_it() {
-    let mut tree = RetainedTree::new();
     let mut js = QuickJsRuntime::load(
         r#"
         __gpuix.setEventHandler(() => {
@@ -688,22 +741,18 @@ fn a_panic_in_a_native_function_fails_the_call_even_if_js_catches_it() {
         });
         "#,
         "app.js",
-        &mut tree,
         QuickJsOptions {
             clock: Box::new(|| 0.0),
             console: Box::new(|_, _| panic!("the sink broke")),
             env: Vec::new(),
+            host: Box::new(TreeHost::default()),
         },
     )
     .unwrap();
-    let error = js
-        .dispatch_event(&event(1, "click"), &mut tree)
-        .unwrap_err();
+    let error = js.dispatch_event(&event(1, "click")).unwrap_err();
     assert_eq!(error, "GPUIX panicked in console: the sink broke");
     // Nothing is left parked for the next call.
-    let next = js
-        .dispatch_event(&event(1, "click"), &mut tree)
-        .unwrap_err();
+    let next = js.dispatch_event(&event(1, "click")).unwrap_err();
     assert_eq!(next, "GPUIX panicked in console: the sink broke");
 }
 
@@ -905,12 +954,12 @@ impl App {
     /// in `setImmediate` slices.
     fn settle(&mut self) {
         while self.js.next_timer().unwrap() == Some(Duration::ZERO) {
-            self.js.run_timers(&mut self.tree).unwrap();
+            self.js.run_timers().unwrap();
         }
     }
 
     fn test_id(&self, test_id: &str) -> u64 {
-        self.tree
+        self.tree()
             .elements
             .values()
             .find(|element| element.test_id.as_deref() == Some(test_id))
@@ -920,7 +969,7 @@ impl App {
 
     fn texts(&self) -> Vec<String> {
         let mut texts: Vec<String> = self
-            .tree
+            .tree()
             .elements
             .values()
             .filter_map(|element| element.content.clone())
@@ -1558,4 +1607,260 @@ fn a_module_failing_after_top_level_await_fails_that_call() {
     let mut app = App::try_load_module(&dir.path("main.ts")).unwrap();
     let error = app.advance_to(10.0).unwrap_err();
     assert!(error.contains("Error: after the wait"), "{error}");
+}
+
+#[test]
+fn window_methods_reach_the_host_with_their_arguments_checked() {
+    let dir = AppDir::new(&[(
+        "main.ts",
+        r#"
+        import { GpuixRenderer } from "@gpuix/native"
+        const renderer = new GpuixRenderer()
+        renderer.focusElement(3)
+        renderer.scrollToItem(4, 2)
+        renderer.scrollToItem(4, 2, -8)
+        renderer.setWindowKeyEvents(true, false, 9)
+        renderer.setImage(5, new Uint8Array([1, 2]))
+        renderer.setImagePixels(6, 1, 1, new Uint8Array([1, 2, 3, 4]).buffer as any, "bgra")
+        renderer.setDebugFrameOverlay("full")
+        for (const bad of [
+          () => renderer.focusElement(-1),
+          () => renderer.focusElement("3" as any),
+          () => renderer.setImage(5, [1, 2] as any),
+          () => renderer.setImagePixels(6, 0, 1, new Uint8Array(4)),
+          () => renderer.setDebugFrameOverlay("loud"),
+          () => (__gpuix as any).renderer.window("explode"),
+        ]) {
+          try { bad() } catch (error) { console.log(String(error)) }
+        }
+        "#,
+    )]);
+    let app = App::try_load_module(&dir.path("main.ts")).unwrap();
+    assert_eq!(
+        *app.host.calls.borrow(),
+        [
+            WindowCall::FocusElement(3),
+            WindowCall::ScrollToItem {
+                id: 4,
+                index: 2,
+                offset: 0.0
+            },
+            WindowCall::ScrollToItem {
+                id: 4,
+                index: 2,
+                offset: -8.0
+            },
+            WindowCall::SetWindowKeyEvents {
+                key_down: true,
+                key_up: false,
+                event_id: 9
+            },
+            WindowCall::SetImage {
+                id: 5,
+                bytes: vec![1, 2]
+            },
+            WindowCall::SetImagePixels {
+                id: 6,
+                width: 1,
+                height: 1,
+                bytes: vec![1, 2, 3, 4],
+                format: crate::custom_elements::img::PixelFormat::Bgra,
+            },
+            WindowCall::SetDebugFrameOverlay(gpui::DebugFrameOverlayMode::Full),
+        ]
+    );
+    assert_eq!(
+        app.log(),
+        [
+            "TypeError: focusElement: Invalid element id: -1",
+            "TypeError: focusElement: argument 0 must be a number",
+            "TypeError: setImage: argument 1 must be a Uint8Array",
+            "TypeError: setImagePixels: Image width must be a positive integer, got 0",
+            "TypeError: setDebugFrameOverlay: Unknown debug frame overlay mode \"loud\". Use hidden, minimal, or full.",
+            "TypeError: explode: the embedded renderer has no such window method",
+        ]
+    );
+}
+
+#[test]
+fn window_methods_return_what_the_host_answers() {
+    let dir = AppDir::new(&[(
+        "main.ts",
+        r#"
+        import { GpuixRenderer } from "@gpuix/native"
+        const renderer = new GpuixRenderer()
+        __gpuix.setEventHandler(() => {
+          try {
+            console.log(JSON.stringify(renderer.getWindowSize()))
+          } catch (error) {
+            console.log(String(error))
+          }
+          return true
+        })
+        "#,
+    )]);
+    let mut app = App::try_load_module(&dir.path("main.ts")).unwrap();
+    *app.host.reply.borrow_mut() = Ok(serde_json::json!({ "width": 320, "height": 240.5 }));
+    app.click(1).unwrap();
+    *app.host.reply.borrow_mut() = Err("the window closed".to_string());
+    app.click(1).unwrap();
+    assert_eq!(
+        app.log(),
+        [
+            r#"{"width":320,"height":240.5}"#,
+            "Error: getWindowSize: the window closed",
+        ]
+    );
+}
+
+#[test]
+fn before_the_window_opens_calls_queue_and_queries_answer_as_unpainted() {
+    let dir = AppDir::new(&[(
+        "main.ts",
+        r#"
+        import { GpuixRenderer } from "@gpuix/native"
+        const renderer = new GpuixRenderer()
+        renderer.focusElement(1)
+        renderer.setWindowTitle("Soon")
+        console.log(renderer.setDebugFrameOverlay("minimal"))
+        console.log(renderer.getFocusedElementId(), renderer.getSelectedText())
+        console.log(renderer.getElementBounds(1), renderer.getScrollOffset(1))
+        console.log(JSON.stringify(renderer.getElementsAt(1, 1)))
+        renderer.clearSelection()
+        try { renderer.getWindowSize() } catch (error) { console.log(String(error)) }
+        "#,
+    )]);
+    let output = Output::default();
+    let console = output.clone();
+    let js = QuickJsRuntime::load_module(
+        &dir.path("main.ts"),
+        QuickJsOptions {
+            console: Box::new(move |_, message| {
+                console
+                    .borrow_mut()
+                    .push((ConsoleLevel::Log, message.to_string()))
+            }),
+            ..QuickJsOptions::default()
+        },
+    )
+    .unwrap();
+    let log: Vec<String> = output
+        .borrow()
+        .iter()
+        .map(|(_, message)| message.clone())
+        .collect();
+    assert_eq!(
+        log,
+        [
+            "minimal",
+            "null null",
+            "null null",
+            "[]",
+            "Error: getWindowSize: the window isn't open yet",
+        ]
+    );
+    let startup = js.set_host(Box::new(TestHost::default()));
+    assert_eq!(
+        startup.into_pending(),
+        [
+            WindowCall::FocusElement(1),
+            WindowCall::SetWindowTitle("Soon".to_string()),
+            WindowCall::SetDebugFrameOverlay(gpui::DebugFrameOverlayMode::Minimal),
+        ]
+    );
+}
+
+#[test]
+fn gc_collects_cycles_as_nodes_expose_gc_does() {
+    let app = App::load(
+        r#"
+        let collected = false
+        const registry = new FinalizationRegistry(() => { collected = true })
+        ;(() => {
+          const a = {}
+          const b = { a }
+          a.b = b
+          registry.register(a, "cycle")
+        })()
+        gc()
+        // FinalizationRegistry callbacks run as jobs after the collection.
+        Promise.resolve().then(() => console.log(typeof gc, collected))
+        "#,
+    );
+    assert_eq!(app.log(), ["function true"]);
+}
+
+#[test]
+fn a_path_prompt_settles_when_the_host_says() {
+    let dir = AppDir::new(&[(
+        "main.ts",
+        r#"
+        import { GpuixRenderer } from "@gpuix/native"
+        const renderer = new GpuixRenderer()
+        const report = (name: string, prompt: Promise<string[] | null>) =>
+          prompt.then(
+            (paths) => console.log(name, JSON.stringify(paths)),
+            (error) => console.log(name, String(error)),
+          )
+        report("picked", renderer.promptForPaths({ multiple: true, prompt: "Open" }))
+        report("cancelled", renderer.promptForPaths())
+        report("failed", renderer.promptForPaths({ directories: true }))
+        report("neither", renderer.promptForPaths({ files: false }))
+        try { renderer.promptForPaths({ multiple: "yes" } as any) } catch (error) { console.log(String(error)) }
+        "#,
+    )]);
+    let mut app = App::try_load_module(&dir.path("main.ts")).unwrap();
+    let prompts = app.host.prompts.borrow().clone();
+    let ids: Vec<u64> = prompts.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids.len(), 3);
+    let first = &prompts[0].1;
+    assert!(first.files && !first.directories && first.multiple);
+    assert_eq!(first.prompt.as_deref(), Some("Open"));
+    assert!(prompts[2].1.directories && !prompts[2].1.files);
+    app.js
+        .settle_path_prompt(ids[0], Ok(Some(vec!["/a".to_string(), "/b".to_string()])))
+        .unwrap();
+    app.js.settle_path_prompt(ids[1], Ok(None)).unwrap();
+    app.js
+        .settle_path_prompt(ids[2], Err("the picker broke".to_string()))
+        .unwrap();
+    // Settled already, or never this runtime's.
+    app.js.settle_path_prompt(ids[0], Ok(None)).unwrap();
+    app.js.settle_path_prompt(99, Ok(None)).unwrap();
+    assert_eq!(
+        app.log(),
+        [
+            "TypeError: promptForPaths: options.multiple must be a boolean",
+            "neither Error: promptForPaths requires files or directories",
+            r#"picked ["/a","/b"]"#,
+            "cancelled null",
+            "failed Error: the picker broke",
+        ]
+    );
+}
+
+#[test]
+fn a_path_prompt_before_the_window_opens_is_rejected() {
+    let dir = AppDir::new(&[(
+        "main.ts",
+        r#"
+        import { GpuixRenderer } from "@gpuix/native"
+        new GpuixRenderer().promptForPaths().catch((error) => console.log(String(error)))
+        "#,
+    )]);
+    let output = Output::default();
+    let console = output.clone();
+    QuickJsRuntime::load_module(
+        &dir.path("main.ts"),
+        QuickJsOptions {
+            console: Box::new(move |_, message| {
+                console
+                    .borrow_mut()
+                    .push((ConsoleLevel::Log, message.to_string()))
+            }),
+            ..QuickJsOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(output.borrow()[0].1, "Error: the window isn't open yet");
 }

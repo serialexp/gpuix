@@ -4,8 +4,9 @@
 //! JS changes the retained tree the way it does under Node: GPUIX's
 //! `createMutationQueue` sends each commit as one JSON batch to
 //! `__gpuix.renderer.applyBatch`, which here is a native function over
-//! [`apply_batch_to_tree`]. The runtime borrows the caller's tree for each
-//! call that runs JS and hands it back when the call returns.
+//! [`apply_batch_to_tree`]. The tree belongs to the runtime's [`Host`],
+//! which also runs the renderer's window methods (`window.rs`): a
+//! [`TreeHost`] until the app's window opens, then `gpx`'s window.
 //!
 //! `prelude.js` installs the timers, `console`, `performance` and
 //! `structuredClone` the frameworks expect, and the hooks Rust calls. After
@@ -32,19 +33,23 @@ use std::time::{Duration, Instant};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use rquickjs::context::EvalOptions;
-use rquickjs::function::This;
+use rquickjs::function::{Opt, Rest, This};
 use rquickjs::{
-    qjs, Context, Ctx, Exception, Function, Module, Object, Persistent, Promise, Runtime, Value,
+    qjs, Context, Ctx, Exception, Function, IntoJs, Module, Object, Persistent, Promise, Runtime,
+    Value,
 };
 
 use crate::element_tree::EventPayload;
-use crate::renderer::{apply_batch_to_tree, WindowOptions};
+use crate::renderer::{apply_batch_to_tree, PathPromptOptions, WindowOptions};
 use crate::retained_tree::RetainedTree;
 
 mod compile;
 mod modules;
 #[cfg(test)]
 mod tests;
+mod window;
+
+pub(crate) use window::{Host, PathPromptResult, TreeHost, WindowCall};
 
 pub(crate) use compile::EXTENSIONS;
 
@@ -82,11 +87,13 @@ pub(crate) struct QuickJsOptions {
     pub console: ConsoleSink,
     /// What `process.env` holds.
     pub env: Vec<(String, String)>,
+    /// The tree the app's batches change, and the window drawing it.
+    pub host: Box<dyn Host>,
 }
 
 impl Default for QuickJsOptions {
-    /// The wall clock, `console` to stderr, and the process's environment
-    /// (minus any variable that isn't UTF-8).
+    /// The wall clock, `console` to stderr, the process's environment
+    /// (minus any variable that isn't UTF-8), and no window yet.
     fn default() -> Self {
         let start = Instant::now();
         Self {
@@ -97,15 +104,14 @@ impl Default for QuickJsOptions {
                     Some((name.into_string().ok()?, value.into_string().ok()?))
                 })
                 .collect(),
+            host: Box::new(TreeHost::default()),
         }
     }
 }
 
 /// What the native functions JS calls share with the runtime.
 struct Shared {
-    /// The caller's tree while a call runs JS; an empty one in between.
-    tree: RefCell<RetainedTree>,
-    lent: Cell<bool>,
+    host: RefCell<Box<dyn Host>>,
     /// What failed during the current call, in order.
     errors: RefCell<Vec<String>>,
     /// Promises rejected with no handler so far, with their reasons.
@@ -121,7 +127,13 @@ struct Shared {
     tree_changed: Cell<bool>,
     /// The entry module's name, whose `import.meta.main` is true.
     entry: Option<String>,
+    /// Each open path prompt's `resolve` and `reject`, by id.
+    prompts: RefCell<HashMap<u64, PromptSettlers>>,
+    next_prompt: Cell<u64>,
 }
+
+/// An open path prompt's promise `resolve` and `reject` functions.
+type PromptSettlers = (Persistent<Function<'static>>, Persistent<Function<'static>>);
 
 /// The prelude's hooks, saved before app code runs, so an app that writes to
 /// `__gpuix` doesn't replace them.
@@ -152,27 +164,6 @@ impl Hooks {
     }
 }
 
-/// Lends the caller's tree to [`Shared`] until dropped.
-struct LentTree<'a> {
-    shared: &'a Shared,
-    tree: &'a mut RetainedTree,
-}
-
-impl<'a> LentTree<'a> {
-    fn new(shared: &'a Shared, tree: &'a mut RetainedTree) -> Self {
-        std::mem::swap(tree, &mut shared.tree.borrow_mut());
-        shared.lent.set(true);
-        Self { shared, tree }
-    }
-}
-
-impl Drop for LentTree<'_> {
-    fn drop(&mut self) {
-        std::mem::swap(self.tree, &mut self.shared.tree.borrow_mut());
-        self.shared.lent.set(false);
-    }
-}
-
 pub(crate) struct QuickJsRuntime {
     // Fields drop in order: the saved values must go before the runtime.
     hooks: Hooks,
@@ -187,8 +178,9 @@ impl Drop for QuickJsRuntime {
         self.set_source_position_hook(std::ptr::null());
         // The runtime's rejection tracker owns a handle to `shared`, so these
         // would otherwise outlive the runtime. Each call clears them, but a
-        // call that unwound may not have.
+        // call that unwound may not have. A prompt still open never settles.
         self.shared.rejections.borrow_mut().clear();
+        self.shared.prompts.borrow_mut().clear();
     }
 }
 
@@ -199,11 +191,10 @@ impl QuickJsRuntime {
     pub(crate) fn load(
         source: &str,
         file_name: &str,
-        tree: &mut RetainedTree,
         options: QuickJsOptions,
     ) -> Result<Self, String> {
         let js = Self::start(options, None)?;
-        js.call(tree, |ctx, _| {
+        js.call(|ctx, _| {
             let mut options = EvalOptions::default();
             options.strict = false;
             options.filename = Some(file_name.to_string());
@@ -217,11 +208,7 @@ impl QuickJsRuntime {
     /// the entry throws while it runs. An entry still waiting on top-level
     /// `await` keeps running, and a failure after that fails the call it
     /// happens in.
-    pub(crate) fn load_module(
-        entry: &Path,
-        tree: &mut RetainedTree,
-        options: QuickJsOptions,
-    ) -> Result<Self, String> {
+    pub(crate) fn load_module(entry: &Path, options: QuickJsOptions) -> Result<Self, String> {
         let entry = std::path::absolute(entry)
             .map_err(|error| format!("cannot load {}: {error}", entry.display()))?;
         let entry = entry
@@ -232,7 +219,7 @@ impl QuickJsRuntime {
         // path, and the import reports it.
         let module_name = modules::resolve("", entry).unwrap_or_else(|_| entry.to_string());
         let js = Self::start(options, Some(module_name))?;
-        js.call(tree, |ctx, hooks| {
+        js.call(|ctx, hooks| {
             // The entry runs inside `import`, so its failure is reported
             // with the prelude's `reportError`, which the app can't replace.
             let report = hooks.report_error.clone().restore(ctx)?;
@@ -252,8 +239,7 @@ impl QuickJsRuntime {
         let context =
             Context::full(&runtime).map_err(|error| format!("cannot start QuickJS: {error}"))?;
         let shared = Rc::new(Shared {
-            tree: RefCell::new(RetainedTree::new()),
-            lent: Cell::new(false),
+            host: RefCell::new(options.host),
             errors: RefCell::new(Vec::new()),
             rejections: RefCell::new(Vec::new()),
             clock: options.clock,
@@ -262,6 +248,8 @@ impl QuickJsRuntime {
             window_options: RefCell::new(None),
             tree_changed: Cell::new(false),
             entry,
+            prompts: RefCell::new(HashMap::new()),
+            next_prompt: Cell::new(1),
         });
         let tracked = shared.clone();
         runtime.set_host_promise_rejection_tracker(Some(Box::new(
@@ -324,16 +312,10 @@ impl QuickJsRuntime {
     /// Deliver one GPUI event to the handler the app registered with
     /// `__gpuix.setEventHandler`, then run the microtasks it queued. Returns
     /// whether the handler took the event; false when there is none.
-    pub(crate) fn dispatch_event(
-        &mut self,
-        payload: &EventPayload,
-        tree: &mut RetainedTree,
-    ) -> Result<bool, String> {
+    pub(crate) fn dispatch_event(&mut self, payload: &EventPayload) -> Result<bool, String> {
         let json = serde_json::to_string(payload)
             .map_err(|error| format!("cannot encode a {} event: {error}", payload.event_type))?;
-        self.call(tree, |ctx, hooks| {
-            hooks.dispatch_event.clone().restore(ctx)?.call((json,))
-        })
+        self.call(|ctx, hooks| hooks.dispatch_event.clone().restore(ctx)?.call((json,)))
     }
 
     /// The window options the app's renderer passed to `init`, once it has:
@@ -347,11 +329,61 @@ impl QuickJsRuntime {
         self.shared.tree_changed.replace(false)
     }
 
+    /// Run `read` on the host's tree.
+    pub(crate) fn with_tree<R>(&self, read: impl FnOnce(&mut RetainedTree) -> R) -> R {
+        let mut read = Some(read);
+        let mut result = None;
+        self.shared.host.borrow_mut().with_tree(&mut |tree| {
+            if let Some(read) = read.take() {
+                result = Some(read(tree));
+            }
+        });
+        result.expect("a host runs `with_tree`'s function once")
+    }
+
+    /// Hand the app to `host` (`gpx` does once its window opens), and
+    /// return the host it had.
+    pub(crate) fn set_host(&self, host: Box<dyn Host>) -> Box<dyn Host> {
+        self.shared.host.replace(host)
+    }
+
+    /// Settle the `promptForPaths` promise with id `id`, then run the
+    /// microtasks that queued. A prompt this runtime doesn't have (the app
+    /// reloaded while it was open) is ignored.
+    pub(crate) fn settle_path_prompt(
+        &mut self,
+        id: u64,
+        result: PathPromptResult,
+    ) -> Result<(), String> {
+        let Some((resolve, reject)) = self.shared.prompts.borrow_mut().remove(&id) else {
+            return Ok(());
+        };
+        self.call(|ctx, _| match result {
+            // Like napi, a cancelled prompt resolves with null, not undefined.
+            Ok(paths) => {
+                let paths = match paths {
+                    Some(paths) => paths.into_js(ctx)?,
+                    None => Value::new_null(ctx.clone()),
+                };
+                resolve.restore(ctx)?.call((paths,))
+            }
+            Err(message) => {
+                let error = Exception::from_message(ctx.clone(), &message)?;
+                reject.restore(ctx)?.call((error,))
+            }
+        })
+    }
+
+    /// Run a window method on the host, as the app's renderer would: `gpx`
+    /// replays what the app called before its window opened.
+    pub(crate) fn window(&self, call: WindowCall) -> Result<serde_json::Value, String> {
+        self.shared.host.borrow_mut().window(call)
+    }
+
     /// Run the timers due now, earliest first, each followed by the
     /// microtasks it queued. Timers they queue wait for the next call.
-    pub(crate) fn run_timers(&mut self, tree: &mut RetainedTree) -> Result<(), String> {
+    pub(crate) fn run_timers(&mut self) -> Result<(), String> {
         self.begin();
-        let _lent = LentTree::new(&self.shared, tree);
         let due = self.invoke(|ctx, hooks| {
             hooks
                 .due_timers
@@ -369,9 +401,8 @@ impl QuickJsRuntime {
     /// How long until a timer is due (zero if one is already), or `None`
     /// when no timer is queued.
     pub(crate) fn next_timer(&self) -> Result<Option<Duration>, String> {
-        // Only prelude code runs here, so no tree is lent. (App code could
-        // still run if it patched a builtin the prelude uses; `applyBatch`
-        // then throws.)
+        // Only prelude code runs here, unless the app patched a builtin the
+        // prelude uses.
         self.begin();
         let wait =
             self.invoke(|ctx, hooks| hooks.next_timer.clone().restore(ctx)?.call::<_, f64>(()));
@@ -385,14 +416,12 @@ impl QuickJsRuntime {
             .map_err(|error| format!("the next timer is due in {wait} ms: {error}"))
     }
 
-    /// Run `run` with the tree lent, then the microtasks it queued.
+    /// Run `run`, then the microtasks it queued.
     fn call<T>(
         &self,
-        tree: &mut RetainedTree,
         run: impl for<'js> FnOnce(&Ctx<'js>, &Hooks) -> rquickjs::Result<T>,
     ) -> Result<T, String> {
         self.begin();
-        let _lent = LentTree::new(&self.shared, tree);
         let value = self.invoke(run);
         self.drain_jobs();
         self.finish(value)
@@ -596,21 +625,83 @@ fn install_host<'js>(
             ctx.clone(),
             move |ctx: Ctx<'js>, json: String| -> rquickjs::Result<Vec<f64>> {
                 guard(&batches, &ctx, "applyBatch", || {
-                    if !batches.lent.get() {
-                        return Err(Exception::throw_message(
-                            &ctx,
-                            "applyBatch can only run while GPUIX is calling into the app",
-                        ));
-                    }
-                    let ids = apply_batch_to_tree(&mut batches.tree.borrow_mut(), json.as_bytes())
-                        .map_err(|error| Exception::throw_message(&ctx, &error))?;
+                    let mut applied = Ok(Vec::new());
+                    batches.host.borrow_mut().with_tree(&mut |tree| {
+                        applied = apply_batch_to_tree(tree, json.as_bytes());
+                    });
+                    let ids = applied.map_err(|error| Exception::throw_message(&ctx, &error))?;
                     batches.tree_changed.set(true);
                     Ok(ids)
                 })
             },
         )?,
     )?;
+    let windows = shared.clone();
+    renderer.set(
+        "window",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, method: String, args: Rest<Value<'js>>| {
+                guard(&windows, &ctx, "window", || {
+                    let call = window::parse(&ctx, &method, &args)?;
+                    let reply = windows.host.borrow_mut().window(call).map_err(|error| {
+                        Exception::throw_message(&ctx, &format!("{method}: {error}"))
+                    })?;
+                    ctx.json_parse(reply.to_string())
+                })
+            },
+        )?,
+    )?;
+    let prompts = shared.clone();
+    renderer.set(
+        "promptForPaths",
+        Function::new(
+            ctx.clone(),
+            move |ctx: Ctx<'js>, options: Opt<Value<'js>>| {
+                guard(&prompts, &ctx, "promptForPaths", || {
+                    let options = window::path_prompt_options(&ctx, options.0)?;
+                    let (promise, resolve, reject) = ctx.promise()?;
+                    // Like napi, options GPUI can't prompt with reject the
+                    // promise rather than throw.
+                    let opened =
+                        PathPromptOptions::to_gpui_options(Some(options)).and_then(|options| {
+                            let id = prompts.next_prompt.replace(prompts.next_prompt.get() + 1);
+                            prompts.prompts.borrow_mut().insert(
+                                id,
+                                (
+                                    Persistent::save(&ctx, resolve),
+                                    Persistent::save(&ctx, reject.clone()),
+                                ),
+                            );
+                            prompts
+                                .host
+                                .borrow_mut()
+                                .prompt_for_paths(id, options)
+                                .inspect_err(|_| {
+                                    prompts.prompts.borrow_mut().remove(&id);
+                                })
+                        });
+                    if let Err(message) = opened {
+                        let error = Exception::from_message(ctx.clone(), &message)?;
+                        reject.call::<_, ()>((error,))?;
+                    }
+                    Ok(promise)
+                })
+            },
+        )?,
+    )?;
     host.set("renderer", renderer)?;
+
+    // Node's `gc()` under `--expose-gc`, which `idle-gc.ts` looks for.
+    host.set(
+        "gc",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>| {
+            // SAFETY: the context's runtime is live while JS runs in it.
+            // QuickJS collects from inside a call as quickjs-libc's
+            // `std.gc()` does.
+            unsafe { qjs::JS_RunGC(qjs::JS_GetRuntime(ctx.as_raw().as_ptr())) }
+        })?,
+    )?;
 
     ctx.globals().set("__gpuix", host)
 }

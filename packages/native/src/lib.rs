@@ -37,6 +37,11 @@ mod quickjs;
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 mod quickjs_app;
+#[cfg(all(
+    feature = "quickjs",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+mod quickjs_window;
 mod renderer;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod script;

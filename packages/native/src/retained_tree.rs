@@ -260,6 +260,12 @@ pub struct RetainedTree {
     dirty: bool,
 }
 
+impl Default for RetainedTree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RetainedTree {
     pub fn new() -> Self {
         Self {

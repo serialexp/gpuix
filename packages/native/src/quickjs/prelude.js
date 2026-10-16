@@ -8,7 +8,10 @@
 //   __gpuix.proxyTarget(value)     a proxy's target, or undefined
 //   __gpuix.init(json)             the window options `render()` passes
 //   __gpuix.process                { env, argv, platform } for `process`
+//   __gpuix.gc()                   a full garbage collection
 //   __gpuix.renderer.applyBatch(json)
+//   __gpuix.renderer.window(method, ...args)  a window method (`window.rs`)
+//   __gpuix.renderer.promptForPaths(options)   a promise of the paths picked
 //
 // It adds what Rust calls back into: `dispatchEvent`, `dueTimers`,
 // `runTimer`, `nextTimer` and `describe`. It keeps its own references to the
@@ -318,6 +321,15 @@
       argv: Object.freeze([...argv]),
       platform,
     });
+  }
+
+  // ── gc ─────────────────────────────────────────────────────────────
+  // Node's under `--expose-gc`, which `idle-gc.ts` runs once the app goes
+  // quiet. QuickJS frees most objects by reference counting; this collects
+  // the cycles that leaves behind.
+  {
+    const { gc } = host;
+    globalThis.gc = () => gc();
   }
 
   // ── structuredClone ────────────────────────────────────────────────

@@ -72,6 +72,13 @@ Tracking the gap between this design and what's on the main branch.
 - [x] Phase 4: the embedded `@gpuix/native` shim's `init` passes the window
   options `render()` gives it to the host, which opens the window with them
   (same commit)
+- [x] Phase 2 follow-up, due with Phase 4: the `NativeRenderer` window
+  methods (focus, Tab, selection, scrolling, images, fonts, window
+  controls, the debug overlay, `promptForPaths`) on the embedded
+  `@gpuix/native` shim, run by `gpx`'s window host on the GPUI thread as on
+  macOS, and `gc()` for `idle-gc.ts` (`src/quickjs/window.rs`,
+  `src/quickjs_window.rs`, `embedded/native.ts`, `feat(native): give gpx
+  apps the renderer's window methods`)
 - [x] Phase 4: small Node/Bun shims so the example apps run under `gpx`: a
   frozen `process` snapshot (`env`, `argv`, `platform`), `import.meta.url`
   and `import.meta.main`, and `with { type: "text" }` imports of the app's
@@ -86,13 +93,6 @@ Tracking the gap between this design and what's on the main branch.
 - [ ] Phase 1 (dropped 2026-10-13): direct host and its swap-safe flush.
   Lua's Solid layer is not a direct host, and QuickJS reuses
   `apply_batch_to_tree` (see the Shared core update)
-- [ ] Phase 2 follow-up: the optional `NativeRenderer` methods on
-  `__gpuix.renderer` (`focusNext`, `focusPrevious`, `getFocusedElementId`
-  and the rest), which `renderer-state.ts` uses for Tab and dismiss layers,
-  and a GC hook for `idle-gc.ts` and Solid 2.0's cycles. Due with Phase 4,
-  when a window exists to answer them. The embedded `@gpuix/native` shim
-  (`embedded/native.ts`) must forward them too, and `getSelectedText`, which
-  `observeSelectedText` calls without `?.`, throws until then
 - [ ] Phase 3: compiled output cached by content hash (deferred to Phase 6,
   with hot reload: compiling is fast enough that only `--watch` restarts
   would notice)
@@ -259,6 +259,17 @@ option, in which case they move into the core as well (rust-js-vm
 > job, an unhandled rejection or `reportError` fails the call it happened
 > in. A panic in a native function fails the call even if JS catches the
 > exception it turns into.
+
+> **2026-10-16 update:** the runtime no longer borrows the caller's tree.
+> It has a `Host` that owns the tree and runs the renderer's window
+> methods: a `TreeHost` until the app's window opens, then `gpx`'s
+> `WindowHost`, which locks the window's tree only while a batch applies.
+> Borrowing kept the tree locked for the whole call, so a window method
+> that reads the tree (focusing inside a virtual list, `setImage`) would
+> have deadlocked. Calls made before the window opens (an effect's
+> `focusElement`) are queued and run once it has; queries answer as an
+> unpainted window would, and the window's size throws, as napi does while
+> a window opens.
 
 - rust-js-vm's `src/js/raw.rs` fast path (reading props as atoms and integer
   tokens from value tags) took 10–15% off full renders. It only applies to

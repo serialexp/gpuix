@@ -6,7 +6,8 @@
 //! As in `lua_app.rs`, the window's events go through a channel to one task
 //! on GPUI's foreground executor, so JS never runs inside a GPUI update. The
 //! same task runs the app's timers when they are due, and reloads the app
-//! when `--watch` sees a source change.
+//! when `--watch` sees a source change. Once the window opens, the app's
+//! renderer reaches it through a [`WindowHost`].
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -18,9 +19,9 @@ use futures::channel::mpsc::UnboundedReceiver;
 use futures::{FutureExt as _, StreamExt as _};
 
 use crate::element_tree::EventPayload;
-use crate::quickjs::{QuickJsOptions, QuickJsRuntime};
+use crate::quickjs::{PathPromptResult, QuickJsOptions, QuickJsRuntime, WindowCall};
+use crate::quickjs_window::WindowHost;
 use crate::renderer::{init_app, open_main_window, EventCallback, GpuixView, WindowOptions};
-use crate::retained_tree::RetainedTree;
 use crate::script::{default_title, reload, AppOptions};
 use crate::text::SharedSelection;
 
@@ -51,15 +52,14 @@ pub fn is_js_source(path: &Path) -> bool {
 /// fails if a module can't be found or compiled, the app throws while it
 /// starts, or it never calls `render()`.
 pub fn check_js_file(path: impl AsRef<Path>) -> Result<(), String> {
-    start(path.as_ref(), &mut RetainedTree::new())?;
+    start(path.as_ref())?;
     Ok(())
 }
 
 /// Runs the app at `path` in a window until the window closes.
 pub fn run_js_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), String> {
     let path = path.as_ref().to_path_buf();
-    let mut tree = RetainedTree::new();
-    let (js, app_window_options) = start(&path, &mut tree)?;
+    let (js, app_window_options) = start(&path)?;
     let window_options = window_options(app_window_options, &path, &options);
     let startup_error = Rc::new(RefCell::new(None));
     let startup_error_for_app = startup_error.clone();
@@ -75,7 +75,7 @@ pub fn run_js_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), St
             cx.on_window_closed(|_cx, native_id| crate::text::paint::remove_window(native_id))
                 .detach();
             let reloads = options.watch.then(|| watch_sources(&path));
-            match launch(path, js, tree, &window_options, reloads, cx) {
+            match launch(path, js, &window_options, reloads, cx) {
                 Ok((_window, task)) => task.detach(),
                 Err(error) => {
                     *startup_error_for_app.borrow_mut() = Some(error);
@@ -96,43 +96,51 @@ pub fn run_js_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), St
 pub(crate) fn launch(
     path: PathBuf,
     js: QuickJsRuntime,
-    tree: RetainedTree,
     window_options: &WindowOptions,
     reloads: Option<UnboundedReceiver<()>>,
     cx: &mut gpui::App,
 ) -> Result<(gpui::WindowHandle<GpuixView>, gpui::Task<()>), String> {
-    let tree = Arc::new(Mutex::new(tree));
+    let tree = Arc::new(Mutex::new(js.with_tree(std::mem::take)));
+    let selection = SharedSelection::default();
     let (callback, events) = event_channel();
     let window = open_main_window(
         window_options,
         tree.clone(),
         Some(callback),
-        SharedSelection::default(),
+        selection.clone(),
         cx,
     )?;
+    let (prompt_results, prompts) = futures::channel::mpsc::unbounded();
+    let startup = js.set_host(Box::new(WindowHost::new(
+        tree,
+        window,
+        selection,
+        prompt_results,
+        cx.to_async(),
+    )));
     // The new window draws the tree as it stands.
     js.take_tree_changed();
     let app = RunningApp {
         path,
         js,
-        tree,
         window,
         title: window_options.title_or_default(),
     };
-    let task = cx.spawn(async move |cx| app.run(events, reloads, cx).await);
+    let pending = startup.into_pending();
+    let task = cx.spawn(async move |cx| app.run(pending, events, prompts, reloads, cx).await);
     Ok((window, task))
 }
 
 /// Imports the app and runs the timers due straight away, so `render()` has
 /// committed its first tree, then returns the window options `render()`
 /// passed. Fails if the app throws or never calls `render()`.
-fn start(path: &Path, tree: &mut RetainedTree) -> Result<(QuickJsRuntime, WindowOptions), String> {
-    let mut js = QuickJsRuntime::load_module(path, tree, QuickJsOptions::default())?;
+fn start(path: &Path) -> Result<(QuickJsRuntime, WindowOptions), String> {
+    let mut js = QuickJsRuntime::load_module(path, QuickJsOptions::default())?;
     for _ in 0..STARTUP_TIMER_ROUNDS {
         if js.next_timer()? != Some(Duration::ZERO) {
             break;
         }
-        js.run_timers(tree)?;
+        js.run_timers()?;
     }
     let options = js
         .window_options()
@@ -172,28 +180,38 @@ fn event_channel() -> (EventCallback, UnboundedReceiver<EventPayload>) {
 struct RunningApp {
     path: PathBuf,
     js: QuickJsRuntime,
-    /// The window's tree, which each call into JS borrows.
-    tree: Arc<Mutex<RetainedTree>>,
     window: gpui::WindowHandle<GpuixView>,
     title: String,
 }
+
+/// Where a reloaded app's events and path prompt results arrive.
+type Reloaded = (
+    UnboundedReceiver<EventPayload>,
+    UnboundedReceiver<(u64, PathPromptResult)>,
+);
 
 /// What woke the app's task. The event is boxed: it is far larger than the
 /// other variants.
 enum Wake {
     Event(Option<Box<EventPayload>>),
+    PathPrompt(Option<(u64, PathPromptResult)>),
     Timer,
     SourceChange(Option<()>),
 }
 
 impl RunningApp {
-    /// Delivers events, runs timers and reloads until the window closes.
+    /// Runs the window methods the app called before its window opened,
+    /// then delivers events, runs timers and reloads until the window
+    /// closes.
     async fn run(
         mut self,
+        pending: Vec<WindowCall>,
         mut events: UnboundedReceiver<EventPayload>,
+        mut prompts: UnboundedReceiver<(u64, PathPromptResult)>,
         mut reloads: Option<UnboundedReceiver<()>>,
         cx: &mut gpui::AsyncApp,
     ) {
+        self.replay(pending);
         loop {
             let timer = match self.js.next_timer() {
                 // GPUI's timer is ready at once for no delay, and an app that
@@ -221,6 +239,7 @@ impl RunningApp {
                 };
                 futures::select_biased! {
                     event = events.next() => Wake::Event(event.map(Box::new)),
+                    prompt = prompts.next() => Wake::PathPrompt(prompt),
                     _ = timer.fuse() => Wake::Timer,
                     change = source_change.fuse() => Wake::SourceChange(change),
                 }
@@ -229,10 +248,18 @@ impl RunningApp {
                 // The window closed, which dropped the view and its sender.
                 Wake::Event(None) => return,
                 Wake::Event(Some(event)) => self.dispatch(&event),
+                Wake::PathPrompt(Some((id, result))) => {
+                    if let Err(error) = self.js.settle_path_prompt(id, result) {
+                        eprintln!("gpx: {error}");
+                    }
+                }
+                // The host holds a sender for as long as the app runs.
+                Wake::PathPrompt(None) => {}
                 Wake::Timer => self.run_timers(),
                 Wake::SourceChange(Some(())) => {
-                    if let Some(reloaded_events) = self.reload(cx) {
+                    if let Some((reloaded_events, reloaded_prompts)) = self.reload(cx) {
                         events = reloaded_events;
+                        prompts = reloaded_prompts;
                     }
                 }
                 // The watcher stopped; it said why.
@@ -247,52 +274,68 @@ impl RunningApp {
     }
 
     fn dispatch(&mut self, event: &EventPayload) {
-        let result = self
-            .js
-            .dispatch_event(event, &mut self.tree.lock().unwrap());
-        if let Err(error) = result {
+        if let Err(error) = self.js.dispatch_event(event) {
             eprintln!("gpx: {error}");
         }
     }
 
     fn run_timers(&mut self) {
-        let result = self.js.run_timers(&mut self.tree.lock().unwrap());
-        if let Err(error) = result {
+        if let Err(error) = self.js.run_timers() {
             eprintln!("gpx: {error}");
+        }
+    }
+
+    /// Runs window methods the app called before there was a window to
+    /// run them. A failure is reported here, as nothing in the app awaits it.
+    fn replay(&self, pending: Vec<WindowCall>) {
+        for call in pending {
+            if let Err(error) = self.js.window(call) {
+                eprintln!("gpx: {error}");
+            }
         }
     }
 
     /// Starts the app again in a new runtime, and swaps it in with a new
     /// view, so nothing the old tree's element ids keyed carries over. The
     /// window and its options stay; the app's state is reset. Returns where
-    /// the new view's events arrive, or `None` if the old app stays.
-    fn reload(&mut self, cx: &mut gpui::AsyncApp) -> Option<UnboundedReceiver<EventPayload>> {
-        let mut tree = RetainedTree::new();
-        let js = match start(&self.path, &mut tree) {
+    /// the new view's events and the new app's path prompts arrive, or
+    /// `None` if the old app stays.
+    fn reload(&mut self, cx: &mut gpui::AsyncApp) -> Option<Reloaded> {
+        let js = match start(&self.path) {
             Ok((js, _window_options)) => js,
             Err(error) => {
                 eprintln!("gpx: reload failed: {error}");
                 return None;
             }
         };
-        let tree = Arc::new(Mutex::new(tree));
+        let tree = Arc::new(Mutex::new(js.with_tree(std::mem::take)));
+        let selection = SharedSelection::default();
         let (callback, events) = event_channel();
-        let (view_tree, title) = (tree.clone(), self.title.clone());
+        let (view_tree, view_selection, title) =
+            (tree.clone(), selection.clone(), self.title.clone());
         let swapped = gpui::AnyWindowHandle::from(self.window).update(cx, |_view, window, cx| {
             window.replace_root(cx, |_window, _cx| {
-                GpuixView::new(view_tree, Some(callback), title, SharedSelection::default())
+                GpuixView::new(view_tree, Some(callback), title, view_selection)
             });
         });
         if let Err(error) = swapped {
             eprintln!("gpx: reload failed: {error}");
             return None;
         }
+        let (prompt_results, prompts) = futures::channel::mpsc::unbounded();
+        let startup = js.set_host(Box::new(WindowHost::new(
+            tree,
+            self.window,
+            selection,
+            prompt_results,
+            cx.clone(),
+        )));
         // The new view draws the tree as it starts.
         js.take_tree_changed();
         self.js = js;
-        self.tree = tree;
+        self.replay(startup.into_pending());
         eprintln!("gpx: reloaded (state reset)");
-        Some(events)
+        Some((events, prompts))
     }
 }
 
@@ -383,11 +426,10 @@ mod tests {
     impl Launched {
         fn new(app: &App) -> Self {
             let cx = gpui::TestAppContext::single();
-            let mut tree = RetainedTree::new();
-            let (js, options) = start(&app.0, &mut tree).unwrap();
+            let (js, options) = start(&app.0).unwrap();
             let (reload, reloads) = futures::channel::mpsc::unbounded();
             let (window, task) = cx
-                .update(|cx| launch(app.0.clone(), js, tree, &options, Some(reloads), cx))
+                .update(|cx| launch(app.0.clone(), js, &options, Some(reloads), cx))
                 .unwrap();
             Self {
                 cx,
@@ -641,5 +683,133 @@ mod tests {
         launched.cx.run_until_parked();
         launched.click("button");
         assert_eq!(launched.text("count"), "Count 1");
+    }
+
+    /// Two focusable boxes. The app focuses the first as it mounts, before
+    /// its window opens; `button` reports the window's size and focuses the
+    /// second, and `next` moves focus on.
+    const WINDOW_APP: &str = r#"import { render, useGpuix } from "@gpuix/react"
+        import { useEffect, useRef, useState } from "react"
+        function App() {
+          const { renderer } = useGpuix()
+          const first = useRef<any>(null)
+          const second = useRef<any>(null)
+          const [info, setInfo] = useState("")
+          useEffect(() => {
+            renderer!.setWindowTitle!("Mounted")
+            renderer!.focusElement!(first.current.id)
+          }, [])
+          const report = () => {
+            const size = renderer!.getWindowSize!()
+            renderer!.focusElement!(second.current.id)
+            setInfo(`${size.width}x${size.height}`)
+          }
+          return (
+            <div>
+              <div testId="first" ref={first} tabIndex={0} />
+              <div testId="second" ref={second} tabIndex={0} />
+              <div testId="button" onClick={report}><text testId="info">{info}</text></div>
+              <div testId="next" onClick={() => renderer!.focusNext!()} />
+            </div>
+          )
+        }
+        render(<App />, { title: "Window", width: 320, height: 240, focus: false })"#;
+
+    impl Launched {
+        fn focused(&mut self) -> Option<u64> {
+            self.window
+                .update(&mut self.cx, |view, window, _cx| {
+                    view.focused_element_id(window)
+                })
+                .unwrap()
+        }
+
+        fn title(&mut self) -> String {
+            self.view(|view| view.window_title.clone())
+        }
+    }
+
+    #[test]
+    fn what_the_app_asks_of_its_window_before_it_opens_happens_once_it_has() {
+        let app = App::new("main.tsx", WINDOW_APP);
+        let mut launched = Launched::new(&app);
+        launched.cx.run_until_parked();
+        assert_eq!(launched.title(), "Mounted");
+        let first = launched.element_id("first");
+        assert_eq!(launched.focused(), Some(first));
+    }
+
+    #[test]
+    fn the_app_reaches_its_open_window() {
+        let app = App::new("main.tsx", WINDOW_APP);
+        let mut launched = Launched::new(&app);
+        launched.cx.run_until_parked();
+        launched.click("button");
+        assert_eq!(launched.text("info"), "320x240");
+        let second = launched.element_id("second");
+        assert_eq!(launched.focused(), Some(second));
+        launched.click("next");
+        let next = launched.focused();
+        assert!(next.is_some() && next != Some(second), "{next:?}");
+    }
+
+    #[test]
+    fn a_reloaded_app_reaches_the_window_too() {
+        let app = App::new("main.tsx", WINDOW_APP);
+        let mut launched = Launched::new(&app);
+        launched.cx.run_until_parked();
+        launched.reload();
+        // The new app's tree has new ids, and it focused its own first box.
+        let first = launched.element_id("first");
+        assert_eq!(launched.focused(), Some(first));
+        launched.click("button");
+        assert_eq!(launched.text("info"), "320x240");
+    }
+
+    /// Opens a path prompt on a click, and shows what it settled with.
+    const PROMPT_APP: &str = r#"import { render, useGpuix } from "@gpuix/react"
+        import { useState } from "react"
+        function App() {
+          const { renderer } = useGpuix()
+          const [picked, setPicked] = useState("none")
+          const open = () => {
+            renderer!.promptForPaths!({ multiple: true }).then(
+              (paths) => setPicked(JSON.stringify(paths)),
+              (error) => setPicked(String(error)),
+            )
+          }
+          return <div testId="open" onClick={open}><text testId="picked">{picked}</text></div>
+        }
+        render(<App />, { title: "Prompt", focus: false })"#;
+
+    #[test]
+    fn a_path_prompt_resolves_with_what_the_picker_picked() {
+        let app = App::new("main.tsx", PROMPT_APP);
+        let mut launched = Launched::new(&app);
+        launched.click("open");
+        assert!(launched.cx.did_prompt_for_paths());
+        launched.cx.simulate_path_prompt_response(|options| {
+            assert!(options.files && options.multiple);
+            Some(vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")])
+        });
+        launched.cx.run_until_parked();
+        assert_eq!(launched.text("picked"), r#"["/tmp/a","/tmp/b"]"#);
+        launched.click("open");
+        launched.cx.simulate_path_prompt_response(|_| None);
+        launched.cx.run_until_parked();
+        assert_eq!(launched.text("picked"), "null");
+    }
+
+    #[test]
+    fn a_prompt_the_old_app_opened_doesnt_reach_the_reloaded_one() {
+        let app = App::new("main.tsx", PROMPT_APP);
+        let mut launched = Launched::new(&app);
+        launched.click("open");
+        launched.reload();
+        launched
+            .cx
+            .simulate_path_prompt_response(|_| Some(vec![PathBuf::from("/tmp/a")]));
+        launched.cx.run_until_parked();
+        assert_eq!(launched.text("picked"), "none");
     }
 }
