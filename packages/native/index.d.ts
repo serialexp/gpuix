@@ -514,7 +514,12 @@ export interface EventModifiers {
   cmd: boolean
 }
 
-/** Event payload sent back to JS when a user interacts with an element. */
+/**
+ * Event payload sent back to JS when a user interacts with an element.
+ *
+ * napi converts it for Node. The browser build and the embedded QuickJS
+ * engine send it as JSON, where an absent field is `null`.
+ */
 export interface EventPayload {
   /** Numeric element ID (matches the ID assigned in JS via createElement). */
   elementId: number

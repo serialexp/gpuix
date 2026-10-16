@@ -106,6 +106,10 @@ interface NativeTestRendererApi extends NativeRenderer {
   getSyntaxCacheStats(): number[]
   clearSelection(): void
   captureScreenshot(path: string): void
+  // Only in builds with the `quickjs` feature (`build:quickjs`).
+  loadJs?(entry: string): void
+  dispatchJsEvent?(event: EventPayload): boolean
+  runJsTimers?(): number | null
 }
 
 interface NativeTestRendererConstructor {
@@ -134,6 +138,11 @@ const NativeTestRenderer: NativeTestRendererConstructor | null =
 
 /** Whether the native TestGpuixRenderer is available (for conditional test registration). */
 export const hasNativeTestRenderer = NativeTestRenderer != null
+
+/** Whether the native TestGpuixRenderer can run apps in QuickJS, as `gpx`
+ *  does (`loadJs`). Only builds with the `quickjs` feature can. */
+export const hasQuickJsTestRenderer =
+  NativeTestRenderer != null && "loadJs" in NativeTestRenderer.prototype
 
 // ── Test element tree ────────────────────────────────────────────────
 
@@ -182,7 +191,7 @@ export class TestRenderer implements NativeRenderer {
     NativeRenderer["setWindowSelectionChange"]
   >
   readonly setWindowKeyEvents: NonNullable<NativeRenderer["setWindowKeyEvents"]>
-  private readonly dispatchEvent: (event: EventPayload) => void
+  private dispatchEvent: (event: EventPayload) => void
 
   constructor(options: TestRendererOptions = {}) {
     if (!NativeTestRenderer) {
@@ -215,6 +224,36 @@ export class TestRenderer implements NativeRenderer {
   /** Drain events collected by the native GPUI event handlers. */
   drainEvents(): EventPayload[] {
     return this.native.drainEvents()
+  }
+
+  // ── Apps in QuickJS ─────────────────────────────────────────────
+
+  /** Start the app module at `entry` in QuickJS, as `gpx` runs it, in this
+   *  renderer's window. It runs until `render()` has committed its first
+   *  tree. From then on the window's events go to it, not to `dispatchEvent`,
+   *  and `runJsTimers` runs its timers. Needs `hasQuickJsTestRenderer`. */
+  loadJs(entry: string): void {
+    const { loadJs, dispatchJsEvent } = this.native
+    if (!loadJs || !dispatchJsEvent) {
+      throw new Error(
+        "loadJs requires a native @gpuix/native build with the quickjs feature (build:quickjs)."
+      )
+    }
+    loadJs.call(this.native, entry)
+    this.dispatchEvent = (event) => {
+      dispatchJsEvent.call(this.native, event)
+    }
+  }
+
+  /** Run the timers of the app `loadJs` started that are due. Returns the
+   *  milliseconds until the next one is due, or null when none is queued. */
+  runJsTimers(): number | null {
+    if (!this.native.runJsTimers) {
+      throw new Error(
+        "runJsTimers requires a native @gpuix/native build with the quickjs feature (build:quickjs)."
+      )
+    }
+    return this.native.runJsTimers()
   }
 
   // ── Native end-to-end simulation ────────────────────────────────

@@ -40,6 +40,10 @@ type TestAppContext = gpui::HeadlessAppContext;
 type TestAppContext = gpui::VisualTestAppContext;
 
 struct TestState {
+    /// The JavaScript app `loadJs` started. Its host reaches the window, so
+    /// it goes first.
+    #[cfg(feature = "quickjs")]
+    js: Option<TestJs>,
     view: gpui::Entity<GpuixView>,
     window: gpui::AnyWindowHandle,
     cx: TestAppContext,
@@ -287,7 +291,13 @@ impl TestGpuixRenderer {
 
         // Store !Send types on the JS main thread.
         TEST_STATE.with(|cell| {
-            *cell.borrow_mut() = Some(TestState { cx, window, view });
+            *cell.borrow_mut() = Some(TestState {
+                #[cfg(feature = "quickjs")]
+                js: None,
+                cx,
+                window,
+                view,
+            });
         });
 
         Ok(Self {
@@ -1353,5 +1363,106 @@ impl TestGpuixRenderer {
                 Self::collect_text(child_id, tree, texts);
             }
         }
+    }
+}
+
+// ── JavaScript apps in QuickJS ───────────────────────────────────────
+
+/// A JavaScript app `loadJs` started in the embedded QuickJS runtime, and
+/// where its path prompts' results arrive.
+#[cfg(feature = "quickjs")]
+struct TestJs {
+    runtime: crate::quickjs::QuickJsRuntime,
+    prompts: futures::channel::mpsc::UnboundedReceiver<(u64, crate::quickjs::PathPromptResult)>,
+}
+
+/// Run `f` on the app `loadJs` started.
+#[cfg(feature = "quickjs")]
+fn with_test_js<R>(f: impl FnOnce(&mut TestJs) -> std::result::Result<R, String>) -> Result<R> {
+    TEST_STATE.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let js = borrow
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("TestGpuixRenderer not initialized"))?
+            .js
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("No JavaScript app is loaded"))?;
+        f(js).map_err(Error::from_reason)
+    })
+}
+
+/// Apps run in the QuickJS runtime `gpx` uses, so tests can hold an app to
+/// what it does under Node. Only in builds with the `quickjs` feature.
+#[cfg(feature = "quickjs")]
+#[napi]
+impl TestGpuixRenderer {
+    /// Start the app at `entry` as `gpx` would, in this renderer's window,
+    /// and run it until `render()` has committed its first tree.
+    /// `dispatchJsEvent` and `runJsTimers` drive it from there. The window
+    /// keeps its size, and the app sees it from its first render; its other
+    /// window options are ignored.
+    #[napi]
+    pub fn load_js(&self, entry: String) -> Result<()> {
+        let size = self.get_window_size()?;
+        let size = crate::quickjs::SizeOverride {
+            width: Some(size.width),
+            height: Some(size.height),
+        };
+        let (runtime, _window_options) =
+            crate::quickjs_app::start(std::path::Path::new(&entry), size)
+                .map_err(Error::from_reason)?;
+        *self.tree.lock().unwrap() = runtime.with_tree(std::mem::take);
+        let (results, prompts) = futures::channel::mpsc::unbounded();
+        TEST_STATE.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let state = borrow
+                .as_mut()
+                .ok_or_else(|| Error::from_reason("TestGpuixRenderer not initialized"))?;
+            let window = state
+                .window
+                .downcast::<GpuixView>()
+                .ok_or_else(|| Error::from_reason("The test window doesn't hold a GpuixView"))?;
+            let host = crate::quickjs_window::WindowHost::new(
+                self.tree.clone(),
+                window,
+                self.selection.clone(),
+                results,
+                state.cx.update(|cx| cx.to_async()),
+            );
+            let pending = runtime.set_host(Box::new(host)).into_pending();
+            // The window draws the tree as it stands.
+            runtime.take_tree_changed();
+            let failures = runtime.replay(pending);
+            state.js = Some(TestJs { runtime, prompts });
+            if failures.is_empty() {
+                Ok(())
+            } else {
+                Err(Error::from_reason(failures.join("\n")))
+            }
+        })
+    }
+
+    /// Deliver an event drained from the window to the app `loadJs`
+    /// started, as `gpx` does. Returns whether the app's handler took it.
+    #[napi]
+    pub fn dispatch_js_event(&self, payload: EventPayload) -> Result<bool> {
+        with_test_js(|js| js.runtime.dispatch_event(&payload))
+    }
+
+    /// Settle the app's finished path prompts and run its timers that are
+    /// due. Returns how many milliseconds until the next timer is due, or
+    /// null when none is queued.
+    #[napi]
+    pub fn run_js_timers(&self) -> Result<Option<f64>> {
+        with_test_js(|js| {
+            while let Ok((id, result)) = js.prompts.try_recv() {
+                js.runtime.settle_path_prompt(id, result)?;
+            }
+            js.runtime.run_timers()?;
+            Ok(js
+                .runtime
+                .next_timer()?
+                .map(|wait| wait.as_secs_f64() * 1000.0))
+        })
     }
 }

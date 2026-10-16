@@ -4,7 +4,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use super::compile::compile;
-use super::{ConsoleLevel, Host, QuickJsOptions, QuickJsRuntime, TreeHost, WindowCall};
+use super::{
+    ConsoleLevel, Host, QuickJsOptions, QuickJsRuntime, SizeOverride, TreeHost, WindowCall,
+};
 use crate::element_tree::{EventModifiers, EventPayload};
 use crate::retained_tree::RetainedTree;
 
@@ -1767,6 +1769,54 @@ fn before_the_window_opens_calls_queue_and_queries_answer_as_unpainted() {
             WindowCall::SetWindowTitle("Soon".to_string()),
             WindowCall::SetDebugFrameOverlay(gpui::DebugFrameOverlayMode::Minimal),
         ]
+    );
+}
+
+#[test]
+fn before_the_window_opens_its_size_is_the_one_it_will_open_at() {
+    let size = |options: &str, size: SizeOverride| {
+        let output = Output::default();
+        let console = output.clone();
+        QuickJsRuntime::load(
+            &format!(
+                r#"
+                __gpuix.init({options:?})
+                console.log(JSON.stringify(__gpuix.renderer.window("getWindowSize")))
+                "#
+            ),
+            "main.js",
+            QuickJsOptions {
+                console: Box::new(move |_, message| {
+                    console
+                        .borrow_mut()
+                        .push((ConsoleLevel::Log, message.to_string()))
+                }),
+                host: Box::new(TreeHost::new(size)),
+                ..QuickJsOptions::default()
+            },
+        )
+        .unwrap();
+        let log = output.borrow();
+        log[0].1.clone()
+    };
+    assert_eq!(
+        size("{}", SizeOverride::default()),
+        r#"{"width":800,"height":600}"#
+    );
+    assert_eq!(
+        size(r#"{"width":300}"#, SizeOverride::default()),
+        r#"{"width":300,"height":600}"#
+    );
+    // The command line, or a reload's window, beats the app.
+    assert_eq!(
+        size(
+            r#"{"width":300,"height":200}"#,
+            SizeOverride {
+                width: Some(640.0),
+                height: None,
+            },
+        ),
+        r#"{"width":640,"height":200}"#
     );
 }
 

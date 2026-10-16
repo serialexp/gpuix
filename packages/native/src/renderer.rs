@@ -7462,13 +7462,17 @@ pub struct WindowOptions {
     pub layer_shell: Option<LayerShellOptions>,
 }
 
+/// The size a window opens at when its options don't set one.
+const DEFAULT_WINDOW_WIDTH: f64 = 800.0;
+const DEFAULT_WINDOW_HEIGHT: f64 = 600.0;
+
 impl Default for WindowOptions {
     fn default() -> Self {
         Self {
             title: Some("GPUIX".to_string()),
             app_name: None,
-            width: Some(800.0),
-            height: Some(600.0),
+            width: Some(DEFAULT_WINDOW_WIDTH),
+            height: Some(DEFAULT_WINDOW_HEIGHT),
             min_width: None,
             min_height: None,
             resizable: Some(true),
@@ -7489,6 +7493,15 @@ impl Default for WindowOptions {
 impl WindowOptions {
     pub(crate) fn title_or_default(&self) -> String {
         self.title.clone().unwrap_or_else(|| "GPUIX".to_string())
+    }
+
+    /// The width and height the window opens at.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    pub(crate) fn size(&self) -> (f64, f64) {
+        (
+            self.width.unwrap_or(DEFAULT_WINDOW_WIDTH),
+            self.height.unwrap_or(DEFAULT_WINDOW_HEIGHT),
+        )
     }
 }
 
@@ -7576,10 +7589,8 @@ pub(crate) fn open_main_window(
     selection: SharedSelection,
     cx: &mut gpui::App,
 ) -> std::result::Result<gpui::WindowHandle<GpuixView>, String> {
-    let size = gpui::size(
-        gpui::px(options.width.unwrap_or(800.0) as f32),
-        gpui::px(options.height.unwrap_or(600.0) as f32),
-    );
+    let (width, height) = options.size();
+    let size = gpui::size(gpui::px(width as f32), gpui::px(height as f32));
     let bounds = if cfg!(target_os = "linux") && options.layer_shell.is_some() {
         gpui::Bounds {
             origin: gpui::point(gpui::px(0.0), gpui::px(0.0)),

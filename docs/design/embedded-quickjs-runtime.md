@@ -84,6 +84,13 @@ Tracking the gap between this design and what's on the main branch.
   and `import.meta.main`, and `with { type: "text" }` imports of the app's
   own files (`src/quickjs/prelude.js`, `src/quickjs/modules.rs`,
   `feat(native): give gpx apps process, import.meta and text imports`)
+- [x] Phase 4: React app parity tests. Each scenario runs one app from
+  `packages/react/src/__tests__/fixtures/parity` under Node and under
+  `gpx`'s QuickJS in the test renderer (`TestRenderer.loadJs`), drives both
+  through the same window events, and compares their trees. They need a
+  `.node` file built with `bun run build:quickjs`, and skip without one
+  (`quickjs-parity.test.tsx`, `feat(native): compare React apps under gpx
+  with Node in tests`)
 
 ### Outstanding
 
@@ -96,8 +103,9 @@ Tracking the gap between this design and what's on the main branch.
 - [ ] Phase 3: compiled output cached by content hash (deferred to Phase 6,
   with hot reload: compiling is fast enough that only `--watch` restarts
   would notice)
-- [ ] Phase 4: React app parity tests (the React test suite's host-level cases
-  run against the QuickJS host)
+- [ ] Phase 4 follow-up: run the parity tests in CI (deferred: CI builds
+  the `.node` file without QuickJS, so they skip there; a `build:quickjs`
+  step costs a second release build of the crate)
 - [ ] Phase 5: move `@gpuix/solid` and its components to Solid 2.0 (Node
   and Bun apps included), compiled with `@solidjs/compiler`
 - [ ] Phase 5: Solid JSX compile for app files with `@solidjs/compiler`'s
@@ -405,6 +413,16 @@ JavaScript app loop in `src/quickjs_app.rs`. Details the design left open:
 >   embedded bundles.
 > - No napi `loadJs`/`loadTsx` yet; the React parity tests will decide
 >   whether they need one.
+>
+> **2026-10-16 update:** they did. `TestGpuixRenderer.loadJs` starts an app
+> as `gpx` does, in the test window, and exists only when the `.node` file
+> is built with the `quickjs` feature (`build:quickjs`), so published
+> packages don't carry QuickJS. The tests found one difference: under Node,
+> `init` opens the window before the first render, but `gpx` opens it after,
+> so `useWindowSize` started at its 800x600 fallback. Before the window
+> opens, the host now answers with the size it will open at: the app's
+> options with the command line's on top, or on reload the window's current
+> size.
 
 ## Phasing
 
@@ -424,6 +442,12 @@ JavaScript app loop in `src/quickjs_app.rs`. Details the design left open:
 3. Compile and load. oxc transform, module loader, embedded bundles.
 4. React apps end to end: `gpuix-js`, and the React host-level tests run
    against the QuickJS host.
+
+   > **2026-10-16 update:** the parity tests run their own scenarios in both
+   > engines rather than the React suite itself, which drives React from the
+   > test process through `createTestRoot`. Each scenario covers what a group
+   > of those tests checks: events and state, keyed moves, effect order,
+   > text input, focus and keys, and window methods.
 5. Solid apps end to end, once open question 2 is settled.
 
    > **2026-10-13 update:** this phase starts by moving `@gpuix/solid` to Solid 2.0.

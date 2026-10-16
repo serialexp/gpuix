@@ -19,7 +19,9 @@ use futures::channel::mpsc::UnboundedReceiver;
 use futures::{FutureExt as _, StreamExt as _};
 
 use crate::element_tree::EventPayload;
-use crate::quickjs::{PathPromptResult, QuickJsOptions, QuickJsRuntime, WindowCall};
+use crate::quickjs::{
+    PathPromptResult, QuickJsOptions, QuickJsRuntime, SizeOverride, TreeHost, WindowCall,
+};
 use crate::quickjs_window::WindowHost;
 use crate::renderer::{init_app, open_main_window, EventCallback, GpuixView, WindowOptions};
 use crate::script::{default_title, reload, AppOptions};
@@ -52,14 +54,14 @@ pub fn is_js_source(path: &Path) -> bool {
 /// fails if a module can't be found or compiled, the app throws while it
 /// starts, or it never calls `render()`.
 pub fn check_js_file(path: impl AsRef<Path>) -> Result<(), String> {
-    start(path.as_ref())?;
+    start(path.as_ref(), SizeOverride::default())?;
     Ok(())
 }
 
 /// Runs the app at `path` in a window until the window closes.
 pub fn run_js_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), String> {
     let path = path.as_ref().to_path_buf();
-    let (js, app_window_options) = start(&path)?;
+    let (js, app_window_options) = start(&path, command_line_size(&options))?;
     let window_options = window_options(app_window_options, &path, &options);
     let startup_error = Rc::new(RefCell::new(None));
     let startup_error_for_app = startup_error.clone();
@@ -133,9 +135,18 @@ pub(crate) fn launch(
 
 /// Imports the app and runs the timers due straight away, so `render()` has
 /// committed its first tree, then returns the window options `render()`
-/// passed. Fails if the app throws or never calls `render()`.
-fn start(path: &Path) -> Result<(QuickJsRuntime, WindowOptions), String> {
-    let mut js = QuickJsRuntime::load_module(path, QuickJsOptions::default())?;
+/// passed. Until the window opens, the app sees the size it will open at,
+/// with `size` on top of the app's. Fails if the app throws or never calls
+/// `render()`.
+pub(crate) fn start(
+    path: &Path,
+    size: SizeOverride,
+) -> Result<(QuickJsRuntime, WindowOptions), String> {
+    let options = QuickJsOptions {
+        host: Box::new(TreeHost::new(size)),
+        ..QuickJsOptions::default()
+    };
+    let mut js = QuickJsRuntime::load_module(path, options)?;
     for _ in 0..STARTUP_TIMER_ROUNDS {
         if js.next_timer()? != Some(Duration::ZERO) {
             break;
@@ -155,13 +166,15 @@ fn window_options(mut options: WindowOptions, entry: &Path, app: &AppOptions) ->
         options.title = Some(title.clone());
     }
     options.title.get_or_insert_with(|| default_title(entry));
-    if let Some(width) = app.width {
-        options.width = Some(f64::from(width));
-    }
-    if let Some(height) = app.height {
-        options.height = Some(f64::from(height));
-    }
+    command_line_size(app).apply(&mut options);
     options
+}
+
+fn command_line_size(app: &AppOptions) -> SizeOverride {
+    SizeOverride {
+        width: app.width.map(f64::from),
+        height: app.height.map(f64::from),
+    }
 }
 
 /// A view's event callback, and where its events arrive. Each view gets a
@@ -288,10 +301,8 @@ impl RunningApp {
     /// Runs window methods the app called before there was a window to
     /// run them. A failure is reported here, as nothing in the app awaits it.
     fn replay(&self, pending: Vec<WindowCall>) {
-        for call in pending {
-            if let Err(error) = self.js.window(call) {
-                eprintln!("gpx: {error}");
-            }
+        for error in self.js.replay(pending) {
+            eprintln!("gpx: {error}");
         }
     }
 
@@ -301,7 +312,18 @@ impl RunningApp {
     /// the new view's events and the new app's path prompts arrive, or
     /// `None` if the old app stays.
     fn reload(&mut self, cx: &mut gpui::AsyncApp) -> Option<Reloaded> {
-        let js = match start(&self.path) {
+        // The window keeps its size, which the user may have changed.
+        let size = self
+            .window
+            .update(cx, |_view, window, _cx| {
+                let size = window.viewport_size();
+                SizeOverride {
+                    width: Some(f64::from(f32::from(size.width))),
+                    height: Some(f64::from(f32::from(size.height))),
+                }
+            })
+            .unwrap_or_default();
+        let js = match start(&self.path, size) {
             Ok((js, _window_options)) => js,
             Err(error) => {
                 eprintln!("gpx: reload failed: {error}");
@@ -426,7 +448,7 @@ mod tests {
     impl Launched {
         fn new(app: &App) -> Self {
             let cx = gpui::TestAppContext::single();
-            let (js, options) = start(&app.0).unwrap();
+            let (js, options) = start(&app.0, SizeOverride::default()).unwrap();
             let (reload, reloads) = futures::channel::mpsc::unbounded();
             let (window, task) = cx
                 .update(|cx| launch(app.0.clone(), js, &options, Some(reloads), cx))
@@ -687,7 +709,8 @@ mod tests {
 
     /// Two focusable boxes. The app focuses the first as it mounts, before
     /// its window opens; `button` reports the window's size and focuses the
-    /// second, and `next` moves focus on.
+    /// second, and `next` moves focus on. `first-size` is the size the
+    /// first render saw.
     const WINDOW_APP: &str = r#"import { render, useGpuix } from "@gpuix/react"
         import { useEffect, useRef, useState } from "react"
         function App() {
@@ -695,6 +718,10 @@ mod tests {
           const first = useRef<any>(null)
           const second = useRef<any>(null)
           const [info, setInfo] = useState("")
+          const [firstSize] = useState(() => {
+            const size = renderer!.getWindowSize!()
+            return `${size.width}x${size.height}`
+          })
           useEffect(() => {
             renderer!.setWindowTitle!("Mounted")
             renderer!.focusElement!(first.current.id)
@@ -710,6 +737,7 @@ mod tests {
               <div testId="second" ref={second} tabIndex={0} />
               <div testId="button" onClick={report}><text testId="info">{info}</text></div>
               <div testId="next" onClick={() => renderer!.focusNext!()} />
+              <text testId="first-size">{firstSize}</text>
             </div>
           )
         }
@@ -737,6 +765,9 @@ mod tests {
         assert_eq!(launched.title(), "Mounted");
         let first = launched.element_id("first");
         assert_eq!(launched.focused(), Some(first));
+        // As under Node, where `init` opens the window before the first
+        // render.
+        assert_eq!(launched.text("first-size"), "320x240");
     }
 
     #[test]
@@ -758,12 +789,18 @@ mod tests {
         let app = App::new("main.tsx", WINDOW_APP);
         let mut launched = Launched::new(&app);
         launched.cx.run_until_parked();
+        launched.cx.simulate_window_resize(
+            launched.window.into(),
+            gpui::size(gpui::px(400.0), gpui::px(300.0)),
+        );
         launched.reload();
         // The new app's tree has new ids, and it focused its own first box.
         let first = launched.element_id("first");
         assert_eq!(launched.focused(), Some(first));
+        // It starts in the window as it is now, not as the app asks.
+        assert_eq!(launched.text("first-size"), "400x300");
         launched.click("button");
-        assert_eq!(launched.text("info"), "320x240");
+        assert_eq!(launched.text("info"), "400x300");
     }
 
     /// Opens a path prompt on a click, and shows what it settled with.

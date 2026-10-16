@@ -49,7 +49,7 @@ mod modules;
 mod tests;
 mod window;
 
-pub(crate) use window::{Host, PathPromptResult, TreeHost, WindowCall};
+pub(crate) use window::{Host, PathPromptResult, SizeOverride, TreeHost, WindowCall};
 
 pub(crate) use compile::EXTENSIONS;
 
@@ -374,10 +374,15 @@ impl QuickJsRuntime {
         })
     }
 
-    /// Run a window method on the host, as the app's renderer would: `gpx`
-    /// replays what the app called before its window opened.
-    pub(crate) fn window(&self, call: WindowCall) -> Result<serde_json::Value, String> {
-        self.shared.host.borrow_mut().window(call)
+    /// Run the window methods the app called before its window opened (see
+    /// [`Host::into_pending`]) on the host it has now. Returns why any
+    /// failed, as nothing in the app awaits them any more.
+    pub(crate) fn replay(&self, calls: Vec<WindowCall>) -> Vec<String> {
+        let mut host = self.shared.host.borrow_mut();
+        calls
+            .into_iter()
+            .filter_map(|call| host.window(call).err())
+            .collect()
     }
 
     /// Run the timers due now, earliest first, each followed by the
@@ -611,6 +616,7 @@ fn install_host<'js>(
                         &format!("invalid window options: {error}"),
                     )
                 })?;
+                window.host.borrow_mut().init(&options);
                 *window.window_options.borrow_mut() = Some(options);
                 Ok(())
             })

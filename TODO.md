@@ -4,7 +4,11 @@
   (`custom_elements/input.rs`), `BlockTree::is_empty` (`markdown/parser.rs`)
   and `Metrics::hash_into` (`theme.rs`) are unused outside the browser or test
   builds. Fix upstream (cfg-gate them) rather than in this fork, so rebases
-  stay clean.
+  stay clean. The wasm build (`cargo +nightly check --target
+  wasm32-unknown-unknown --no-default-features --lib`) has 21 more, the
+  same kind: `automation.rs`'s key dispatch, `GpuixView::register_font`,
+  `request_focus` and its virtual-list helpers, and others with no browser
+  caller.
 - `cargo clippy --lib --tests` in `packages/native` fails with about 60
   errors under `#![deny(clippy::all)]` (too many arguments, needless borrows,
   derivable impls, elidable lifetimes and more), and `cargo fmt --check`

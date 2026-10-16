@@ -3787,6 +3787,32 @@ expect(hit.text.slice(hit.start, hit.end)).toBe('quick')
 expect(hit.rects).toHaveLength(1)
 ```
 
+### Testing an app under `gpx`
+
+`loadJs` runs an app's entry in the test window the way `gpx` runs it, in
+the embedded QuickJS runtime rather than in the test process. The window's
+events go to that app, and `runJsTimers()` runs its timers that are due,
+returning the milliseconds until the next one. It needs a `.node` file
+built with the `quickjs` feature, which published packages don't include:
+
+```sh
+(cd packages/native && bun run build:quickjs)
+```
+
+```ts
+import { hasQuickJsTestRenderer, TestRenderer } from '@gpuix/native/testing'
+
+const renderer = new TestRenderer({ width: 480, height: 360 })
+renderer.loadJs('/path/to/main.tsx') // calls render() from @gpuix/react
+renderer.nativeSimulateClick(50, 50)
+while (renderer.runJsTimers() === 0) {}
+renderer.flush()
+```
+
+`packages/react/src/__tests__/quickjs-parity.test.tsx` uses it to run each
+app in `fixtures/parity` under both Node and `gpx`, and to check they leave
+the same tree. Without a `quickjs` build those tests skip.
+
 ### Assert numbers, not pixels
 
 For a stateful surface, paint the state you want to assert into a **readout**

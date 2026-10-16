@@ -13,14 +13,16 @@
 //! can call these then (`autoFocus` focuses as it mounts). [`TreeHost`]
 //! answers until the window opens: it queues the calls that change
 //! something, for the window to replay, and answers queries as a window that
-//! hasn't painted yet would.
+//! hasn't painted yet would. Under Node, `init` opens the window before the
+//! first render, so it answers the window's size with the size the window
+//! will open at.
 
 use rquickjs::{ArrayBuffer, Ctx, Exception, FromJs, Object, TypedArray, Value};
 
 use crate::custom_elements::img::PixelFormat;
 use crate::renderer::{
     debug_frame_overlay_mode_name, parse_debug_frame_overlay_mode_str, raw_dimension_u32,
-    raw_element_id, PathPromptOptions,
+    raw_element_id, PathPromptOptions, WindowOptions,
 };
 use crate::retained_tree::RetainedTree;
 
@@ -29,6 +31,9 @@ use crate::retained_tree::RetainedTree;
 pub(crate) trait Host {
     /// Run `change` on the tree the app's batches change.
     fn with_tree(&mut self, change: &mut dyn FnMut(&mut RetainedTree));
+
+    /// Take the window options the app's renderer passed to `init`.
+    fn init(&mut self, _options: &WindowOptions) {}
 
     /// Run one of the renderer's window methods. The result is what the
     /// napi method returns, as JSON.
@@ -316,12 +321,46 @@ impl<'js> Args<'_, 'js> {
 
 const NO_WINDOW: &str = "the window isn't open yet";
 
+/// The window size whoever starts the app sets, which beats the app's own
+/// window options: the command line's, the size of the window a reload
+/// keeps, or a test window's.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct SizeOverride {
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+}
+
+impl SizeOverride {
+    /// `options` with this size on top.
+    pub(crate) fn apply(self, options: &mut WindowOptions) {
+        if let Some(width) = self.width {
+            options.width = Some(width);
+        }
+        if let Some(height) = self.height {
+            options.height = Some(height);
+        }
+    }
+}
+
 /// The host until the window opens: it owns the tree, queues the calls that
 /// change the window, and answers queries as a window that hasn't painted.
 #[derive(Default)]
 pub(crate) struct TreeHost {
     tree: RetainedTree,
     pending: Vec<WindowCall>,
+    size: SizeOverride,
+    /// What the window will open with, once the app's `init` has said.
+    options: Option<WindowOptions>,
+}
+
+impl TreeHost {
+    /// A host whose window will open at `size` where it's set.
+    pub(crate) fn new(size: SizeOverride) -> Self {
+        Self {
+            size,
+            ..Self::default()
+        }
+    }
 }
 
 impl Host for TreeHost {
@@ -329,13 +368,26 @@ impl Host for TreeHost {
         change(&mut self.tree);
     }
 
+    fn init(&mut self, options: &WindowOptions) {
+        let mut options = options.clone();
+        self.size.apply(&mut options);
+        self.options = Some(options);
+    }
+
     fn window(&mut self, call: WindowCall) -> Result<serde_json::Value, String> {
         use serde_json::{json, Value as Json};
         match call {
-            // Like napi while a window opens. `readWindowSize` and the
-            // `useWindowSize` poll fall back until it has.
-            WindowCall::WindowSize
-            | WindowCall::WindowInsets
+            WindowCall::WindowSize => {
+                let (width, height) = self
+                    .options
+                    .as_ref()
+                    .ok_or_else(|| NO_WINDOW.to_string())?
+                    .size();
+                Ok(json!({ "width": width, "height": height }))
+            }
+            // Like napi while a window opens. `readWindowInsets` falls back
+            // until it has.
+            WindowCall::WindowInsets
             | WindowCall::CycleDebugFrameOverlay
             | WindowCall::DebugFrameOverlay
             | WindowCall::DebugFrameOverlayStats => Err(NO_WINDOW.to_string()),
