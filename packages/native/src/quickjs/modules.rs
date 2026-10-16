@@ -7,6 +7,11 @@
 //! relative paths is one module. Embedded ones are named `gpuix:` and their
 //! path in the bundle, and their relative imports stay inside it.
 //!
+//! As in Bun, an app file imported `with { type: "text" }` is a module whose
+//! default export is the file's text. It is named `text:` and the canonical
+//! path, so the same file can also be imported as code. App modules get
+//! `import.meta.url` and `import.meta.main`, which is true for the entry.
+//!
 //! QuickJS calls both from C, where a panic can't unwind, so each runs in
 //! [`guard`].
 
@@ -26,6 +31,7 @@ mod embedded {
 }
 
 const EMBEDDED: &str = "gpuix:";
+const TEXT: &str = "text:";
 
 /// The extensions an import may leave out, in the order Bun tries them for
 /// an `import` statement.
@@ -46,15 +52,14 @@ impl Resolver for AppResolver {
                 Some(attributes) => attributes.get_type()?,
                 None => None,
             };
-            if let Some(kind) = kind {
-                return Err(Exception::throw_message(
-                    ctx,
-                    &format!(
-                        "Cannot import {name:?} from {base}: `type: {kind:?}` imports aren't supported"
-                    ),
-                ));
-            }
-            resolve(base, name).map_err(|message| Exception::throw_message(ctx, &message))
+            let resolved = match kind.as_deref() {
+                None => resolve(base, name),
+                Some("text") => resolve_text(base, name),
+                Some(kind) => Err(format!(
+                    "Cannot import {name:?} from {base}: `type: {kind:?}` imports aren't supported, only `type: \"text\"`"
+                )),
+            };
+            resolved.map_err(|message| Exception::throw_message(ctx, &message))
         })
     }
 }
@@ -75,19 +80,41 @@ impl Loader for AppLoader {
                 })?;
                 return Module::declare(ctx.clone(), name, source);
             }
+            if let Some(file) = name.strip_prefix(TEXT) {
+                // As `TextDecoder` and `Response.text()` do, bytes that aren't
+                // UTF-8 become U+FFFD rather than failing the import.
+                let bytes = fs::read(file).map_err(|error| cannot_read(ctx, file, error))?;
+                let text = String::from_utf8_lossy(&bytes);
+                let literal = serde_json::to_string(&text).map_err(|error| {
+                    Exception::throw_message(ctx, &format!("Cannot import {file}: {error}"))
+                })?;
+                return Module::declare(ctx.clone(), name, format!("export default {literal};"));
+            }
             let path = Path::new(name);
-            let source = fs::read_to_string(path).map_err(|error| {
-                Exception::throw_message(ctx, &format!("Cannot read {name}: {error}"))
-            })?;
+            let source = read(ctx, name)?;
             let compiled = compile(&source, path)
                 .map_err(|message| throw_whole(ctx, ErrorKind::Syntax, &message))?;
             self.0
                 .positions
                 .borrow_mut()
                 .insert(name.to_string(), compiled.positions);
-            Module::declare(ctx.clone(), name, compiled.code)
+            let module = Module::declare(ctx.clone(), name, compiled.code)?;
+            let meta = module.meta()?;
+            if let Ok(url) = url::Url::from_file_path(path) {
+                meta.set("url", url.as_str())?;
+            }
+            meta.set("main", self.0.entry.as_deref() == Some(name))?;
+            Ok(module)
         })
     }
+}
+
+fn read<'js>(ctx: &Ctx<'js>, file: &str) -> rquickjs::Result<String> {
+    fs::read_to_string(file).map_err(|error| cannot_read(ctx, file, error))
+}
+
+fn cannot_read(ctx: &Ctx<'_>, file: &str, error: std::io::Error) -> rquickjs::Error {
+    Exception::throw_message(ctx, &format!("Cannot read {file}: {error}"))
 }
 
 fn embedded_file(file: &str) -> Option<&'static str> {
@@ -97,7 +124,9 @@ fn embedded_file(file: &str) -> Option<&'static str> {
         .map(|(_, source)| *source)
 }
 
-fn resolve(base: &str, name: &str) -> Result<String, String> {
+/// The module name `name` gets when `base` imports it. An empty `base` is
+/// the entry, which `QuickJsRuntime::load_module` also names with this.
+pub(super) fn resolve(base: &str, name: &str) -> Result<String, String> {
     let relative = name.starts_with("./") || name.starts_with("../") || name == "." || name == "..";
     if let Some(file) = base.strip_prefix(EMBEDDED) {
         if relative {
@@ -139,6 +168,40 @@ fn resolve(base: &str, name: &str) -> Result<String, String> {
             format!(
                 "Cannot import {name:?} from {base}: apps can import their own files and the bundled modules ({})",
                 bundled.join(", ")
+            )
+        })
+}
+
+/// The module name of an app file imported `with { type: "text" }`. As in
+/// Bun, the import names the file itself: no extension is implied.
+fn resolve_text(base: &str, name: &str) -> Result<String, String> {
+    let relative = name.starts_with("./") || name.starts_with("../");
+    if base.starts_with(EMBEDDED) || !(relative || Path::new(name).is_absolute()) {
+        return Err(format!(
+            "Cannot import {name:?} from {base} as text: only the app's own files can be"
+        ));
+    }
+    let target = Path::new(base).parent().unwrap_or(Path::new("")).join(name);
+    let canonical = fs::canonicalize(&target).map_err(|error| {
+        format!(
+            "Cannot find {name:?} imported from {base} (looked for {}): {error}",
+            target.display()
+        )
+    })?;
+    if !canonical.is_file() {
+        return Err(format!(
+            "Cannot import {name:?} from {base} as text: {} isn't a file",
+            canonical.display()
+        ));
+    }
+    canonical
+        .into_os_string()
+        .into_string()
+        .map(|path| format!("{TEXT}{path}"))
+        .map_err(|path| {
+            format!(
+                "Cannot import {}: the path isn't UTF-8",
+                path.to_string_lossy()
             )
         })
 }

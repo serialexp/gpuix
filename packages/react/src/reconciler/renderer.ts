@@ -32,9 +32,14 @@ function runtimeErrorHandlers(): RuntimeErrorHandlers | undefined {
     | undefined
 }
 
+/** Node-style process events; absent in browsers and gpx, whose `process` is data only. */
+function hasProcessEvents(): boolean {
+  return typeof process !== "undefined" && typeof process.on === "function"
+}
+
 /** Keep bun alive after an uncaught throw. A dead process stops AppKit pumps. */
 export function installRuntimeErrorHandlers(): void {
-  if (typeof process === "undefined" || runtimeErrorHandlers()) return
+  if (!hasProcessEvents() || runtimeErrorHandlers()) return
   const handlers: RuntimeErrorHandlers = {
     uncaughtException: scheduleRuntimeError,
     unhandledRejection: (reason) => {
@@ -47,7 +52,7 @@ export function installRuntimeErrorHandlers(): void {
 }
 
 function uninstallRuntimeErrorHandlers(): void {
-  if (typeof process === "undefined") return
+  if (!hasProcessEvents()) return
   const handlers = runtimeErrorHandlers()
   if (!handlers) return
   process.off("uncaughtException", handlers.uncaughtException)
@@ -416,7 +421,9 @@ export function render(node: ReactNode, options: RenderOptions = {}): Root {
   if (!injected && host instanceof GpuixRenderer && !slot.loop) {
     slot.loop = startFrameLoop(host, {
       onTerminated: () => {
-        if (typeof process !== "undefined") process.exit(0)
+        if (typeof process !== "undefined" && typeof process.exit === "function") {
+          process.exit(0)
+        }
       },
     })
   }

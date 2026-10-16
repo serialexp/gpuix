@@ -32,7 +32,8 @@ impl App {
         Self::start(|tree, options| QuickJsRuntime::load_module(entry, tree, options))
     }
 
-    /// A runtime from `load`, on a fake clock, with its console captured.
+    /// A runtime from `load`, on a fake clock, with its console captured and
+    /// a fixed environment.
     fn start(
         load: impl FnOnce(&mut RetainedTree, QuickJsOptions) -> Result<QuickJsRuntime, String>,
     ) -> Result<Self, String> {
@@ -48,6 +49,7 @@ impl App {
                 console: Box::new(move |level, message| {
                     console.borrow_mut().push((level, message.to_string()));
                 }),
+                env: vec![("GPX_TEST".to_string(), "on".to_string())],
             },
         )?;
         Ok(Self {
@@ -690,6 +692,7 @@ fn a_panic_in_a_native_function_fails_the_call_even_if_js_catches_it() {
         QuickJsOptions {
             clock: Box::new(|| 0.0),
             console: Box::new(|_, _| panic!("the sink broke")),
+            env: Vec::new(),
         },
     )
     .unwrap();
@@ -1369,6 +1372,146 @@ fn an_import_without_an_extension_tries_them_in_buns_order() {
 }
 
 #[test]
+fn process_is_a_read_only_snapshot_of_where_the_app_runs() {
+    let dir = AppDir::new(&[(
+        "main.ts",
+        r#"
+        console.log(process.env.GPX_TEST, process.env.HOME, process.argv.length)
+        console.log(process.argv[1])
+        console.log(process.platform)
+        for (const write of [
+          () => { process.env.GPX_TEST = "off" },
+          () => { process.argv.push("--more") },
+          () => { process.platform = "plan9" },
+        ]) {
+          try { write() } catch (error) { console.log((error as Error).name) }
+        }
+        "#,
+    )]);
+    let app = App::try_load_module(&dir.path("main.ts")).unwrap();
+    let main = std::fs::canonicalize(dir.path("main.ts")).unwrap();
+    let platform = match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        os => os,
+    };
+    assert_eq!(
+        app.log(),
+        [
+            "on undefined 2",
+            main.to_str().unwrap(),
+            platform,
+            "TypeError",
+            "TypeError",
+            "TypeError",
+        ]
+    );
+}
+
+#[test]
+fn import_meta_has_the_module_url_and_marks_the_entry() {
+    let dir = AppDir::new(&[
+        (
+            "main.ts",
+            r#"
+            import { lib } from "./lib"
+            console.log(import.meta.main, import.meta.url)
+            console.log(lib.main, lib.url)
+            "#,
+        ),
+        ("lib.ts", "export const lib = import.meta"),
+    ]);
+    let app = App::try_load_module(&dir.path("main.ts")).unwrap();
+    let url = |name: &str| {
+        let path = std::fs::canonicalize(dir.path(name)).unwrap();
+        url::Url::from_file_path(path).unwrap().to_string()
+    };
+    assert_eq!(
+        app.log(),
+        [
+            format!("true {}", url("main.ts")),
+            format!("false {}", url("lib.ts")),
+        ]
+    );
+    // `gpx main.js` runs main.ts, as an import of "./main.js" would, and
+    // that module is still the entry.
+    let app = App::try_load_module(&dir.path("main.js")).unwrap();
+    assert_eq!(app.log()[0], format!("true {}", url("main.ts")));
+}
+
+#[test]
+fn process_argv_names_the_file_the_entry_loaded() {
+    let dir = AppDir::new(&[("main.ts", "console.log(process.argv[1])")]);
+    let app = App::try_load_module(&dir.path("main.js")).unwrap();
+    let main = std::fs::canonicalize(dir.path("main.ts")).unwrap();
+    assert_eq!(app.log(), [main.to_str().unwrap()]);
+}
+
+#[test]
+fn text_imports_default_export_the_files_text() {
+    let svg = "<svg viewBox=\"0 0 1 1\">\n  <path d='M0 0'/>\u{2028}é</svg>\n";
+    let dir = AppDir::new(&[
+        (
+            "main.ts",
+            r#"
+            import icon from "./icon.svg" with { type: "text" }
+            import again from "./assets/../icon.svg" with { type: "text" }
+            import source from "./lib.ts" with { type: "text" }
+            import { value } from "./lib"
+            import bytes from "./bytes.bin" with { type: "text" }
+            console.log(JSON.stringify(icon), icon === again)
+            console.log(JSON.stringify(source), value)
+            console.log(JSON.stringify(bytes))
+            const later = await import("./icon.svg", { with: { type: "text" } })
+            console.log(later.default === icon)
+            "#,
+        ),
+        ("icon.svg", svg),
+        ("assets/keep.txt", ""),
+        ("lib.ts", "export const value: number = 1\n"),
+    ]);
+    std::fs::write(dir.path("bytes.bin"), b"\xc3\xa9\xff\xe2\x82").unwrap();
+    let app = App::try_load_module(&dir.path("main.ts")).unwrap();
+    // The same file is one text module however it is reached, and a module
+    // imported as text is still code when imported plainly. Bytes that
+    // aren't UTF-8 decode as `TextDecoder` decodes them.
+    assert_eq!(
+        app.log(),
+        [
+            format!("{} true", serde_json::to_string(svg).unwrap()),
+            "\"export const value: number = 1\\n\" 1".to_string(),
+            "\"é\u{fffd}\u{fffd}\"".to_string(),
+            "true".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn text_imports_only_read_the_apps_own_files() {
+    let dir = AppDir::new(&[
+        ("bare.ts", "import r from 'react' with { type: 'text' }"),
+        ("implied.ts", "import t from './icon' with { type: 'text' }"),
+        (
+            "folder.ts",
+            "import t from './assets' with { type: 'text' }",
+        ),
+        ("icon.svg", "<svg/>"),
+        ("assets/keep.txt", ""),
+    ]);
+    let error = |name: &str| match App::try_load_module(&dir.path(name)) {
+        Ok(app) => panic!("{name} loaded: {:?}", app.log()),
+        Err(error) => error,
+    };
+    let bare = error("bare.ts");
+    assert!(bare.contains("only the app's own files can be"), "{bare}");
+    // As in Bun, a text import names the file itself.
+    let implied = error("implied.ts");
+    assert!(implied.contains(r#"Cannot find "./icon""#), "{implied}");
+    let folder = error("folder.ts");
+    assert!(folder.contains("isn't a file"), "{folder}");
+}
+
+#[test]
 fn importing_anything_else_fails_the_load() {
     let dir = AppDir::new(&[
         ("package.ts", "import 'lodash'"),
@@ -1391,7 +1534,11 @@ fn importing_anything_else_fails_the_load() {
     assert!(package.contains("@gpuix/react/jsx-runtime"), "{package}");
     assert!(error("node.ts").contains(r#"Cannot import "node:fs""#));
     assert!(error("missing.ts").contains(r#"Cannot find "./nowhere""#));
-    assert!(error("json.ts").contains("aren't supported"));
+    let json = error("json.ts");
+    assert!(
+        json.contains(r#"`type: "json"` imports aren't supported, only `type: "text"`"#),
+        "{json}"
+    );
     let syntax = error("broken.ts");
     assert!(syntax.contains("syntax.ts:2:"), "{syntax}");
     let entry = error("absent.ts");

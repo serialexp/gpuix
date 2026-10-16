@@ -3879,10 +3879,18 @@ named after the entry file.
 
 Apps import their own files, `react`, `@gpuix/react` and its components.
 Globals are the browser's basics: timers, `console`, `performance.now`,
-`queueMicrotask` and `structuredClone`. There is no `process`, file system or
-npm package loading yet. Keyboard focus helpers (`focusNext`, Tab navigation)
-and text-selection queries are not wired up in `gpx` yet. See
-`docs/design/embedded-quickjs-runtime.md` for the plan.
+`queueMicrotask` and `structuredClone`, plus a read-only `process` with `env`,
+`argv` and `platform` (no `exit`, events or streams). `import.meta.url` is the
+module's `file://` URL and `import.meta.main` is true in the entry file. An app
+can import one of its own files as a string:
+
+```tsx
+import notes from "./notes.md" with { type: "text" }
+```
+
+There is no file system or npm package loading yet. Keyboard focus helpers
+(`focusNext`, Tab navigation) and text-selection queries are not wired up in
+`gpx` yet. See `docs/design/embedded-quickjs-runtime.md` for the plan.
 
 ## Experimental LuaX runtime
 

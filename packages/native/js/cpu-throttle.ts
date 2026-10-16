@@ -36,6 +36,9 @@ export function applyMacCpuThrottleFromEnv(): MacCpuThrottle | null {
       `THROTTLE=${mode} must wrap the vitest process. Use examples/vitest.config.ts.`,
     )
   }
+  if (typeof process.getBuiltinModule !== "function") {
+    throw new Error(`THROTTLE=${mode} needs Node or Bun to re-exec under taskpolicy`)
+  }
   console.log(`[throttle] taskpolicy -c ${mode}`)
   const { spawnSync } = process.getBuiltinModule("node:child_process")
   const result = spawnSync("taskpolicy", ["-c", mode, ...process.argv], {

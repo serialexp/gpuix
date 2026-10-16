@@ -77,7 +77,9 @@ export function render(code: () => JSX.Element, options: RenderOptions = {}): Ro
   if (!injected && host.renderer instanceof GpuixRenderer && !host.loop) {
     host.loop = startFrameLoop(host.renderer, {
       onTerminated: () => {
-        if (typeof process !== "undefined") process.exit(0)
+        if (typeof process !== "undefined" && typeof process.exit === "function") {
+          process.exit(0)
+        }
       },
       onError: (error) => console.error("[gpuix-solid] frame error", error),
     })

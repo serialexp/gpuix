@@ -80,15 +80,23 @@ pub(crate) struct QuickJsOptions {
     pub clock: Box<dyn Fn() -> f64>,
     /// Where `console` writes.
     pub console: ConsoleSink,
+    /// What `process.env` holds.
+    pub env: Vec<(String, String)>,
 }
 
 impl Default for QuickJsOptions {
-    /// The wall clock, and `console` to stderr.
+    /// The wall clock, `console` to stderr, and the process's environment
+    /// (minus any variable that isn't UTF-8).
     fn default() -> Self {
         let start = Instant::now();
         Self {
             clock: Box::new(move || start.elapsed().as_secs_f64() * 1000.0),
             console: Box::new(|_, message| eprintln!("{message}")),
+            env: std::env::vars_os()
+                .filter_map(|(name, value)| {
+                    Some((name.into_string().ok()?, value.into_string().ok()?))
+                })
+                .collect(),
         }
     }
 }
@@ -111,6 +119,8 @@ struct Shared {
     window_options: RefCell<Option<WindowOptions>>,
     /// Whether a batch changed the tree since the host last asked.
     tree_changed: Cell<bool>,
+    /// The entry module's name, whose `import.meta.main` is true.
+    entry: Option<String>,
 }
 
 /// The prelude's hooks, saved before app code runs, so an app that writes to
@@ -192,7 +202,7 @@ impl QuickJsRuntime {
         tree: &mut RetainedTree,
         options: QuickJsOptions,
     ) -> Result<Self, String> {
-        let js = Self::start(options)?;
+        let js = Self::start(options, None)?;
         js.call(tree, |ctx, _| {
             let mut options = EvalOptions::default();
             options.strict = false;
@@ -217,7 +227,11 @@ impl QuickJsRuntime {
         let entry = entry
             .to_str()
             .ok_or_else(|| format!("cannot load {}: the path isn't UTF-8", entry.display()))?;
-        let js = Self::start(options)?;
+        // Named as the loader will name it, so `import.meta.main` finds it
+        // even when `app.js` loads `app.ts`. A missing entry keeps its
+        // path, and the import reports it.
+        let module_name = modules::resolve("", entry).unwrap_or_else(|_| entry.to_string());
+        let js = Self::start(options, Some(module_name))?;
         js.call(tree, |ctx, hooks| {
             // The entry runs inside `import`, so its failure is reported
             // with the prelude's `reportError`, which the app can't replace.
@@ -231,8 +245,9 @@ impl QuickJsRuntime {
         Ok(js)
     }
 
-    /// A runtime with the prelude run and the module loader installed.
-    fn start(options: QuickJsOptions) -> Result<Self, String> {
+    /// A runtime with the prelude run and the module loader installed, for
+    /// the app whose entry module is `entry`.
+    fn start(options: QuickJsOptions, entry: Option<String>) -> Result<Self, String> {
         let runtime = Runtime::new().map_err(|error| format!("cannot start QuickJS: {error}"))?;
         let context =
             Context::full(&runtime).map_err(|error| format!("cannot start QuickJS: {error}"))?;
@@ -246,6 +261,7 @@ impl QuickJsRuntime {
             positions: RefCell::new(HashMap::new()),
             window_options: RefCell::new(None),
             tree_changed: Cell::new(false),
+            entry,
         });
         let tracked = shared.clone();
         runtime.set_host_promise_rejection_tracker(Some(Box::new(
@@ -255,7 +271,7 @@ impl QuickJsRuntime {
         )));
         let hooks = context.with(|ctx| -> Result<Hooks, String> {
             let setup = (|| {
-                install_host(&ctx, &shared)?;
+                install_host(&ctx, &shared, &options.env)?;
                 let mut options = EvalOptions::default();
                 options.filename = Some("gpuix:prelude".to_string());
                 ctx.eval_with_options::<(), _>(PRELUDE, options)?;
@@ -508,8 +524,13 @@ unsafe extern "C" fn map_source_position(
     }
 }
 
-fn install_host<'js>(ctx: &Ctx<'js>, shared: &Rc<Shared>) -> rquickjs::Result<()> {
+fn install_host<'js>(
+    ctx: &Ctx<'js>,
+    shared: &Rc<Shared>,
+    env: &[(String, String)],
+) -> rquickjs::Result<()> {
     let host = Object::new(ctx.clone())?;
+    host.set("process", process_info(ctx, shared.entry.as_deref(), env)?)?;
 
     let clock = shared.clone();
     host.set(
@@ -592,6 +613,37 @@ fn install_host<'js>(ctx: &Ctx<'js>, shared: &Rc<Shared>) -> rquickjs::Result<()
     host.set("renderer", renderer)?;
 
     ctx.globals().set("__gpuix", host)
+}
+
+/// What the prelude's `process` reports: the environment, the command line
+/// as Node gives it (the program, then the entry file) and the platform, by
+/// Node's names.
+fn process_info<'js>(
+    ctx: &Ctx<'js>,
+    entry: Option<&str>,
+    env: &[(String, String)],
+) -> rquickjs::Result<Object<'js>> {
+    let info = Object::new(ctx.clone())?;
+    let variables = Object::new(ctx.clone())?;
+    for (name, value) in env {
+        variables.set(name.as_str(), value.as_str())?;
+    }
+    info.set("env", variables)?;
+    let program = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .unwrap_or_else(|| "gpx".to_string());
+    let argv: Vec<String> = std::iter::once(program)
+        .chain(entry.map(str::to_string))
+        .collect();
+    info.set("argv", argv)?;
+    let platform = match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        os => os,
+    };
+    info.set("platform", platform)?;
+    Ok(info)
 }
 
 /// Run a native function's body, turning a panic into a failure of the

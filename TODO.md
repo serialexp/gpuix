@@ -36,10 +36,8 @@
   of its own messages, such as "Could not find export 'x' in module ...",
   and app module names are absolute paths. Show them in full, by a patch or
   by rewriting the message where GPUIX reports it.
-- QuickJS app modules have `import.meta` but no `import.meta.url`, so
-  `new URL("./icon.png", import.meta.url)` fails. Set it to the module's
-  `file://` URL when the loader declares a module (Phase 4 or 5).
-- `gpx --watch` watches the files in the entry file's directory tree, so a
-  JavaScript app that imports from outside it (`../shared/x.ts`) doesn't
-  reload when that file changes. Watch the modules the QuickJS loader
-  actually loaded instead (it knows their paths).
+- `gpx --watch` watches the JavaScript and TypeScript files in the entry
+  file's directory tree, so a JavaScript app doesn't reload when a module
+  from outside it (`../shared/x.ts`) or a text import (`./notes.md`)
+  changes. Watch the files the QuickJS loader actually loaded instead (it
+  knows their paths).

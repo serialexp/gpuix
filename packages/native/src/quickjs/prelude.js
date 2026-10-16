@@ -7,6 +7,7 @@
 //   __gpuix.reportError(message)   an error the app reported but didn't throw
 //   __gpuix.proxyTarget(value)     a proxy's target, or undefined
 //   __gpuix.init(json)             the window options `render()` passes
+//   __gpuix.process                { env, argv, platform } for `process`
 //   __gpuix.renderer.applyBatch(json)
 //
 // It adds what Rust calls back into: `dispatchEvent`, `dueTimers`,
@@ -303,6 +304,21 @@
   // ── performance ────────────────────────────────────────────────────
   // quickjs-ng has its own clock. Use the runtime's, which timers use too.
   globalThis.performance = { now, timeOrigin: Date.now() - now() };
+
+  // ── process ────────────────────────────────────────────────────────
+  // What apps written for Node and Bun read to learn where they run: the
+  // environment, the command line (the program, then the entry file) and
+  // the platform. It is a read-only snapshot; nothing in it reaches the
+  // system. A partial `process` would break code that checks
+  // `typeof process` and then uses `argv` or `platform`, so all three are here.
+  {
+    const { env, argv, platform } = host.process;
+    globalThis.process = Object.freeze({
+      env: Object.freeze({ ...env }),
+      argv: Object.freeze([...argv]),
+      platform,
+    });
+  }
 
   // ── structuredClone ────────────────────────────────────────────────
   // Plain data only: primitives and their boxed forms, plain objects,
