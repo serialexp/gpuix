@@ -3731,6 +3731,10 @@ handling instead of a test-only input path.
 
 ## Testing
 
+Run `cd examples && bun run typecheck` to check the top-level React examples,
+including their test and performance fixtures. CI runs this check alongside
+the example-app typecheck; Bun does not typecheck applications when running them.
+
 The locators above sit on a **GPU-backed test renderer** (`TestGpuixRenderer`).
 It runs the same `GpuixView`, `build_element()`, `apply_styles()`, and event
 handlers as production. Test windows are positioned offscreen and rendered by
@@ -3894,7 +3898,7 @@ The test renderer uses `VisualTestAppContext` with a `TestDispatcher` for determ
 
 ## Experimental embedded JavaScript runtime
 
-`gpx` runs a React app without Node or Bun. It compiles the app's TypeScript
+`gpx` runs a React or Solid app without Node or Bun. It compiles the app's TypeScript
 and JSX with oxc, runs it in an embedded QuickJS engine, and draws it with
 GPUI, all in one process:
 
@@ -3908,11 +3912,17 @@ The entry file's extension picks the engine: `.tsx`, `.ts`, `.mts`, `.jsx`,
 `.js` and `.mjs` run in QuickJS, `.lua` and `.luax` in the Lua runtime below.
 `--check` loads the app without opening a window, and `--watch` restarts it
 when a JavaScript or TypeScript file in the entry file's directory changes
-(state is reset). The window uses the options the app passes to `render()`;
+(state is reset; a changed `tsconfig.json` needs a restart). The window uses the options the app passes to `render()`;
 `--title`, `--width` and `--height` beat them. Without a title, the window is
 named after the entry file.
 
-Apps import their own files, `react`, `@gpuix/react` and its components.
+Apps import their own files, `react`, `@gpuix/react` and its components, or
+`solid-js`, `@gpuix/solid` and its components. Solid runs its production
+build. The nearest `tsconfig.json` (or `jsconfig.json`) above a file picks
+which framework its JSX compiles for, by `compilerOptions.jsxImportSource`
+(`@gpuix/solid` or `@gpuix/react`), as TypeScript reads it; a file's own
+`@jsxImportSource` comment isn't read. Without a config, the app is Solid if
+its entry file imports `@gpuix/solid` or `solid-js`, and React otherwise.
 Globals are the browser's basics: timers, `console`, `performance.now`,
 `queueMicrotask` and `structuredClone`, plus a read-only `process` with `env`,
 `argv` and `platform` (no `exit`, events or streams). `import.meta.url` is the
@@ -4226,6 +4236,8 @@ Reversing rows preserves their visit counters; hiding/reopening activity resets
 its panel-local counter. The React-style workspace remains available via
 `just start`. This is a separate example, not an identical copy of that workspace.
 The input is controlled: sending clears both the store draft and native input.
+Header, activity-counter and inspector actions use the shared Solid Button
+component, with the same focus styling as the other workspace controls.
 Existing watch behavior applies; saving rebuilds Solid
 owners rather than preserving their local signals.
 

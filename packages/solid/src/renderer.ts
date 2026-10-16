@@ -7,7 +7,7 @@ import {
   startFrameLoop,
   type FrameLoop,
 } from "@gpuix/native/runtime"
-import { createRoot, type Root } from "./root.js"
+import { createRoot, reportUncaughtError, type Root } from "./root.js"
 
 const RENDER_HOST = Symbol.for("@gpuix/solid/render-host")
 
@@ -27,7 +27,7 @@ export function createRenderer(
 ): GpuixRenderer {
   return createNativeRenderer({
     onEvent,
-    onError: (error) => console.error("[gpuix-solid] native event error", error),
+    onError: reportUncaughtError,
   })
 }
 
@@ -54,10 +54,8 @@ export function render(code: () => JSX.Element, options: RenderOptions = {}): Ro
   if (!host.renderer) {
     host.renderer = injected ?? createNativeRenderer({
       onError(error) {
-        onUncaughtError?.(
-          error instanceof Error ? error : new Error(String(error)),
-          {}
-        )
+        if (!onUncaughtError) reportUncaughtError(error)
+        else onUncaughtError(error instanceof Error ? error : new Error(String(error)), {})
       },
     })
     if (!injected && host.renderer instanceof GpuixRenderer) {

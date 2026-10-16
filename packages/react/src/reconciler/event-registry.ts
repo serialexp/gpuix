@@ -1,15 +1,9 @@
 import type { EventPayload } from "@gpuix/native"
-import {
-  createRendererState,
-  registerEventHandler,
-  unregisterEventHandler,
-  unregisterEventHandlers,
-} from "@gpuix/native/host"
+import { createRendererState } from "@gpuix/native/host"
 import { runInEvent } from "./host-config.js"
 import type {
   Container,
   ElementIdAllocator,
-  EventHandlerMap,
   NativeRenderer,
 } from "../types/host.js"
 
@@ -47,11 +41,3 @@ export function handleGpuixEvent(
 ): boolean {
   return createRendererState(renderer).dispatch(payload)
 }
-
-export {
-  registerEventHandler,
-  unregisterEventHandler,
-  unregisterEventHandlers,
-}
-
-export type { EventHandlerMap }

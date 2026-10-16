@@ -32,6 +32,13 @@ export function useGpuixRequired(): NativeRenderer {
   return value.renderer
 }
 
+/** Where an error nothing caught goes when the app gave no
+ *  `onUncaughtError`: the console, as `@gpuix/react`'s default does. Not
+ *  `reportError`, which ends a Bun process. */
+export function reportUncaughtError(error: unknown): void {
+  console.error("[gpuix-solid] uncaught error", error)
+}
+
 export interface Root {
   render(code: () => JSX.Element): void
   flush(): void
@@ -53,10 +60,8 @@ export function createRoot(
       try {
         flush()
       } catch (error) {
-        rootHandlers.onUncaughtError?.(
-          error instanceof Error ? error : new Error(String(error)),
-          {}
-        )
+        if (!rootHandlers.onUncaughtError) reportUncaughtError(error)
+        else rootHandlers.onUncaughtError(error instanceof Error ? error : new Error(String(error)), {})
       }
     })
   })

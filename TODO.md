@@ -32,10 +32,6 @@
 - The `rust-test` CI job runs the native crate's tests on macOS and Linux
   only. Add Windows once someone checks that the vendored LuaJIT and
   quickjs-ng build there with MSVC.
-- `examples/` doesn't typecheck (`bunx tsc -p examples --noEmit`: 51
-  errors, mostly "cannot find module" for asset imports in `chat.tsx` and
-  `mail.tsx`, plus missing types for `diff`), and CI never runs it. Fix the
-  errors, then add the typecheck to CI next to the example-app one.
 - QuickJS cuts module names to 64 bytes (`ATOM_GET_STR_BUF_SIZE`) in some
   of its own messages, such as "Could not find export 'x' in module ...",
   and app module names are absolute paths. Show them in full, by a patch or
@@ -50,3 +46,19 @@
   compiler's code without a source map, and Bun ignored an inline
   `sourceMappingURL` in plugin output when tried. Find a way to hand Bun
   the compiler's map (`sourceMap: true` returns one).
+- Bun 1.4.0's code splitting runs the modules of an import cycle in the
+  wrong order when two entries share them (`@solidjs/signals`' core.js
+  ran before scheduler.js). `packages/native/embedded/build.ts` works
+  around it and fails on any other cycle. Report it to Bun with the small
+  reproduction (two entries, `export * from` solid-js and from
+  `@solidjs/universal`) and drop the workaround once it's fixed.
+- `gpx` reads a JavaScript app's `tsconfig.json` to pick Solid or React,
+  but `--watch` doesn't watch it, so changing `jsxImportSource` takes a
+  restart. Add the configs it read to what it watches.
+- `cargo clippy --features test-support,quickjs --all-targets` in
+  packages/native reports about 58 lints (needless `return`s, too many
+  arguments, `sort_by_key`, complex types), and CI doesn't run clippy.
+  Clear them, then add a clippy step to CI. `cargo fmt --check` fails
+  there too, on older code (renderer.rs, retained_tree.rs, img.rs,
+  input.rs, test_renderer.rs, text/search.rs); format it in a commit of
+  its own and check it in CI.

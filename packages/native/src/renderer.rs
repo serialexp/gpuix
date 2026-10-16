@@ -3887,12 +3887,11 @@ impl GpuixView {
             let element = tree.elements.get(&current)?;
             let parent_id = element.parent?;
             let parent = tree.elements.get(&parent_id)?;
-            let index = parent.children.iter().position(|child| *child == current)?;
             if let Some(entry) = self.virtual_lists.get(&parent_id) {
                 return Some((parent_id, entry.logical_index_of(current)?));
             }
             if self.scroll_handles.contains_key(&parent_id) {
-                return Some((parent_id, index));
+                return Some((parent_id, built_child_index(&tree, parent, current)?));
             }
             current = parent_id;
         }
@@ -3971,16 +3970,17 @@ impl GpuixView {
 
         let tree_arc = self.tree.clone();
         let tree = tree_arc.lock().unwrap();
-        let window_start = self
+        // The row is the one the list was built with (its rows leave out
+        // empty text), and still in the list.
+        let child_matches = self
             .virtual_lists
             .get(&list_id)
-            .map(|entry| entry.window_start)
-            .unwrap_or(0);
-        let child_matches = tree.elements.get(&list_id).and_then(|list| {
-            index
-                .checked_sub(window_start)
-                .and_then(|offset| list.children.get(offset))
-        }) == Some(&expected_child_id);
+            .and_then(|entry| entry.child_at(index))
+            == Some(expected_child_id)
+            && tree
+                .elements
+                .get(&expected_child_id)
+                .is_some_and(|child| child.parent == Some(list_id));
         if !child_matches {
             let height = self
                 .virtual_lists
@@ -5199,7 +5199,12 @@ pub(crate) fn build_element(
                 .children
                 .iter()
                 .copied()
-                .filter(|child_id| ctx.tree.elements.contains_key(child_id))
+                .filter(|child_id| {
+                    ctx.tree
+                        .elements
+                        .get(child_id)
+                        .is_some_and(|child| !child.is_empty_text())
+                })
                 .map(|child_id| build_element(child_id, ctx, window, cx))
                 .collect();
             let inherited = ctx.inherited.clone();
@@ -5236,11 +5241,17 @@ fn build_virtual_list(
 ) -> gpui::AnyElement {
     use gpui::prelude::*;
 
+    // Empty text takes no row, as it takes no space in a container.
     let child_ids: Vec<u64> = element
         .children
         .iter()
         .copied()
-        .filter(|child_id| ctx.tree.elements.contains_key(child_id))
+        .filter(|child_id| {
+            ctx.tree
+                .elements
+                .get(child_id)
+                .is_some_and(|child| !child.is_empty_text())
+        })
         .collect();
     let child_revisions: Vec<u64> = child_ids
         .iter()
@@ -5400,6 +5411,32 @@ fn virtual_row_ancestor(tree: &RetainedTree, list_id: u64, element_id: u64) -> O
         }
         current = parent;
     }
+}
+
+/// Where `child` sits among the gpui children `build_host_container` gives
+/// `parent`: after the parent's own text, if it has some, and not counting
+/// the empty text nodes it skips.
+fn built_child_index(
+    tree: &RetainedTree,
+    parent: &crate::retained_tree::RetainedElement,
+    child: u64,
+) -> Option<usize> {
+    let position = parent.children.iter().position(|id| *id == child)?;
+    let own_text = usize::from(
+        parent
+            .content
+            .as_deref()
+            .is_some_and(|text| !text.is_empty()),
+    );
+    let skipped = parent.children[..position]
+        .iter()
+        .filter(|id| {
+            tree.elements
+                .get(id)
+                .is_some_and(|sibling| sibling.is_empty_text())
+        })
+        .count();
+    Some(own_text + position - skipped)
 }
 
 fn joined_text_content(
@@ -5820,6 +5857,14 @@ pub(crate) fn build_host_container(
 
     // Children
     for &child_id in &element.children {
+        if ctx
+            .tree
+            .elements
+            .get(&child_id)
+            .is_some_and(|child| child.is_empty_text())
+        {
+            continue;
+        }
         let child = build_element(child_id, ctx, window, cx);
         el = if overflow_x_only {
             el.child(gpui::div().flex_none().child(child))

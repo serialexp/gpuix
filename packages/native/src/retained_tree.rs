@@ -86,6 +86,23 @@ impl RetainedElement {
             || self.events().contains("blur")
     }
 
+    /// A bare text node holding "", like the placeholders Solid's universal
+    /// renderer inserts for a `<Show>` or a `{null}` hole. A browser makes no
+    /// box for empty text, so it takes no part in layout here either: as a
+    /// flex item it would still take a `gap`. A Lua `<text>` holds its string
+    /// in the same node, so one with a style, a listener, a prop or a test id
+    /// is still a box when its string is empty.
+    pub fn is_empty_text(&self) -> bool {
+        self.element_type == "text"
+            && self.content.as_deref() == Some("")
+            && self.children.is_empty()
+            && self.style.is_none()
+            && self.events().is_empty()
+            && self.custom_props().is_empty()
+            && self.test_id.is_none()
+            && !self.auto_focus
+    }
+
     pub fn new(id: u64, element_type: String, revision: u64) -> Self {
         Self {
             id,
@@ -1528,6 +1545,31 @@ mod tests {
         assert!(tree.elements[&1].extras.is_some());
         tree.set_custom_prop(1, "aria-label".to_string(), serde_json::Value::Null);
         assert!(tree.elements[&1].extras.is_none());
+    }
+
+    #[test]
+    fn only_bare_empty_text_is_left_out_of_layout() {
+        let text = |content: &str| {
+            let mut element = RetainedElement::new(1, "text".into(), 0);
+            element.content = Some(content.into());
+            element
+        };
+        assert!(text("").is_empty_text());
+        assert!(!text(" ").is_empty_text());
+        let mut styled = text("");
+        styled.style = Some(Arc::new(StyleDesc::default()));
+        assert!(!styled.is_empty_text());
+        let mut tagged = text("");
+        tagged.test_id = Some("label".into());
+        assert!(!tagged.is_empty_text());
+        let mut listening = text("");
+        listening.extras_mut().events.insert("click".into());
+        assert!(!listening.is_empty_text());
+        let mut host = RetainedElement::new(1, "text".into(), 0);
+        assert!(!host.is_empty_text());
+        host.content = Some(String::new());
+        host.children.push(2);
+        assert!(!host.is_empty_text());
     }
 
     #[test]

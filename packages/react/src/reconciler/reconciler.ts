@@ -3,19 +3,14 @@ import type { ReactNode } from "react"
 import ReactReconciler from "react-reconciler"
 import type { OpaqueRoot } from "react-reconciler"
 import { ConcurrentRoot } from "react-reconciler/constants.js"
-import { createMutationQueue } from "@gpuix/native/host"
+import { createMutationQueue, unregisterEventHandlers } from "@gpuix/native/host"
 import { GpuixContext, type GpuixContextValue } from "../hooks/use-gpuix.js"
 import type {
   Container,
   NativeRenderer,
   RootEventHandlers,
 } from "../types/host.js"
-import {
-  attachRoot,
-  detachRoot,
-  idAllocatorFor,
-  unregisterEventHandlers,
-} from "./event-registry.js"
+import { attachRoot, detachRoot, idAllocatorFor } from "./event-registry.js"
 import { hostConfig } from "./host-config.js"
 
 // Cast to any because @types/react-reconciler is out of date with react-reconciler 0.31.0

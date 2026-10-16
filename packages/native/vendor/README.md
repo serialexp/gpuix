@@ -3,10 +3,12 @@
 ## rquickjs-sys 0.14.0
 
 The crates.io package of `rquickjs-sys` 0.14.0 with
-`rquickjs-sys-0.14.0-map-hash-mix.diff` and
-`rquickjs-sys-0.14.0-source-position.diff` applied, in that order.
+`rquickjs-sys-0.14.0-map-hash-mix.diff`,
+`rquickjs-sys-0.14.0-source-position.diff`,
+`rquickjs-sys-0.14.0-proxy-accessor-descriptor.diff` and
+`rquickjs-sys-0.14.0-rerun-on-source-change.diff` applied, in that order.
 `Cargo.toml` swaps it in with `[patch.crates-io]`, and the `quickjs` feature
-turns both on.
+turns on the first two's features. The other two are plain fixes.
 
 ### map-hash-mix
 
@@ -33,6 +35,24 @@ still happens when an app sets its own `Error.prepareStackTrace`, as it
 does in stock QuickJS. The nonstandard `Function.prototype.lineNumber` and
 `columnNumber` aren't mapped.
 
+### proxy-accessor-descriptor
+
+quickjs-ng drops the getter from a descriptor a Proxy's
+`getOwnPropertyDescriptor` trap returns: `js_obj_to_desc` notes that `get`
+or `set` is present, but `js_proxy_get_own_property` passes that on without
+marking the descriptor an accessor, so `Object.getOwnPropertyDescriptor`
+reads back a data descriptor with no value. Solid 2.0's `merge` and `omit`
+answer with getters, so props that go through both lost their children.
+The patch converts the flags as Bellard's QuickJS does. quickjs-ng upstream
+still has the bug.
+
+### rerun-on-source-change
+
+The build script tells Cargo when to rerun it, but only for environment
+variables, and that stops Cargo from rerunning it when a file changes. So a
+change to the vendored C, as these patches make, wasn't built until a clean
+build. The patch names the C sources too.
+
 The package's `vendor/wasi-libc` directory is left out, so WASI targets
 don't build. Nothing else differs.
 
@@ -44,4 +64,6 @@ cp -R ~/.cargo/registry/src/index.crates.io-*/rquickjs-sys-0.14.0 vendor/rquickj
 rm -rf vendor/rquickjs-sys/vendor
 (cd vendor/rquickjs-sys && patch -p1 < ../rquickjs-sys-0.14.0-map-hash-mix.diff)
 (cd vendor/rquickjs-sys && patch -p1 < ../rquickjs-sys-0.14.0-source-position.diff)
+(cd vendor/rquickjs-sys && patch -p1 < ../rquickjs-sys-0.14.0-proxy-accessor-descriptor.diff)
+(cd vendor/rquickjs-sys && patch -p1 < ../rquickjs-sys-0.14.0-rerun-on-source-change.diff)
 ```

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use super::compile::compile;
+use super::compile::{compile, Jsx};
 use super::{
     ConsoleLevel, Host, QuickJsOptions, QuickJsRuntime, SizeOverride, TreeHost, WindowCall,
 };
@@ -14,6 +14,11 @@ use crate::retained_tree::RetainedTree;
 const BATCH: &str = "const batch = (...ops) => __gpuix.renderer.applyBatch(JSON.stringify(ops));\n";
 
 type Output = Rc<RefCell<Vec<(ConsoleLevel, String)>>>;
+
+/// For [`compile`]: the file's JSX is React's.
+fn react() -> Result<Jsx, String> {
+    Ok(Jsx::React)
+}
 
 /// A host whose tree and window calls the test can see. Each window call
 /// gets `reply`.
@@ -855,6 +860,26 @@ fn console_has_nodes_other_methods() {
 }
 
 #[test]
+fn a_proxys_accessor_descriptor_keeps_its_getter() {
+    // vendor/rquickjs-sys-0.14.0-proxy-accessor-descriptor.diff
+    let app = App::load(
+        r#"
+        const getter = () => "value"
+        const accessor = new Proxy({}, {
+          getOwnPropertyDescriptor: () => ({ get: getter, enumerable: true, configurable: true }),
+        })
+        const data = new Proxy({}, {
+          getOwnPropertyDescriptor: () => ({ value: 1, writable: true, enumerable: true, configurable: true }),
+        })
+        const a = Object.getOwnPropertyDescriptor(accessor, "x")
+        const d = Object.getOwnPropertyDescriptor(data, "x")
+        console.log(a.get === getter, "value" in a, "writable" in a, d.value, d.writable)
+        "#,
+    );
+    assert_eq!(app.log(), ["true false false 1 true"]);
+}
+
+#[test]
 fn structured_clone_keeps_odd_keys_buffers_and_holes() {
     let app = App::load(
         r#"
@@ -986,6 +1011,7 @@ fn typescript_and_jsx_compile_to_plain_javascript() {
     let code = compile(
         "const size: number = 2;\nexport const view = <div style={{ width: size }}>{'hi'}</div>;\n",
         Path::new("view.tsx"),
+        react,
     )
     .unwrap()
     .code;
@@ -994,17 +1020,17 @@ fn typescript_and_jsx_compile_to_plain_javascript() {
         "{code}"
     );
     assert!(!code.contains(": number"), "{code}");
-    assert!(compile("export const a = 1 as const;", Path::new("a.mts")).is_ok());
+    assert!(compile("export const a = 1 as const;", Path::new("a.mts"), react).is_ok());
     for name in ["a.jsx", "a.js", "a.mjs"] {
-        assert!(compile("export const a = <b />;", Path::new(name)).is_ok());
+        assert!(compile("export const a = <b />;", Path::new(name), react).is_ok());
     }
     // TypeScript's own `<Type>value` casts stay unambiguous in `.ts`.
-    assert!(compile("export const a = <number>1;", Path::new("a.ts")).is_ok());
+    assert!(compile("export const a = <number>1;", Path::new("a.ts"), react).is_ok());
 }
 
 #[test]
 fn what_quickjs_cant_run_fails_the_compile_where_it_is() {
-    let error = |source: &str| match compile(source, Path::new("app.ts")) {
+    let error = |source: &str| match compile(source, Path::new("app.ts"), react) {
         Ok(compiled) => panic!("{source:?} compiled to {}", compiled.code),
         Err(error) => error,
     };
@@ -1040,7 +1066,7 @@ fn what_quickjs_cant_run_fails_the_compile_where_it_is() {
         "abstract class C { abstract accessor x: number }",
         "import type fs = require(\"fs\")",
     ] {
-        if let Err(error) = compile(source, Path::new("ok.ts")) {
+        if let Err(error) = compile(source, Path::new("ok.ts"), react) {
             panic!("{source:?} failed: {error}");
         }
     }
@@ -1057,6 +1083,7 @@ fn imports_stay_unless_marked_as_types() {
         export const value: Shape | Only = used
         "#,
         Path::new("main.ts"),
+        react,
     )
     .unwrap()
     .code;
@@ -1068,11 +1095,15 @@ fn imports_stay_unless_marked_as_types() {
 
 #[test]
 fn compile_errors_give_the_file_line_and_column() {
-    let error = compile("const a = 1;\nconst b = ;\n", Path::new("src/bad.ts"))
-        .err()
-        .unwrap();
+    let error = compile(
+        "const a = 1;\nconst b = ;\n",
+        Path::new("src/bad.ts"),
+        react,
+    )
+    .err()
+    .unwrap();
     assert!(error.starts_with("src/bad.ts:2:11: "), "{error}");
-    let error = compile("let a = 1;\nlet a = 2;\n", Path::new("twice.ts"))
+    let error = compile("let a = 1;\nlet a = 2;\n", Path::new("twice.ts"), react)
         .err()
         .unwrap();
     assert_eq!(
@@ -1082,16 +1113,16 @@ fn compile_errors_give_the_file_line_and_column() {
          twice.ts:2:5: It can not be redeclared here"
     );
     for name in ["types.d.ts", "old.cjs", "data.json"] {
-        let error = compile("", Path::new(name)).err().unwrap();
+        let error = compile("", Path::new(name), react).err().unwrap();
         assert!(error.contains("an app module must be"), "{error}");
     }
     // A byte-order mark isn't a column.
-    let error = compile("\u{FEFF}const b = ;", Path::new("bom.ts"))
+    let error = compile("\u{FEFF}const b = ;", Path::new("bom.ts"), react)
         .err()
         .unwrap();
     assert!(error.starts_with("bom.ts:1:11: "), "{error}");
     // Columns count UTF-16 code units, as editors do: the emoji is two.
-    let error = compile("const a = \"😀\" + ;", Path::new("e.ts"))
+    let error = compile("const a = \"😀\" + ;", Path::new("e.ts"), react)
         .err()
         .unwrap();
     assert!(error.starts_with("e.ts:1:18: "), "{error}");
@@ -1217,9 +1248,13 @@ console.log(make().stack)
 
 #[test]
 fn a_bad_regex_fails_the_compile_where_it_is() {
-    let error = compile("type T = number\nconst r = /[z-a]/\n", Path::new("re.ts"))
-        .err()
-        .unwrap();
+    let error = compile(
+        "type T = number\nconst r = /[z-a]/\n",
+        Path::new("re.ts"),
+        react,
+    )
+    .err()
+    .unwrap();
     assert!(error.starts_with("re.ts:2:"), "{error}");
 }
 
@@ -1303,6 +1338,223 @@ fn a_react_app_renders_and_handles_clicks() {
     assert_eq!(app.texts(), ["Count: 1"]);
     assert!(!app.click(counter + 1000).unwrap());
     assert!(app.log().contains(&"[gpuix] mount complete".to_string()));
+}
+
+#[test]
+fn solid_jsx_compiles_to_gpuix_solid_calls() {
+    let solid = || Ok(Jsx::Solid);
+    let code = compile(
+        "const size: number = 2;\nexport const view = () => <div style={{ width: size }}>{count()}</div>;\n",
+        Path::new("view.tsx"),
+        solid,
+    )
+    .unwrap()
+    .code;
+    assert!(code.contains(r#"from "@gpuix/solid""#), "{code}");
+    assert!(!code.contains("jsx-runtime"), "{code}");
+    assert!(!code.contains(": number"), "{code}");
+    for name in ["a.jsx", "a.js", "a.mjs"] {
+        let code = compile("export const a = <b />;", Path::new(name), solid)
+            .unwrap()
+            .code;
+        assert!(code.contains(r#"from "@gpuix/solid""#), "{name}: {code}");
+    }
+    // `.ts` files can't hold JSX, so they don't ask.
+    let code = compile("export const a = <number>1;", Path::new("a.ts"), || {
+        panic!("asked for a .ts file")
+    })
+    .unwrap()
+    .code;
+    assert!(code.contains("export const a = 1"), "{code}");
+    // Errors still give the file, line and column.
+    let error = compile(
+        "const a = <div>\n  {b(}\n</div>",
+        Path::new("bad.tsx"),
+        solid,
+    )
+    .err()
+    .unwrap();
+    assert!(error.starts_with("bad.tsx:2:"), "{error}");
+}
+
+#[test]
+fn a_solid_app_renders_and_handles_clicks() {
+    let dir = AppDir::new(&[
+        (
+            "main.tsx",
+            r#"
+            import { render } from "@gpuix/solid"
+            import { Counter } from "./counter"
+            render(() => <Counter label="Count" />)
+            "#,
+        ),
+        (
+            "counter.tsx",
+            r#"
+            import { createSignal, Show } from "solid-js"
+            export function Counter(props: { label: string }) {
+              const [count, setCount] = createSignal(0)
+              return (
+                <div testId="counter" onClick={() => setCount((value) => value + 1)}>
+                  <text>{`${props.label}: ${count()}`}</text>
+                  <Show when={count() > 1}>
+                    <text>many</text>
+                  </Show>
+                </div>
+              )
+            }
+            "#,
+        ),
+    ]);
+    let mut app = App::try_load_module(&dir.path("main.tsx")).unwrap();
+    app.settle();
+    // An empty text node marks where `Show` puts its children, as under Node.
+    assert_eq!(app.texts(), ["", "Count: 0"]);
+    let counter = app.test_id("counter");
+    // Solid flushes after the handlers, before the call returns.
+    assert!(app.click(counter).unwrap());
+    assert_eq!(app.texts(), ["", "Count: 1"]);
+    assert!(app.click(counter).unwrap());
+    assert_eq!(app.texts(), ["Count: 2", "many"]);
+}
+
+#[test]
+fn the_nearest_tsconfig_picks_the_framework() {
+    // The entry imports nothing that names Solid, so only the config says.
+    let dir = AppDir::new(&[
+        (
+            "tsconfig.json",
+            r#"{
+              // As TypeScript reads it: comments, trailing commas, extends.
+              "extends": ["./missing-is-fine-if-unused.json", "./base.json",],
+            }"#,
+        ),
+        ("missing-is-fine-if-unused.json", "{}"),
+        (
+            "base.json",
+            r#"{ "compilerOptions": { "jsx": "preserve", "jsxImportSource": "@gpuix/solid" } }"#,
+        ),
+        ("main.tsx", r#"import "./app""#),
+        (
+            "app.tsx",
+            r#"
+            import { render } from "@gpuix/solid"
+            render(() => <text>from solid</text>)
+            "#,
+        ),
+    ]);
+    let mut app = App::try_load_module(&dir.path("main.tsx")).unwrap();
+    app.settle();
+    assert_eq!(app.texts(), ["from solid"]);
+}
+
+#[test]
+fn a_tsconfig_naming_another_jsx_source_fails_the_load() {
+    let dir = AppDir::new(&[
+        (
+            "tsconfig.json",
+            r#"{ "compilerOptions": { "jsxImportSource": "react" } }"#,
+        ),
+        ("main.tsx", "export const a = <div />"),
+    ]);
+    let error = App::try_load_module(&dir.path("main.tsx")).err().unwrap();
+    assert!(
+        error.contains(
+            "gpx compiles JSX for @gpuix/react or @gpuix/solid, but jsxImportSource is \"react\""
+        ),
+        "{error}"
+    );
+    assert!(error.contains("tsconfig.json"), "{error}");
+}
+
+#[test]
+fn a_file_without_jsx_ignores_the_configs_jsx_source() {
+    let dir = AppDir::new(&[
+        (
+            "lib/tsconfig.json",
+            r#"{ "compilerOptions": { "jsxImportSource": "preact" } }"#,
+        ),
+        ("lib/helper.js", "export const greeting = 'hi'"),
+        (
+            "main.tsx",
+            r#"
+            import { render } from "@gpuix/solid"
+            import { greeting } from "./lib/helper.js"
+            render(() => <text>{greeting}</text>)
+            "#,
+        ),
+    ]);
+    let mut app = App::try_load_module(&dir.path("main.tsx")).unwrap();
+    app.settle();
+    assert_eq!(app.texts(), ["hi"]);
+}
+
+#[test]
+fn two_configs_may_extend_the_same_base() {
+    let dir = AppDir::new(&[
+        (
+            "tsconfig.json",
+            r#"{ "extends": ["./a.json", "./b.json"] }"#,
+        ),
+        ("a.json", r#"{ "extends": "./base.json" }"#),
+        ("b.json", r#"{ "extends": "./base.json" }"#),
+        ("base.json", r#"{ "compilerOptions": { "strict": true } }"#),
+        (
+            "main.tsx",
+            r#"
+            import { render } from "@gpuix/solid"
+            render(() => <text>diamond</text>)
+            "#,
+        ),
+    ]);
+    let mut app = App::try_load_module(&dir.path("main.tsx")).unwrap();
+    app.settle();
+    assert_eq!(app.texts(), ["diamond"]);
+}
+
+#[test]
+fn an_extends_loop_fails_the_load() {
+    let dir = AppDir::new(&[
+        ("tsconfig.json", r#"{ "extends": "./a.json" }"#),
+        ("a.json", r#"{ "extends": "./sub/../tsconfig.json" }"#),
+        ("sub/keep.txt", ""),
+        ("main.tsx", "export const a = <div />"),
+    ]);
+    let error = App::try_load_module(&dir.path("main.tsx")).err().unwrap();
+    assert!(error.contains("`extends` loops back to it"), "{error}");
+}
+
+#[test]
+fn solid_stack_traces_point_at_the_source_lines() {
+    let dir = AppDir::new(&[(
+        "main.tsx",
+        r#"import { render } from "@gpuix/solid"
+type Props = { label: string }
+function Item(props: Props) {
+  return (
+    <div testId="item" onClick={() => {
+      throw new Error(`clicked ${props.label}`)
+    }}>
+      <text>{props.label}</text>
+    </div>
+  )
+}
+render(() => <Item label="one" />)
+"#,
+    )]);
+    let main = std::fs::canonicalize(dir.path("main.tsx")).unwrap();
+    let mut app = App::try_load_module(&dir.path("main.tsx")).unwrap();
+    app.settle();
+    let item = app.test_id("item");
+    // With no `onUncaughtError`, `@gpuix/solid` logs it, stack included.
+    app.click(item).unwrap();
+    let printed = app.printed();
+    let (level, error) = printed
+        .iter()
+        .find(|(_, message)| message.contains("Error: clicked one"))
+        .unwrap_or_else(|| panic!("{printed:?}"));
+    assert_eq!(*level, ConsoleLevel::Error);
+    assert!(error.contains(&format!("{}:6:", main.display())), "{error}");
 }
 
 #[test]

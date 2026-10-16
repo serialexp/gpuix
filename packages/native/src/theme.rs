@@ -348,6 +348,7 @@ impl Metrics {
         }
     }
 
+    #[cfg(test)]
     pub fn hash_into(&self, hasher: &mut impl std::hash::Hasher) {
         let mut feed = |value: f32| hasher.write_u32(value.to_bits());
         for value in [

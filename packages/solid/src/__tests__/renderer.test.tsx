@@ -103,6 +103,29 @@ describe.skipIf(!hasNativeTestRenderer)("Solid renderer", () => {
     })
   })
 
+  it("lays out an empty placeholder as nothing, so it takes no gap", () => {
+    const [shown, setShown] = createSignal(false)
+    const app = createTestRoot()
+    const box = { width: 20, height: 20 }
+    app.render(() => (
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div testId="a" style={box} />
+        <Show when={shown()}>
+          <div testId="shown" style={box} />
+        </Show>
+        {null}
+        <div testId="b" style={box} />
+      </div>
+    ))
+    const top = (testId: string) =>
+      app.renderer.getElementBounds(app.renderer.findByTestId(testId)!.id)!.y
+    expect(top("b") - top("a")).toBe(30)
+
+    app.flushSync(() => setShown(true))
+    expect(top("shown") - top("a")).toBe(30)
+    expect(top("b") - top("a")).toBe(60)
+  })
+
   it("removes listeners and rejects stale events after remount", () => {
     const [enabled, setEnabled] = createSignal(true)
     let clicks = 0

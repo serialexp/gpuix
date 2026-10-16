@@ -15,9 +15,12 @@ import {
   BUILT_IN_TYPES,
   EVENT_TYPE_BY_PROP,
   isReservedProp,
+  registerEventHandler,
   sameMutationValue,
   serializeCustomProp,
   UNIVERSAL_PROPS,
+  unregisterEventHandler,
+  unregisterEventHandlers,
 } from "@gpuix/native/host"
 
 const NoEventPriority = 0
@@ -32,11 +35,6 @@ import type {
   PublicInstance,
   TextInstance,
 } from "../types/host.js"
-import {
-  registerEventHandler,
-  unregisterEventHandler,
-  unregisterEventHandlers,
-} from "./event-registry.js"
 
 let currentUpdatePriority = NoEventPriority
 

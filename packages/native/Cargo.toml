@@ -72,6 +72,14 @@ rquickjs-sys = { version = "0.14", optional = true }
 # Compiles app TypeScript and JSX for QuickJS. Pinned to the oxc that Solid
 # 2.0's compiler (`@solidjs/compiler`) builds on, so the two can share it.
 oxc = { version = "=0.144.0", optional = true, features = ["ast_visit", "codegen", "regular_expression", "semantic", "transformer"] }
+# Reads the source map Solid's compiler returns, to map positions in what
+# oxc compiles from it back to the app's source.
+oxc_sourcemap = { version = "8.1", optional = true }
+# Solid 2.0's JSX compiler, for Solid apps. Not on crates.io, and its Rust API
+# is unstable before 2.0 is final, so it is pinned to the `solid-js@2.0.0-rc.15`
+# tag's commit, the release `@gpuix/solid` uses. Without its default features
+# it is the plain Rust library, with no napi or TSRX.
+solidjs-compiler = { git = "https://github.com/solidjs/solid", rev = "4937f0a2bfddd45a65738c189075aff577530073", default-features = false, optional = true }
 
 # The slow half of the engine split above. fancy-regex is pure Rust, so it is
 # the only Syntect engine that builds here, and the browser still pays ~133ms on
@@ -122,7 +130,7 @@ luajit = ["mlua/luajit", "mlua/vendored"]
 #   app modules back to their source, even for a stack overflow.
 # - disable-assertions: quickjs-ng's C asserts are on unless this is set. The
 #   vendored Lua builds without API checks too.
-quickjs = ["dep:rquickjs", "rquickjs/disable-assertions", "rquickjs/loader", "dep:rquickjs-sys", "rquickjs-sys/map-hash-mix", "rquickjs-sys/source-position", "dep:oxc"]
+quickjs = ["dep:rquickjs", "rquickjs/disable-assertions", "rquickjs/loader", "dep:rquickjs-sys", "rquickjs-sys/map-hash-mix", "rquickjs-sys/source-position", "dep:oxc", "dep:oxc_sourcemap", "dep:solidjs-compiler"]
 
 # rquickjs-sys 0.14.0 with vendor/rquickjs-sys-0.14.0-map-hash-mix.diff and
 # vendor/rquickjs-sys-0.14.0-source-position.diff applied, behind its

@@ -97,6 +97,17 @@ Tracking the gap between this design and what's on the main branch.
   plugin compile with `@solidjs/compiler` and load Solid's development build
   unless `NODE_ENV` is `production` (`packages/solid/`, `feat(solid)!: move
   @gpuix/solid to Solid 2.0`)
+- [x] Phase 5: Solid JSX compile for app files with `@solidjs/compiler`'s
+  Rust crate (`solidjs-compiler`) in universal mode, pinned to the
+  `solid-js@2.0.0-rc.15` git revision. The nearest tsconfig's
+  `jsxImportSource` picks Solid or React, and the entry file's imports
+  decide without one (`src/quickjs/compile.rs`, `src/quickjs/framework.rs`,
+  `feat(native): run Solid apps under gpx`)
+- [x] Phase 5: embedded `solid-js` and `@gpuix/solid` bundles, built from
+  Solid's production client build by `embedded/build.ts` (same commit)
+- [x] Phase 5: Solid app parity tests, under Bun and under `gpx`'s
+  QuickJS, skipped without a `build:quickjs` `.node` file
+  (`packages/solid/src/__tests__/quickjs-parity.test.ts`, same commit)
 
 ### Outstanding
 
@@ -112,11 +123,6 @@ Tracking the gap between this design and what's on the main branch.
 - [ ] Phase 4 follow-up: run the parity tests in CI (deferred: CI builds
   the `.node` file without QuickJS, so they skip there; a `build:quickjs`
   step costs a second release build of the crate)
-- [ ] Phase 5: Solid JSX compile for app files with `@solidjs/compiler`'s
-  Rust crate in universal mode, pinned to a git revision
-- [ ] Phase 5: embedded `solid-js`, `@solidjs/*` and `@gpuix/solid` bundles,
-  added to `embedded/build.ts`
-- [ ] Phase 5: Solid app parity tests
 - [ ] Phase 6: hot reload: React Fast Refresh via oxc's refresh transform;
   Solid remounts
 - [ ] Phase 6: README section, changeset, and benchmark numbers in
@@ -377,6 +383,16 @@ and `packages/native/embedded/build.ts`:
 >   trying extensions in Bun's order for `import` (tsx, jsx, mts, ts, mjs,
 >   js). `with { type: ... }` imports are rejected.
 > - The Solid bundles come with Phase 5.
+>
+> **2026-10-16 update:** they did. `solid-js` and `@gpuix/solid`'s
+> subpaths are entries, all but `testing`, `automation`, `preload` and
+> `bun-plugin`, as for React; `@solidjs/signals` and `@solidjs/universal` are
+> bundled in but not importable. They embed Solid's production build, so
+> `gpx` apps run without Solid's development checks, as with `NODE_ENV=production`
+> under Bun. `@solidjs/signals` is built first without code splitting:
+> Bun 1.4.0's splitting ran the modules of its import cycle in the wrong
+> order (see TODO.md), and the build now fails on any import cycle, which
+> found and removed one in `@gpuix/react`.
 
 ### The `gpuix-js` binary
 
@@ -470,6 +486,23 @@ JavaScript app loop in `src/quickjs_app.rs`. Details the design left open:
    > provider, so optional contexts default to `null`. The port also fixed
    > props that controls copied with `{...props}`, which lost reactivity
    > under 1.x too.
+
+   > **2026-10-16 update:** Solid apps run under `gpx`. Which framework a
+   > file's JSX compiles for comes from the nearest `tsconfig.json` or
+   > `jsconfig.json` (`compilerOptions.jsxImportSource`, `extends`
+   > followed), as TypeScript reads it; with none, the app is Solid if its entry
+   > file imports `@gpuix/solid` or `solid-js`, and React otherwise
+   > (decided by Bart on 2026-10-16). Solid's compiler runs on the source
+   > first, then oxc strips TypeScript, and the two source maps are
+   > combined so errors and stack traces point at the source. Two bugs
+   > turned up on the way: quickjs-ng read an accessor descriptor from a
+   > Proxy's `getOwnPropertyDescriptor` trap as a data descriptor, which
+   > broke Solid's `merge`/`omit` proxies (a third vendored patch), and an
+   > empty text node, which Solid inserts for each `<Show>` or `{null}`
+   > hole, took a flex `gap` slot (now it takes no part in layout, as in a
+   > browser). An error in a Solid flush that no `onUncaughtError` takes is now
+   > logged, as `@gpuix/react` logs its uncaught errors, rather than
+   > dropped.
 6. Hot reload, docs, changeset, benchmarks.
 
 ## Open questions for review

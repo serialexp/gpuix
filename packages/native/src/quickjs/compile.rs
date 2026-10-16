@@ -1,6 +1,8 @@
 //! Compiles app files for QuickJS with oxc. TypeScript types are removed, and
-//! JSX becomes calls to React's automatic runtime, imported from
-//! `@gpuix/react/jsx-runtime` as a GPUIX app's `jsxImportSource` sets it.
+//! JSX is compiled for the app's framework ([`Jsx`]): for React, calls to its
+//! automatic runtime, imported from `@gpuix/react/jsx-runtime`; for Solid,
+//! what Solid's own compiler (`solidjs-compiler`) writes in universal mode,
+//! imported from `@gpuix/solid`, as `@gpuix/solid`'s Bun plugin compiles it.
 //! Nothing else is lowered: QuickJS runs current JavaScript. What it can't
 //! run (decorators, `accessor` fields) and TypeScript's CommonJS forms fail
 //! the compile with their position, instead of failing later at a position
@@ -28,8 +30,36 @@ use oxc::parser::{ParseOptions, Parser};
 use oxc::semantic::SemanticBuilder;
 use oxc::span::{SourceType, Span};
 use oxc::transformer::{JsxOptions, JsxRuntime, TransformOptions, Transformer, TypeScriptOptions};
+use oxc_sourcemap::SourceMap;
+use solidjs_compiler::{CompileOptions, Generate, Syntax};
 
-const JSX_IMPORT_SOURCE: &str = "@gpuix/react";
+/// Which framework an app file's JSX is compiled for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Jsx {
+    React,
+    Solid,
+}
+
+impl Jsx {
+    /// The package JSX compiled for this framework imports from, which a
+    /// tsconfig's `jsxImportSource` names.
+    pub(crate) const fn import_source(self) -> &'static str {
+        match self {
+            Self::React => "@gpuix/react",
+            Self::Solid => "@gpuix/solid",
+        }
+    }
+}
+
+/// The control flow `@gpuix/solid` re-exports, which Solid's compiled JSX
+/// imports from it, as its Bun plugin lists them.
+const SOLID_BUILT_INS: [&str; 8] = [
+    "For", "Show", "Switch", "Match", "Loading", "Reveal", "Repeat", "Errored",
+];
+
+/// A compiled source map's token: compiled line and UTF-16 column, then
+/// source line and column, all from zero, with lines as oxc counts them.
+type Token = (u32, u32, u32, u32);
 
 /// The extensions an app module can have.
 pub(crate) const EXTENSIONS: [&str; 6] = ["tsx", "ts", "mts", "jsx", "js", "mjs"];
@@ -40,18 +70,40 @@ pub(crate) struct Compiled {
 }
 
 /// Compiles one app module to JavaScript. `path` picks the syntax by its
-/// extension and names the file in errors. Each reads
+/// extension and names the file in errors, and `jsx` says which framework
+/// the JSX is for; it is only asked for a file that can hold JSX. Each reads
 /// `path:line:column: message`, followed by an indented line for each place
 /// the error points to that has its own note. Columns count UTF-16 code
 /// units, as editors and Node do.
-pub(crate) fn compile(source: &str, path: &Path) -> Result<Compiled, String> {
+pub(crate) fn compile(
+    source: &str,
+    path: &Path,
+    jsx: impl FnOnce() -> Result<Jsx, String>,
+) -> Result<Compiled, String> {
     let source_type = source_type(path)?;
     // As Node does, so line 1's columns match the editor's.
     let source = source.strip_prefix('\u{FEFF}').unwrap_or(source);
     // oxc panics on some input it doesn't expect. The loader runs inside a
     // QuickJS callback, which can't unwind, so a panic would abort the app.
     catch_unwind(AssertUnwindSafe(|| {
-        compile_source(source, path, source_type)
+        // `.ts` files can't hold JSX, so they skip the question, and Solid's
+        // compiler. A config naming some other JSX source only matters to a
+        // file with JSX in it.
+        let jsx = if source_type.is_jsx() {
+            match jsx() {
+                Ok(jsx) => jsx,
+                Err(error) if has_jsx(source, source_type) => return Err(error),
+                Err(_) => Jsx::React,
+            }
+        } else {
+            Jsx::React
+        };
+        let (code, tokens) = match jsx {
+            Jsx::Solid => compile_solid(source, path, source_type)?,
+            Jsx::React => compile_source(source, path, source_type, Some(jsx), Origin::Source)?,
+        };
+        let positions = PositionMap::new(source, &code, tokens.into_iter());
+        Ok(Compiled { code, positions })
     }))
     .unwrap_or_else(|panic| {
         let message = panic
@@ -66,39 +118,160 @@ pub(crate) fn compile(source: &str, path: &Path) -> Result<Compiled, String> {
     })
 }
 
-fn compile_source(source: &str, path: &Path, source_type: SourceType) -> Result<Compiled, String> {
+/// Compiles Solid JSX in two steps. Solid's compiler turns the JSX into calls
+/// to `@gpuix/solid` and keeps the TypeScript, which [`compile_source`] then
+/// removes. Positions go through both source maps back to the app's source.
+fn compile_solid(
+    source: &str,
+    path: &Path,
+    source_type: SourceType,
+) -> Result<(String, Vec<Token>), String> {
+    // Solid's compiler reports errors without a position, so the source is
+    // checked first, as the React path checks it.
+    analyze(
+        &Allocator::default(),
+        source,
+        path,
+        source_type,
+        Origin::Source,
+    )?;
+    // Solid's compiler picks the syntax from the file name, and reads `.js`
+    // as holding no JSX. Bun lets it hold JSX, so it gets named `.jsx`.
+    let filename = match path.extension().and_then(|extension| extension.to_str()) {
+        Some("js" | "mjs") => path.with_extension("jsx"),
+        _ => path.to_path_buf(),
+    };
+    let options = CompileOptions {
+        filename: Some(filename.display().to_string()),
+        syntax: Syntax::Jsx,
+        module_name: Jsx::Solid.import_source().to_string(),
+        generate: Generate::Universal,
+        // The embedded `solid-js` is its production build.
+        dev: false,
+        source_map: true,
+        built_ins: SOLID_BUILT_INS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect(),
+        ..CompileOptions::default()
+    };
+    let solid = solidjs_compiler::compile(source, &options)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let map = solid
+        .source_map
+        .ok_or_else(|| format!("{}: Solid's compiler wrote no source map", path.display()))?;
+    let map = SourceMap::from_json_string(&map).map_err(|error| {
+        format!(
+            "{}: Solid's compiler wrote a bad source map: {error}",
+            path.display()
+        )
+    })?;
+    let table = map.generate_lookup_table();
+    // The nearest mapping at or before a position, or the line's first, as
+    // source map composition does.
+    let to_source = |line: u32, column: u32| {
+        let token = map.lookup_token_approx(&table, line, column)?;
+        Some((token.get_src_line(), token.get_src_col()))
+    };
+    let origin = Origin::Solid {
+        source,
+        to_source: &to_source,
+    };
+    let (code, tokens) = compile_source(&solid.code, path, source_type, None, origin)?;
+    let tokens = tokens
+        .into_iter()
+        .filter_map(|(line, column, middle_line, middle_column)| {
+            let (source_line, source_column) = to_source(middle_line, middle_column)?;
+            Some((line, column, source_line, source_column))
+        })
+        .collect();
+    Ok((code, tokens))
+}
+
+/// Whether `source` holds any JSX. Source that doesn't parse counts as
+/// holding some.
+fn has_jsx(source: &str, source_type: SourceType) -> bool {
+    struct Finder(bool);
+    impl<'a> Visit<'a> for Finder {
+        fn visit_jsx_element(&mut self, _: &oxc::ast::ast::JSXElement<'a>) {
+            self.0 = true;
+        }
+        fn visit_jsx_fragment(&mut self, _: &oxc::ast::ast::JSXFragment<'a>) {
+            self.0 = true;
+        }
+    }
     let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, source, source_type)
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if parsed.panicked
+        || parsed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == Severity::Error)
+    {
+        return true;
+    }
+    let mut finder = Finder(false);
+    finder.visit_program(&parsed.program);
+    finder.0
+}
+
+/// Parses `source` and checks it: syntax, scopes, and what QuickJS can't run.
+fn analyze<'a>(
+    allocator: &'a Allocator,
+    source: &'a str,
+    path: &Path,
+    source_type: SourceType,
+    origin: Origin,
+) -> Result<(Program<'a>, oxc::semantic::Scoping), String> {
+    let parsed = Parser::new(allocator, source, source_type)
         // Otherwise QuickJS finds a bad regex, with no position to show.
         .with_options(ParseOptions {
             parse_regular_expression: true,
             ..ParseOptions::default()
         })
         .parse();
-    check(source, path, &parsed.diagnostics)?;
-    let mut program = parsed.program;
+    check(source, path, origin, &parsed.diagnostics)?;
+    let program = parsed.program;
     let semantic = SemanticBuilder::new()
         .with_check_syntax_error(true)
         // The transformer needs enum values worked out to compile `enum`.
         .with_enum_eval(true)
         .build(&program);
-    check(source, path, &semantic.diagnostics)?;
-    check(source, path, &unsupported(&program))?;
+    check(source, path, origin, &semantic.diagnostics)?;
+    check(source, path, origin, &unsupported(&program))?;
+    let scoping = semantic.semantic.into_scoping();
+    Ok((program, scoping))
+}
+
+/// Compiles `source` with oxc, its JSX to React's automatic runtime, or left
+/// alone when `jsx` is `None`. Returns the code and its source map's tokens.
+fn compile_source(
+    source: &str,
+    path: &Path,
+    source_type: SourceType,
+    jsx: Option<Jsx>,
+    origin: Origin,
+) -> Result<(String, Vec<Token>), String> {
+    let allocator = Allocator::default();
+    let (mut program, scoping) = analyze(&allocator, source, path, source_type, origin)?;
     let options = TransformOptions {
         typescript: TypeScriptOptions {
             only_remove_type_imports: true,
             ..TypeScriptOptions::default()
         },
-        jsx: JsxOptions {
-            runtime: JsxRuntime::Automatic,
-            import_source: Some(JSX_IMPORT_SOURCE.to_string()),
-            ..JsxOptions::enable()
+        jsx: match jsx {
+            Some(jsx) => JsxOptions {
+                runtime: JsxRuntime::Automatic,
+                import_source: Some(jsx.import_source().to_string()),
+                ..JsxOptions::enable()
+            },
+            None => JsxOptions::disable(),
         },
         ..TransformOptions::default()
     };
-    let transformed = Transformer::new(&allocator, path, &options)
-        .build_with_scoping(semantic.semantic.into_scoping(), &mut program);
-    check(source, path, &transformed.diagnostics)?;
+    let transformed =
+        Transformer::new(&allocator, path, &options).build_with_scoping(scoping, &mut program);
+    check(source, path, origin, &transformed.diagnostics)?;
     let generated = Codegen::new()
         .with_options(CodegenOptions {
             source_map_path: Some(path.to_path_buf()),
@@ -106,21 +279,22 @@ fn compile_source(source: &str, path: &Path, source_type: SourceType) -> Result<
         })
         .build(&program);
     let code = lone_carriage_returns_to_newlines(generated.code);
-    let positions = generated
+    let tokens = generated
         .map
         .map(|map| {
-            let tokens = map.get_tokens().map(|token| {
-                (
-                    token.get_dst_line(),
-                    token.get_dst_col(),
-                    token.get_src_line(),
-                    token.get_src_col(),
-                )
-            });
-            PositionMap::new(source, &code, tokens)
+            map.get_tokens()
+                .map(|token| {
+                    (
+                        token.get_dst_line(),
+                        token.get_dst_col(),
+                        token.get_src_line(),
+                        token.get_src_col(),
+                    )
+                })
+                .collect()
         })
         .unwrap_or_default();
-    Ok(Compiled { code, positions })
+    Ok((code, tokens))
 }
 
 /// Codegen escapes line breaks in strings, so a lone `\r` can only be left
@@ -141,7 +315,8 @@ fn lone_carriage_returns_to_newlines(code: String) -> String {
     String::from_utf8(bytes).expect("replacing one ASCII byte keeps UTF-8 valid")
 }
 
-fn source_type(path: &Path) -> Result<SourceType, String> {
+/// The syntax an app module's extension gives it.
+pub(crate) fn source_type(path: &Path) -> Result<SourceType, String> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -239,16 +414,60 @@ impl<'a> Visit<'a> for Unsupported {
     }
 }
 
+/// Where the code a `check` reads came from, so its errors point at the
+/// app's source.
+#[derive(Clone, Copy)]
+enum Origin<'a> {
+    /// The code is the app's source.
+    Source,
+    /// Solid's compiler wrote the code from `source`. `to_source` takes a
+    /// line and column in the code to one in `source`, both as oxc counts.
+    Solid {
+        source: &'a str,
+        to_source: &'a dyn Fn(u32, u32) -> Option<(u32, u32)>,
+    },
+}
+
 /// Fails with every error `diagnostics` holds, one per line.
-fn check(source: &str, path: &Path, diagnostics: &[OxcDiagnostic]) -> Result<(), String> {
-    let source_lines = Lines::new(source, LineBreaks::Editor);
-    let errors: Vec<String> = diagnostics
+fn check(
+    code: &str,
+    path: &Path,
+    origin: Origin,
+    diagnostics: &[OxcDiagnostic],
+) -> Result<(), String> {
+    let mut errors = diagnostics
         .iter()
         .filter(|diagnostic| diagnostic.severity == Severity::Error)
+        .peekable();
+    if errors.peek().is_none() {
+        return Ok(());
+    }
+    let code_lines = Lines::new(code, LineBreaks::Editor);
+    // For `Origin::Solid`: the code's lines and the source's, as oxc and as
+    // editors count them.
+    let solid = match origin {
+        Origin::Source => None,
+        Origin::Solid { source, to_source } => Some((
+            Lines::new(code, LineBreaks::Oxc),
+            Lines::new(source, LineBreaks::Oxc),
+            Lines::new(source, LineBreaks::Editor),
+            to_source,
+        )),
+    };
+    let line_column = |offset: u32| {
+        let offset = offset as usize;
+        let in_source = solid.as_ref().and_then(|(code, oxc, editor, to_source)| {
+            let (line, column) = code.line_column(offset);
+            let (line, column) = to_source(line as u32, column as u32)?;
+            Some(editor.line_column(oxc.offset(line as usize, column)?))
+        });
+        in_source.unwrap_or_else(|| code_lines.line_column(offset))
+    };
+    let errors: Vec<String> = errors
         .map(|diagnostic| {
             let labels: &[_] = &diagnostic.labels;
             let at = |offset: u32| {
-                let (line, column) = source_lines.line_column(offset as usize);
+                let (line, column) = line_column(offset);
                 format!("{}:{}:{}", path.display(), line + 1, column + 1)
             };
             let mut text = match labels.first() {
@@ -266,11 +485,7 @@ fn check(source: &str, path: &Path, diagnostics: &[OxcDiagnostic]) -> Result<(),
             text
         })
         .collect();
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("\n"))
-    }
+    Err(errors.join("\n"))
 }
 
 /// Which characters start a new line.
@@ -433,6 +648,54 @@ mod tests {
     use super::*;
 
     const TEXT: &str = "a\r\nb\rc\u{2028}d\ne";
+
+    #[test]
+    fn solids_built_ins_match_the_bun_plugins() {
+        let plugin = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../solid/src/bun-plugin.ts"),
+        )
+        .unwrap();
+        let list = plugin
+            .lines()
+            .find_map(|line| line.strip_prefix("const BUILT_INS = ["))
+            .and_then(|rest| rest.strip_suffix(']'))
+            .expect("bun-plugin.ts declares `const BUILT_INS = [...]` on one line");
+        let names: Vec<&str> = list
+            .split(',')
+            .map(|name| name.trim().trim_matches('"'))
+            .collect();
+        assert_eq!(names, SOLID_BUILT_INS);
+    }
+
+    #[test]
+    fn errors_in_solids_output_point_at_the_source() {
+        // Solid's output's third line came from the source's second as oxc
+        // counts lines, which to an editor is still the first: U+2028
+        // doesn't break a line there.
+        let source = "x\u{2028}y z";
+        let code = "a\nb\nccc";
+        let to_source = |line: u32, column: u32| (line == 2).then_some((1, column));
+        let origin = Origin::Solid {
+            source,
+            to_source: &to_source,
+        };
+        let error = OxcDiagnostic::error("bad").with_label(Span::new(6, 7));
+        let path = Path::new("main.tsx");
+        assert_eq!(
+            check(code, path, origin, std::slice::from_ref(&error)),
+            Err("main.tsx:1:5: bad".to_string())
+        );
+        // Unmapped, a position is the code's own.
+        let unmapped = |_: u32, _: u32| None;
+        let origin = Origin::Solid {
+            source,
+            to_source: &unmapped,
+        };
+        assert_eq!(
+            check(code, path, origin, std::slice::from_ref(&error)),
+            Err("main.tsx:3:3: bad".to_string())
+        );
+    }
 
     #[test]
     fn each_reader_counts_its_own_line_breaks() {

@@ -78,6 +78,7 @@ pub struct BlockTree {
 }
 
 impl BlockTree {
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
     }

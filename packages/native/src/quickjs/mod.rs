@@ -16,7 +16,8 @@
 //!
 //! Apps are ES modules: [`QuickJsRuntime::load_module`] imports the entry
 //! file, and `modules.rs` resolves its imports to app files (compiled by
-//! `compile.rs`) or to the embedded framework bundles.
+//! `compile.rs`, for the framework `framework.rs` picks) or to the embedded
+//! framework bundles.
 //!
 //! A call fails if JS threw into it, a promise job threw, a promise was
 //! rejected with no handler by the time the jobs ran out, or the app called
@@ -44,6 +45,7 @@ use crate::renderer::{apply_batch_to_tree, PathPromptOptions, WindowOptions};
 use crate::retained_tree::RetainedTree;
 
 mod compile;
+mod framework;
 mod modules;
 #[cfg(test)]
 mod tests;
@@ -121,6 +123,8 @@ struct Shared {
     /// Each compiled app module's positions, by module name, for stack
     /// traces.
     positions: RefCell<HashMap<String, compile::PositionMap>>,
+    /// Which framework app files' JSX is for, as worked out so far.
+    frameworks: RefCell<framework::Frameworks>,
     /// The options the app's renderer passed to `init`, once it has.
     window_options: RefCell<Option<WindowOptions>>,
     /// Whether a batch changed the tree since the host last asked.
@@ -245,6 +249,7 @@ impl QuickJsRuntime {
             clock: options.clock,
             console: RefCell::new(options.console),
             positions: RefCell::new(HashMap::new()),
+            frameworks: RefCell::new(framework::Frameworks::default()),
             window_options: RefCell::new(None),
             tree_changed: Cell::new(false),
             entry,

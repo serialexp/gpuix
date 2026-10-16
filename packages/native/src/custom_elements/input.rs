@@ -261,6 +261,7 @@ fn text_editor_bindings(
     bindings
 }
 
+#[cfg(any(test, all(target_arch = "wasm32", target_os = "unknown")))]
 fn browser_platform_is_macos(platform: &str, user_agent: &str) -> bool {
     platform.starts_with("Mac")
         || user_agent.contains("Macintosh")

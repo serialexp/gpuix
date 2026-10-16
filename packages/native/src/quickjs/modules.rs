@@ -1,5 +1,6 @@
 //! How `import` finds modules. A relative or absolute specifier names an app
-//! file on disk, compiled on load by [`compile`]. A bare specifier names one
+//! file on disk, compiled on load by [`compile`], with its JSX for the
+//! framework `framework.rs` picks. A bare specifier names one
 //! of the framework bundles `embedded/build.ts` writes and `build.rs` embeds
 //! (`react`, `@gpuix/react` and the rest). Apps can import nothing else yet.
 //!
@@ -92,7 +93,18 @@ impl Loader for AppLoader {
             }
             let path = Path::new(name);
             let source = read(ctx, name)?;
-            let compiled = compile(&source, path)
+            let jsx = || {
+                self.0.frameworks.borrow_mut().for_file(path, || {
+                    let entry = self.0.entry.as_deref()?;
+                    let source = if entry == name {
+                        source.clone()
+                    } else {
+                        fs::read_to_string(entry).ok()?
+                    };
+                    Some((PathBuf::from(entry), source))
+                })
+            };
+            let compiled = compile(&source, path, jsx)
                 .map_err(|message| throw_whole(ctx, ErrorKind::Syntax, &message))?;
             self.0
                 .positions
