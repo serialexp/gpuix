@@ -13,7 +13,6 @@ import {
 import type {
   ElementType,
   EventHandlerMap,
-  HostProps,
   ImagePixelsOptions,
   MutationRenderer,
   NativeRenderer,
@@ -244,6 +243,9 @@ export function insertHostNode(
   node: HostNode,
   anchor?: HostNode | null
 ): void {
+  // Solid's array reconciler can insert a node before itself; as in the DOM,
+  // that means before its next sibling.
+  if (anchor === node) anchor = getNextSibling(node)
   if (anchor && anchor.parent !== parent) {
     throw new Error("GPUIX Solid anchor is not a child of its parent")
   }
@@ -308,9 +310,4 @@ function isEventHandler(
 
 function isStyle(value: HostPropertyValue): value is StyleDesc {
   return value !== null && typeof value === "object" && !Array.isArray(value)
-}
-
-export type SolidHostProps = HostProps & {
-  children?: unknown
-  ref?: (element: HostElement) => void
 }

@@ -14,9 +14,13 @@ import type {
 } from "@gpuix/native/host"
 import { useGpuix, useGpuixRequired } from "./root.js"
 
+// The observers report the current value as they subscribe, inside the
+// component, which Solid 2.0 allows only for signals that opt in.
+const OBSERVED = { ownedWrite: true } as const
+
 export function createWindowSize(options: ObserverOptions = {}): Accessor<WindowSize> {
   const renderer = useGpuixRequired()
-  const [value, setValue] = createSignal(readWindowSize(renderer))
+  const [value, setValue] = createSignal(readWindowSize(renderer), OBSERVED)
   onCleanup(observeWindowSize(renderer, setValue, options))
   return value
 }
@@ -25,7 +29,7 @@ export function createWindowInsets(
   options: ObserverOptions = {}
 ): Accessor<WindowInsets> {
   const renderer = useGpuixRequired()
-  const [value, setValue] = createSignal(readWindowInsets(renderer))
+  const [value, setValue] = createSignal(readWindowInsets(renderer), OBSERVED)
   onCleanup(observeWindowInsets(renderer, setValue, options))
   return value
 }
@@ -33,7 +37,7 @@ export function createWindowInsets(
 export function createSelectedText(): Accessor<string | null> {
   const context = useGpuix()
   if (!context) throw new Error("createSelectedText must be used inside a GPUIX root")
-  const [value, setValue] = createSignal(context.renderer.getSelectedText?.() ?? null)
+  const [value, setValue] = createSignal(context.renderer.getSelectedText?.() ?? null, OBSERVED)
   onCleanup(context.subscribeSelection(setValue))
   return value
 }

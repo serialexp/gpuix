@@ -1,4 +1,5 @@
-import { createComponent, createContext, useContext, type JSX } from "solid-js"
+import { createComponent, createContext, flush as flushSolid, useContext } from "solid-js"
+import type { JSX } from "./jsx-runtime.js"
 import type { EventPayload } from "@gpuix/native"
 import {
   createMutationQueue,
@@ -10,7 +11,7 @@ import type {
   RendererRootBinding,
   RootEventHandlers,
 } from "@gpuix/native/host"
-import { HostRoot, removeHostNode } from "./host.js"
+import { HostRoot } from "./host.js"
 import { universalRender } from "./universal.js"
 
 export interface GpuixContextValue {
@@ -18,10 +19,11 @@ export interface GpuixContextValue {
   subscribeSelection(callback: (text: string | null) => void): () => void
 }
 
-export const GpuixContext = createContext<GpuixContextValue>()
+// Null outside a root: Solid 2.0 throws for a context with no default.
+export const GpuixContext = createContext<GpuixContextValue | null>(null)
 
 export function useGpuix(): GpuixContextValue | undefined {
-  return useContext(GpuixContext)
+  return useContext(GpuixContext) ?? undefined
 }
 
 export function useGpuixRequired(): NativeRenderer {
@@ -87,6 +89,16 @@ export function createRoot(
       onSelectionChange,
       tabNavigation: rootHandlers.tabNavigation,
       onEvent: rootHandlers.onEvent,
+      // A handler's writes reach the native tree before the event returns, as
+      // a controlled input needs. Native delivers events from its own loop,
+      // never from inside a Solid flush, so this flush is never nested.
+      schedule(dispatch) {
+        try {
+          dispatch()
+        } finally {
+          flushAll()
+        }
+      },
     })
     renderer.setWindowKeyEvents?.(
       // Always on: the Tab and Escape defaults run on the window event.
@@ -106,13 +118,17 @@ export function createRoot(
     binding = undefined
   }
 
-  attach()
   const flush = () => mutations.flushMutations()
+  // Solid 2.0 applies writes on the next microtask; this applies them now.
+  const flushAll = () => {
+    flushSolid()
+    flush()
+  }
+  attach()
   const clear = () => {
+    // Disposing also removes what the render mounted.
     dispose?.()
     dispose = undefined
-    const mounted = container.children.at(0)
-    if (mounted) removeHostNode(container, mounted)
     flush()
     eventHandlers.clear()
   }
@@ -125,7 +141,7 @@ export function createRoot(
         attach()
       }
       dispose = universalRender(
-        () => createComponent(GpuixContext.Provider, {
+        () => createComponent(GpuixContext, {
           value: {
             renderer,
             subscribeSelection(callback) {
@@ -146,21 +162,15 @@ export function createRoot(
       )
       flush()
     },
-    flush,
+    flush: flushAll,
     flushSync(fn) {
       try {
-        return fn()
+        return flushSolid(fn)
       } finally {
         flush()
       }
     },
-    dispatch(event) {
-      try {
-        return state.dispatch(event)
-      } finally {
-        flush()
-      }
-    },
+    dispatch: (event) => state.dispatch(event),
     unmount() {
       clear()
       detach()

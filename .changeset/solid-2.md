@@ -1,0 +1,9 @@
+---
+'@gpuix/solid': minor
+---
+
+`@gpuix/solid` moves to Solid 2.0 (`solid-js` `2.0.0-rc.15`, pinned exactly) and compiles JSX with Solid's own compiler, `@solidjs/compiler`, instead of Babel. Install `solid-js@2.0.0-rc.15`, and move app code with Solid's [migration guide](https://github.com/solidjs/solid/blob/solid-js%402.0.0-rc.15/documentation/solid-2.0/MIGRATION.md): `omit`/`merge` for `splitProps`/`mergeProps`, effects split into a compute and an apply function, `onSettled` for `onMount`, and `<Context value>` for `Context.Provider`.
+
+A signal write now shows up in reads and in the window after Solid's next microtask flush. A native event's handlers flush before `dispatch` returns. In tests, wrap other writes in `flushSync` before asserting. The Bun preload and plugin load Solid's development build, with its checks and warnings, unless `NODE_ENV` is `production`. `@gpuix/solid` re-exports `For`, `Show`, `Switch`, `Match`, `Loading`, `Errored`, `Reveal` and `Repeat`, which compiled JSX imports from it, and exports `ref`/`applyRef` in place of `use`. `GpuixContext` and `PresenceContext` hold `null` outside their providers, since Solid 2.0's `useContext` throws for a context without a default; `useGpuix()` still returns `undefined` there.
+
+Fixes along the way: props a control passes through to its element (`testId`, `style` on a `Tooltip`, `Select` or `Combobox` root, and the rest) and a part's own children (`<Button>{label()}</Button>`) stay live after mount instead of keeping their first value; a `Select` or `Combobox` item that changes `disabled` is registered again; and an `AnimatePresence` child that returns while it's exiting goes back to its normal motion.

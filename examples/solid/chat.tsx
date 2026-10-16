@@ -15,7 +15,6 @@ import {
   createSignal,
   For,
   Show,
-  type JSX,
 } from "solid-js"
 import {
   Button,
@@ -36,6 +35,7 @@ import {
   useGpuix,
   type DialogPopupProps,
   type HostElement,
+  type JSX,
   type StyleDesc,
 } from "@gpuix/solid"
 import iconCompose from "../assets/icons/compose.svg" with { type: "text" }
@@ -1323,12 +1323,14 @@ function Composer(props: {
 }) {
   let composerEl: { id: number } | undefined
   const context = useGpuix()
-  createEffect(() => {
-    props.focusTick
-    const id = composerEl?.id
-    if (id == null) return
-    context?.renderer?.focusElement?.(id)
-  })
+  createEffect(
+    () => props.focusTick,
+    () => {
+      const id = composerEl?.id
+      if (id == null) return
+      context?.renderer?.focusElement?.(id)
+    }
+  )
   const ready = () => props.value.trim().length > 0
   const send = (text: string) => {
     const next = text.trim()
@@ -1648,13 +1650,16 @@ export function ChatApp(propsIn: { turnCount?: number } = {}) {
     setFocusTick((value) => value + 1)
   }
 
-  createEffect(() => {
-    if (tailTick() === 0) return
-    const id = listEl?.id
-    const renderer = context?.renderer
-    if (id == null || !renderer?.scrollToItem) return
-    renderer.scrollToItem(id, Math.max(0, turns().length - 1))
-  })
+  createEffect(
+    () => ({ tick: tailTick(), count: turns().length }),
+    ({ tick, count }) => {
+      if (tick === 0) return
+      const id = listEl?.id
+      const renderer = context?.renderer
+      if (id == null || !renderer?.scrollToItem) return
+      renderer.scrollToItem(id, Math.max(0, count - 1))
+    }
+  )
 
   return (
     <div

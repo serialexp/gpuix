@@ -1,5 +1,5 @@
-import { createRoot as createSolidRoot, type JSX } from "solid-js"
-import { createRenderer } from "solid-js/universal"
+import type { Element } from "solid-js"
+import { createRenderer } from "@solidjs/universal"
 import {
   createHostElement,
   createHostText,
@@ -17,7 +17,17 @@ import {
 } from "./host.js"
 
 const runtime = createRenderer<HostNode | HostParent>({
-  createElement: createHostElement,
+  // The compiler passes props that never change here, not through setProperty.
+  createElement(tag, staticProps) {
+    const element = createHostElement(tag)
+    if (staticProps) {
+      for (const name in staticProps) {
+        const value = staticProps[name]
+        if (isHostPropertyValue(value)) setHostProperty(element, name, value)
+      }
+    }
+    return element
+  },
   createTextNode: createHostText,
   replaceText(node, value) {
     if (!isHostText(node)) throw new TypeError("Expected a GPUIX text node")
@@ -56,11 +66,10 @@ const runtime = createRenderer<HostNode | HostParent>({
   },
 })
 
-export function universalRender(code: () => JSX.Element, root: HostParent): () => void {
-  return createSolidRoot((dispose) => {
-    runtime.insert(root, code())
-    return dispose
-  })
+/** Mount `code` under `root` and flush its first render. Returns a disposer
+ *  that tears the tree down and removes what it mounted. */
+export function universalRender(code: () => Element, root: HostParent): () => void {
+  return runtime.render(code as () => HostNode, root)
 }
 
 export const effect = runtime.effect
@@ -73,4 +82,8 @@ export const insert = runtime.insert
 export const spread = runtime.spread
 export const setProp = runtime.setProp
 export const mergeProps = runtime.mergeProps
-export const use = runtime.use
+export const ref = runtime.ref
+export const applyRef = runtime.applyRef
+
+// The compiler imports its control flow from the renderer module.
+export { Errored, For, Loading, Match, Repeat, Reveal, Show, Switch } from "solid-js"

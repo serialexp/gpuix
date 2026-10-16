@@ -1,8 +1,8 @@
 ---
 $schema: https://holocron.so/frontmatter.json
-title: "Build native GPUI desktop apps with Solid 1"
+title: "Build native GPUI desktop apps with Solid 2"
 sidebarTitle: Solid
-description: "Paint a Solid 1 tree with GPUI. Covers preload, render, primitives, motion, Select, testing, automation, and every @gpuix/solid export."
+description: "Paint a Solid 2 tree with GPUI. Covers preload, render, primitives, motion, Select, testing, automation, and every @gpuix/solid export."
 icon: "lucide:layers"
 prompt: |
   Write the Solid renderer guide from @/packages/solid/, @/README.md,
@@ -16,10 +16,10 @@ prompt: |
   Do not invent APIs. Match Solid names (Select, not Root).
 ---
 
-**`@gpuix/solid`** paints a Solid 1 tree with GPUI. Same host elements, styles, events, and native addon as React. The adapter is Solid. The window is not a web view.
+**`@gpuix/solid`** paints a Solid 2 tree with GPUI. Same host elements, styles, events, and native addon as React. The adapter is Solid. The window is not a web view.
 
 ```diagram
-  bunfig.toml          babel-preset-solid         @gpuix/native
+  bunfig.toml          @solidjs/compiler          @gpuix/native
   preload ──────────►  universal compiler ──────► host mutations ──► GPUI ──► GPU
        │                      │
        ▼                      ▼
@@ -38,10 +38,10 @@ Host elements, styles, events, virtual lists, and native text are the same as Re
 Pin **`@gpuix/solid`** and **`@gpuix/native`** to the same exact version. GPUIX is still pre-1.0. Upgrade them together.
 
 ```bash
-bun add --exact @gpuix/solid @gpuix/native solid-js
+bun add --exact @gpuix/solid @gpuix/native solid-js@2.0.0-rc.15
 ```
 
-The peer range is **`solid-js` `>=1.9 <2`**.
+The peer is **`solid-js` `2.0.0-rc.15`**, pinned exactly until Solid 2.0 is released. Coming from Solid 1? The [Solid 2.0 migration guide](https://github.com/solidjs/solid/blob/solid-js%402.0.0-rc.15/documentation/solid-2.0/MIGRATION.md) covers `omit`/`merge`, split effects, `onSettled`, and contexts as providers.
 
 ### TypeScript
 
@@ -64,7 +64,7 @@ The peer range is **`solid-js` `>=1.9 <2`**.
 
 ### Bun preload
 
-The preload compiles application `.tsx` and `.jsx` for Solid's **universal renderer** and selects the reactive client runtime. Do not add Vite.
+The preload compiles application `.tsx` and `.jsx` with Solid's compiler for its **universal renderer** and selects Solid's client runtime: the **development build**, with Solid's checks and warnings, unless `NODE_ENV` is `production`. Do not add Vite.
 
 ```toml
 preload = ["@gpuix/solid/preload"]
@@ -133,7 +133,7 @@ Desktop `bun --hot` remounts the tree. It does not keep `createSignal` state. Th
 
 ### Production bundle
 
-For **`Bun.build`**, pass the exported plugin. The preload is for `bun app.tsx`. The plugin is for a production build.
+For **`Bun.build`**, pass the exported plugin. The preload is for `bun app.tsx`. The plugin is for a production build. Run the build with **`NODE_ENV=production`** for Solid's production build.
 
 ```ts
 import solidPlugin from '@gpuix/solid/bun-plugin'
@@ -238,7 +238,13 @@ interface Root {
 }
 ```
 
-`flush()` sends the mutation queue to native. **`flushSync(fn)`** runs `fn`, then flushes. It does not wait for GPUI paint. Call `renderer.flush()` in a test to see pixels.
+`flush()` applies pending Solid writes and sends the mutation queue to native. **`flushSync(fn)`** runs `fn`, then flushes. `dispatch(event)` flushes after the handler too. Neither waits for GPUI paint. Call `renderer.flush()` in a test to see pixels.
+
+<Aside>
+<Note>
+Solid 2.0 applies a signal write on its next microtask, not right away: `setCount(1)` then `count()` still reads the old value until Solid flushes. Event handlers flush before they return. Elsewhere, wrap the write in `flushSync` when the next line needs the result.
+</Note>
+</Aside>
 
 ```tsx
 import { createRoot } from '@gpuix/solid'
@@ -550,6 +556,8 @@ interface TestRoot {
 }
 ```
 
+Wrap signal writes made outside an event in **`app.flushSync(() => ...)`** before you assert. Solid 2.0 applies them on a microtask, and the native tree takes the mutations on another.
+
 `createTestRoot()` opens **no window**. It uses the GPU test renderer on macOS and Windows. Linux has no test renderer yet.
 
 <Aside>
@@ -619,12 +627,14 @@ JSX adds Solid **`children`** and **`ref`** on top of `HostProps`.
 
 ## Compiler internals
 
-These exist because **`babel-preset-solid`** targets `@gpuix/solid` as the universal module. Application code does not import them.
+These exist because **`@solidjs/compiler`** targets `@gpuix/solid` as the universal module. Application code does not import them.
 
 ```ts
 createElement, createTextNode, insert, insertNode, setProp,
-spread, memo, effect, createComponent, mergeProps, use
+spread, memo, effect, createComponent, mergeProps, ref, applyRef
 ```
+
+Compiled JSX imports Solid's control flow from the renderer module too, so `@gpuix/solid` re-exports `For`, `Show`, `Switch`, `Match`, `Loading`, `Errored`, `Reveal`, and `Repeat` from `solid-js`. `Portal` and `Dynamic` belong to `@solidjs/web` and don't exist here.
 
 ```ts
 import { jsx, jsxs, Fragment } from '@gpuix/solid/jsx-runtime'

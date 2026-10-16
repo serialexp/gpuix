@@ -51,6 +51,97 @@ describe.skipIf(!hasNativeTestRenderer)("Solid controls", () => {
     expect(value()).toBe("b")
   })
 
+  it("highlights the selected item when it opens", () => {
+    const app = createTestRoot()
+    const highlight = (state: { highlighted: boolean }) => ({
+      height: 28,
+      backgroundColor: state.highlighted ? "#ff0000" : "#000000",
+    })
+    app.render(() => (
+      <Select defaultValue="b">
+        <SelectTrigger testId="trigger" style={{ width: 120, height: 32 }}><text>open</text></SelectTrigger>
+        <SelectContent style={{ width: 120 }}>
+          <SelectItem value="a" testId="a" style={highlight}><text>A</text></SelectItem>
+          <SelectItem value="b" testId="b" style={highlight}><text>B</text></SelectItem>
+        </SelectContent>
+      </Select>
+    ))
+    const colors = () => ["a", "b"].map((id) => app.renderer.findByTestId(id)?.style.backgroundColor)
+    app.renderer.nativeSimulateKeyDown(app.renderer.findByTestId("trigger")!.id, "down")
+    expect(colors()).toEqual(["#000000", "#ff0000"])
+    app.renderer.simulateKeystrokes("down")
+    expect(colors()).toEqual(["#ff0000", "#000000"])
+  })
+
+  it("auto-highlights the first enabled match of what was typed", () => {
+    const [value, setValue] = createSignal<string | string[] | null>(null)
+    const app = createTestRoot()
+    app.render(() => (
+      <Combobox items={["beta", "alpha", "alps"]} value={value()} onValueChange={setValue} autoHighlight defaultOpen>
+        <ComboboxInput testId="input" style={{ width: 180, height: 32 }} />
+        <ComboboxContent>
+          <ComboboxItem value="beta" disabled><text>beta</text></ComboboxItem>
+          <ComboboxItem value="alpha"><text>alpha</text></ComboboxItem>
+          <ComboboxItem value="alps"><text>alps</text></ComboboxItem>
+        </ComboboxContent>
+      </Combobox>
+    ))
+    const input = app.renderer.findByTestId("input")!
+    app.renderer.nativeSimulateKeystrokes(input.id, "a l")
+    app.renderer.nativeSimulateKeystrokes(input.id, "enter")
+    expect(value()).toBe("alpha")
+  })
+
+  it("runs a forwarded handler and the asChild element's own", () => {
+    const log: string[] = []
+    const handlers = { enter: () => log.push("part") }
+    const app = createTestRoot()
+    app.render(() => (
+      <Button asChild onMouseEnter={handlers.enter}>
+        <div testId="target" onMouseEnter={() => log.push("own")} style={{ width: 80, height: 30 }} />
+      </Button>
+    ))
+    const bounds = app.renderer.getElementBounds(app.renderer.findByTestId("target")!.id)!
+    app.renderer.nativeSimulateMouseMove(bounds.x + 10, bounds.y + 10)
+    expect(log).toEqual(["own", "part"])
+  })
+
+  it("keeps a part's bare children live", () => {
+    const [label, setLabel] = createSignal("first")
+    const app = createTestRoot()
+    app.render(() => <Button style={{ width: 80, height: 30 }}>{label()}</Button>)
+    expect(app.renderer.getAllText()).toEqual(["first"])
+    app.flushSync(() => setLabel("second"))
+    expect(app.renderer.getAllText()).toEqual(["second"])
+  })
+
+  it("keeps a root's style live after mount", () => {
+    const [width, setWidth] = createSignal(100)
+    const app = createTestRoot()
+    app.render(() => (
+      <Select testId="root" defaultValue="a" style={{ width: width() }}>
+        <SelectTrigger><text>open</text></SelectTrigger>
+      </Select>
+    ))
+    app.flushSync(() => setWidth(200))
+    expect(app.renderer.findByTestId("root")?.style.width).toBe(200)
+  })
+
+  it("keeps forwarded props live after mount", () => {
+    const [id, setId] = createSignal("first")
+    const app = createTestRoot()
+    app.render(() => (
+      <Tooltip>
+        <TooltipTrigger testId={id()} style={{ width: 100, height: 32 }}><text>hover</text></TooltipTrigger>
+        <TooltipContent><text>help</text></TooltipContent>
+      </Tooltip>
+    ))
+    expect(app.renderer.findByTestId("first")).toBeDefined()
+    app.flushSync(() => setId("second"))
+    expect(app.renderer.findByTestId("first")).toBeUndefined()
+    expect(app.renderer.findByTestId("second")).toBeDefined()
+  })
+
   it("filters and submits a combobox item", () => {
     const [value, setValue] = createSignal<string | string[] | null>(null)
     const app = createTestRoot()

@@ -1,4 +1,15 @@
-import { createComponent, createContext, onCleanup, onMount, useContext, type JSX } from "solid-js"
+import {
+  createComponent,
+  createContext,
+  merge,
+  omit,
+  onSettled,
+  Show,
+  untrack,
+  useContext,
+  type Component,
+} from "solid-js"
+import type { JSX } from "../jsx-runtime.js"
 import type { EventPayload } from "@gpuix/native"
 import { pushDismissLayer } from "@gpuix/native/host"
 import type { DismissLayer, HostProps, KeyEvent, StyleDesc } from "@gpuix/native/host"
@@ -40,7 +51,12 @@ export function floatingRootStyle(style?: StyleDesc): StyleDesc {
   return { display: "flex", position: "relative", alignItems: "start", ...style }
 }
 
-const DismissLayerContext = createContext<DismissLayer>()
+/** `Show` with element children, which createComponent can't pick out of
+ *  the overloads. */
+export const ShowWhen = Show as Component<{ when: boolean; children: JSX.Element }>
+
+// Null outside any layer: Solid 2.0 throws for a context with no default.
+const DismissLayerContext = createContext<DismissLayer | null>(null)
 
 export interface DismissableLayerProps {
   children?: JSX.Element
@@ -62,18 +78,15 @@ export function DismissableLayer(props: DismissableLayerProps): JSX.Element {
   // Read now: Solid has not created this layer's elements yet.
   const previousFocus = renderer.getFocusedElementId?.() ?? null
   const layer: DismissLayer = {
-    parent: useContext(DismissLayerContext),
+    parent: useContext(DismissLayerContext) ?? undefined,
     onEscapeKeyDown: (event) => props.onEscapeKeyDown(event),
     initialFocus: () => props.initialFocus?.() ?? null,
     finalFocus: (previous) => props.finalFocus?.(previous) ?? null,
   }
-  let pop: (() => void) | undefined
-  // After the children exist, so initialFocus can name one of them.
-  onMount(() => {
-    pop = pushDismissLayer(renderer, layer, { previousFocus })
-  })
-  onCleanup(() => pop?.())
-  return createComponent(DismissLayerContext.Provider, {
+  // After the children exist, so initialFocus can name one of them. The
+  // returned pop runs when the layer unmounts.
+  onSettled(() => pushDismissLayer(renderer, layer, { previousFocus }))
+  return createComponent(DismissLayerContext, {
     value: layer,
     get children() { return props.children },
   })
@@ -100,27 +113,24 @@ export function composeHandlers<Event extends EventPayload>(
  */
 export function renderSlot(args: {
   asChild?: boolean
-  children?: JSX.Element
+  /** Read lazily, so pass a getter: children that change stay live. */
+  readonly children?: JSX.Element
   props: Record<string, unknown>
   defaultTabIndex?: number
 }): JSX.Element {
   // Descriptors, not a spread, so reactive getters such as `style` stay live.
   const descriptors = Object.getOwnPropertyDescriptors(args.props)
   const tabIndex = descriptors.tabIndex
-  const child = args.asChild ? args.children : undefined
-  if (args.asChild && !isHostElement(child)) {
-    throw new Error("asChild requires one GPUIX intrinsic element")
-  }
-  const childTabIndex = isHostElement(child) ? child.props.get("tabIndex") : undefined
-  if (args.defaultTabIndex !== undefined || childTabIndex !== undefined) {
-    descriptors.tabIndex = {
-      enumerable: true,
-      configurable: true,
-      get: () => (tabIndex?.get ? tabIndex.get() : tabIndex?.value) ??
-        childTabIndex ?? args.defaultTabIndex,
+  const read = (descriptor: PropertyDescriptor | undefined) =>
+    descriptor?.get ? descriptor.get() : descriptor?.value
+  if (!args.asChild) {
+    if (args.defaultTabIndex !== undefined) {
+      descriptors.tabIndex = {
+        enumerable: true,
+        configurable: true,
+        get: () => read(tabIndex) ?? args.defaultTabIndex,
+      }
     }
-  }
-  if (!isHostElement(child)) {
     descriptors.children = {
       enumerable: true,
       configurable: true,
@@ -128,14 +138,32 @@ export function renderSlot(args: {
     }
     return jsx("div", Object.defineProperties({}, descriptors))
   }
+  // The child is the element itself, made once.
+  const child = untrack(() => args.children)
+  if (!isHostElement(child)) {
+    throw new Error("asChild requires one GPUIX intrinsic element")
+  }
+  const childTabIndex = child.props.get("tabIndex")
+  if (args.defaultTabIndex !== undefined || childTabIndex !== undefined) {
+    descriptors.tabIndex = {
+      enumerable: true,
+      configurable: true,
+      get: () => read(tabIndex) ?? childTabIndex ?? args.defaultTabIndex,
+    }
+  }
   for (const [key, descriptor] of Object.entries(descriptors)) {
     const own = child.props.get(key)
     if (!key.startsWith("on") || typeof own !== "function") continue
-    const slotHandler = descriptor.value
-    if (typeof slotHandler !== "function") continue
-    descriptor.value = (event: EventPayload) => {
-      own(event)
-      slotHandler(event)
+    // A getter too: compiled JSX passes `onX={props.onX}` as one.
+    if (!descriptor.get && typeof descriptor.value !== "function") continue
+    descriptors[key] = {
+      enumerable: true,
+      configurable: true,
+      value: (event: EventPayload) => {
+        own(event)
+        const slotHandler = read(descriptor)
+        if (typeof slotHandler === "function") slotHandler(event)
+      },
     }
   }
   // The child keeps its own children. Without skipChildren, spread would
@@ -146,28 +174,30 @@ export function renderSlot(args: {
 }
 
 export function FloatingLayer(props: FloatingContentProps): JSX.Element {
-  const side = props.side ?? "bottom"
-  const align = props.align ?? "start"
-  const alignOffset = props.alignOffset ?? 0
-  const offset = side === "top" || side === "bottom"
-    ? { x: alignOffset, y: 0 }
-    : { x: 0, y: alignOffset }
+  const side = () => props.side ?? "bottom"
   return jsx("anchored", {
-    side,
-    align,
-    gap: props.sideOffset ?? 0,
-    offset,
+    get side() { return side() },
+    get align() { return props.align ?? "start" },
+    get gap() { return props.sideOffset ?? 0 },
+    get offset() {
+      const alignOffset = props.alignOffset ?? 0
+      return side() === "top" || side() === "bottom"
+        ? { x: alignOffset, y: 0 }
+        : { x: 0, y: alignOffset }
+    },
     fit: "snap",
-    snapMargin: props.collisionPadding ?? 8,
+    get snapMargin() { return props.collisionPadding ?? 8 },
     deferred: true,
     priority: 1,
-    occlude: props.style?.pointerEvents !== "none",
+    get occlude() { return props.style?.pointerEvents !== "none" },
     get children() {
-      return jsx("div", {
-        ...props,
-        style: mergeStyles({ backgroundColor: "#1A1A1A" }, props.style),
-        get children() { return props.children },
-      })
+      return jsx("div", merge(
+        omit(props, "side", "sideOffset", "align", "alignOffset", "collisionPadding", "children"),
+        {
+          get style() { return mergeStyles({ backgroundColor: "#1A1A1A" }, props.style) },
+          get children() { return props.children },
+        }
+      ))
     },
   })
 }

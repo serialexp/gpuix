@@ -3,11 +3,15 @@ import {
   createContext,
   createSignal,
   For,
-  onCleanup,
-  Show,
+  merge,
+  omit,
+  createRenderEffect,
+  untrack,
   useContext,
-  type JSX,
+  type Accessor,
+  type Component,
 } from "solid-js"
+import type { JSX } from "../jsx-runtime.js"
 import type { EventPayload } from "@gpuix/native"
 import type { HostProps, InputProps, KeyEvent } from "@gpuix/native/host"
 import type { HostElement } from "../host.js"
@@ -21,6 +25,7 @@ import {
   type FloatingContentProps,
   type StateStyle,
   DismissableLayer,
+  ShowWhen,
 } from "./floating.js"
 
 export type ComboboxValue = string | string[] | null
@@ -30,8 +35,8 @@ interface ComboContext {
   input(): string
   active(): number | null
   filtered(): string[]
-  disabled: boolean
-  multiple: boolean
+  disabled(): boolean
+  multiple(): boolean
   inputRef: { current: HostElement | null }
   setOpen(value: boolean): void
   setInput(value: string): void
@@ -40,7 +45,15 @@ interface ComboContext {
   select(value: string): void
   registerDisabled(value: string, disabled: boolean): () => void
 }
-const ComboboxContext = createContext<ComboContext>()
+/** `For` with its keyed child shape, which createComponent can't pick out of
+ *  the overloads. */
+const KeyedFor = For as Component<{
+  each: readonly string[]
+  children: (item: string, index: Accessor<number>) => JSX.Element
+}>
+
+// Null outside a Combobox, so the parts can say what they need.
+const ComboboxContext = createContext<ComboContext | null>(null)
 function context(name: string): ComboContext {
   const value = useContext(ComboboxContext)
   if (!value) throw new Error(`${name} must be used inside Combobox`)
@@ -68,22 +81,25 @@ export interface ComboboxProps extends HostProps {
 
 export function Combobox(props: ComboboxProps): JSX.Element {
   const renderer = useGpuixRequired()
-  const [internalValue, setInternalValue] = createSignal<ComboboxValue>(props.defaultValue ?? null)
-  const [internalInput, setInternalInput] = createSignal(props.defaultInputValue ?? "")
-  const [internalOpen, setInternalOpen] = createSignal(props.defaultOpen ?? false)
+  const [internalValue, setInternalValue] = createSignal<ComboboxValue>(
+    untrack(() => props.defaultValue ?? null)
+  )
+  const [internalInput, setInternalInput] = createSignal(untrack(() => props.defaultInputValue ?? ""))
+  const [internalOpen, setInternalOpen] = createSignal(untrack(() => props.defaultOpen ?? false))
   const [active, setActive] = createSignal<number | null>(null)
   const inputRef: { current: HostElement | null } = { current: null }
   const disabledItems = new Set<string>()
   const value = () => props.value === undefined ? internalValue() : props.value
   const input = () => props.inputValue === undefined ? internalInput() : props.inputValue
   const open = () => props.open === undefined ? internalOpen() : props.open
-  const itemToString = props.itemToStringValue ?? ((item: string) => item)
-  const filtered = () => {
-    const query = input().trim().toLowerCase()
+  const itemToString = (item: string) => props.itemToStringValue?.(item) ?? item
+  const filter = (text: string) => {
+    const query = text.trim().toLowerCase()
     if (props.filter === null) return [...(props.items ?? [])]
     if (props.filter) return [...(props.items ?? [])].filter((item) => props.filter!(item, query, itemToString))
     return [...(props.items ?? [])].filter((item) => itemToString(item).toLowerCase().includes(query))
   }
+  const filtered = () => filter(input())
   const setOpen = (next: boolean) => {
     const previous = open()
     if (props.open === undefined) setInternalOpen(next)
@@ -98,7 +114,8 @@ export function Combobox(props: ComboboxProps): JSX.Element {
     const previous = input()
     if (props.inputValue === undefined) setInternalInput(next)
     if (previous !== next) props.onInputValueChange?.(next)
-    const nextItems = filtered()
+    // From `next`: Solid 2.0 shows the write to `input()` only after a flush.
+    const nextItems = filter(props.inputValue === undefined ? next : props.inputValue)
     const firstEnabled = nextItems.findIndex((item) => !disabledItems.has(item))
     setActive(props.autoHighlight && firstEnabled >= 0 ? firstEnabled : null)
   }
@@ -138,8 +155,8 @@ export function Combobox(props: ComboboxProps): JSX.Element {
     input,
     active,
     filtered,
-    disabled: props.disabled ?? false,
-    multiple: props.multiple ?? false,
+    disabled: () => props.disabled ?? false,
+    multiple: () => props.multiple ?? false,
     inputRef,
     setOpen,
     setInput,
@@ -148,17 +165,36 @@ export function Combobox(props: ComboboxProps): JSX.Element {
     select,
     registerDisabled(item, disabled) {
       if (disabled) disabledItems.add(item)
-      return () => disabledItems.delete(item)
+      return () => { disabledItems.delete(item) }
     },
   }
-  return createComponent(ComboboxContext.Provider, {
+  return createComponent(ComboboxContext, {
     value: state,
     get children() {
-      return jsx("div", {
-        ...props,
-        style: floatingRootStyle(props.style),
-        get children() { return props.children },
-      })
+      return jsx("div", merge(
+        omit(
+          props,
+          "items",
+          "value",
+          "defaultValue",
+          "onValueChange",
+          "inputValue",
+          "defaultInputValue",
+          "onInputValueChange",
+          "open",
+          "defaultOpen",
+          "onOpenChange",
+          "multiple",
+          "autoHighlight",
+          "filter",
+          "itemToStringValue",
+          "children"
+        ),
+        {
+          get style() { return floatingRootStyle(props.style) },
+          get children() { return props.children },
+        }
+      ))
     },
   })
 }
@@ -169,9 +205,8 @@ export interface ComboboxInputProps extends InputProps {
 }
 export function ComboboxInput(props: ComboboxInputProps): JSX.Element {
   const state = context("ComboboxInput")
-  const disabled = () => props.disabled ?? state.disabled
-  return jsx("input", {
-    ...props,
+  const disabled = () => props.disabled ?? state.disabled()
+  return jsx("input", merge(props, {
     ref(element: HostElement) {
       state.inputRef.current = element
       props.ref?.(element)
@@ -211,24 +246,23 @@ export function ComboboxInput(props: ComboboxInputProps): JSX.Element {
         if (item !== undefined) state.select(item)
       }
     },
-  })
+  }))
 }
 
 export interface ComboboxTriggerProps extends HostProps { children?: JSX.Element; asChild?: boolean; disabled?: boolean }
 export function ComboboxTrigger(props: ComboboxTriggerProps): JSX.Element {
   const state = context("ComboboxTrigger")
-  const disabled = () => props.disabled ?? state.disabled
+  const disabled = () => props.disabled ?? state.disabled()
   return renderSlot({
     asChild: props.asChild,
-    children: props.children,
-    props: {
-      ...props,
+    get children() { return props.children },
+    props: merge(omit(props, "asChild", "children"), {
       get tabIndex() { return disabled() ? -1 : props.tabIndex },
       onClick(event: EventPayload) {
         props.onClick?.(event)
         if (!disabled()) state.setOpen(!state.open())
       },
-    },
+    }),
     defaultTabIndex: 0,
   })
 }
@@ -239,33 +273,30 @@ export interface ComboboxValueProps extends HostProps {
 }
 export function ComboboxValue(props: ComboboxValueProps): JSX.Element {
   const state = context("ComboboxValue")
-  return jsx("div", {
-    ...props,
+  return jsx("div", merge(omit(props, "placeholder", "children"), {
     get children() {
       if (typeof props.children === "function") return props.children(state.value())
       if (props.children !== undefined) return props.children
       const value = state.value()
       return Array.isArray(value) ? value.join(", ") : (value ?? props.placeholder)
     },
-  })
+  }))
 }
 
 export function ComboboxContent(props: FloatingContentProps): JSX.Element {
   const state = context("ComboboxContent")
-  return createComponent(Show, {
+  return createComponent(ShowWhen, {
     get when() { return state.open() },
-    keyed: true,
     get children() {
       return createComponent(DismissableLayer, {
         onEscapeKeyDown: () => state.setOpen(false),
         get children() {
-          return FloatingLayer({
-            ...props,
-            onMouseDownOutside(event) {
+          return FloatingLayer(merge(props, {
+            onMouseDownOutside(event: EventPayload) {
               props.onMouseDownOutside?.(event)
               state.setOpen(false)
             },
-          })
+          }))
         },
       })
     },
@@ -275,13 +306,13 @@ export function ComboboxContent(props: FloatingContentProps): JSX.Element {
 export interface ComboboxListProps extends HostProps { children?: JSX.Element | ((item: string) => JSX.Element) }
 export function ComboboxList(props: ComboboxListProps): JSX.Element {
   const state = context("ComboboxList")
-  return jsx("div", {
-    ...props,
+  return jsx("div", merge(omit(props, "children"), {
     get children() {
-      if (typeof props.children !== "function") return props.children
-      return createComponent(For, { get each() { return state.filtered() }, children: props.children })
+      const render = props.children
+      if (typeof render !== "function") return render
+      return createComponent(KeyedFor, { get each() { return state.filtered() }, children: render })
     },
-  })
+  }))
 }
 
 export interface ComboboxItemState { selected: boolean; highlighted: boolean; disabled: boolean }
@@ -294,7 +325,10 @@ export interface ComboboxItemProps extends Omit<HostProps, "style"> {
 }
 export function ComboboxItem(props: ComboboxItemProps): JSX.Element {
   const state = context("ComboboxItem")
-  onCleanup(state.registerDisabled(props.value, props.disabled ?? false))
+  createRenderEffect(
+    () => [props.value, props.disabled ?? false] as const,
+    ([value, disabled]) => state.registerDisabled(value, disabled)
+  )
   const itemState = () => ({
     selected: (() => {
       const value = state.value()
@@ -306,8 +340,7 @@ export function ComboboxItem(props: ComboboxItemProps): JSX.Element {
   return renderSlot({
     asChild: props.asChild,
     get children() { return typeof props.children === "function" ? props.children(itemState()) : props.children },
-    props: {
-      ...props,
+    props: merge(omit(props, "asChild", "children"), {
       get style() { return resolveStyle(props.style, itemState()) },
       onMouseEnter(event: EventPayload) {
         props.onMouseEnter?.(event)
@@ -317,15 +350,14 @@ export function ComboboxItem(props: ComboboxItemProps): JSX.Element {
         props.onClick?.(event)
         if (!itemState().disabled) state.select(props.value)
       },
-    },
+    }),
   })
 }
 
 export function ComboboxEmpty(props: HostProps & { children?: JSX.Element }): JSX.Element {
   const state = context("ComboboxEmpty")
-  return createComponent(Show, {
+  return createComponent(ShowWhen, {
     get when() { return state.filtered().length === 0 },
-    keyed: true,
     get children() { return jsx("div", props as Record<string, unknown>) },
   })
 }

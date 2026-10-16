@@ -41,6 +41,18 @@ describe("Solid package consumer", () => {
     expect(result.stdout.toString()).toContain("consumer 2")
   })
 
+  it("runs on Solid's production build with NODE_ENV=production", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "main.tsx"],
+      cwd: fixture,
+      env: { ...process.env, NODE_ENV: "production" },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    expect(result.exitCode, result.stderr.toString()).toBe(0)
+    expect(result.stdout.toString()).toContain("consumer 2")
+  })
+
   it("builds TSX with the exported Bun plugin", async () => {
     const result = await Bun.build({
       entrypoints: [join(fixture, "build-entry.tsx")],
@@ -77,7 +89,7 @@ describe("Solid package consumer", () => {
       dependencies: {
         "@gpuix/native": `file:./${nativeTarball}`,
         "@gpuix/solid": `file:./${solidTarball}`,
-        "solid-js": "1.9.15",
+        "solid-js": "2.0.0-rc.15",
       },
       overrides: {
         "@gpuix/native": `file:./${nativeTarball}`,

@@ -1,15 +1,24 @@
 export {
+  applyRef,
   createComponent,
   createElement,
   createTextNode,
   effect,
+  Errored,
+  For,
   insert,
   insertNode,
+  Loading,
+  Match,
   memo,
   mergeProps,
+  ref,
+  Repeat,
+  Reveal,
   setProp,
+  Show,
   spread,
-  use,
+  Switch,
 } from "./universal.js"
 export { createRoot, GpuixContext, useGpuix, useGpuixRequired } from "./root.js"
 export type { HostElement } from "./host.js"

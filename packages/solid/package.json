@@ -73,7 +73,10 @@
       "default": "./dist/components/floating.js"
     }
   },
-  "files": ["dist", "LICENSE"],
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/remorses/gpuix",
@@ -89,19 +92,17 @@
     "prepublishOnly": "node -e \"if (!process.env.CI) { console.error('Never publish @gpuix/solid locally. CI is the only release path.'); process.exit(1) }\""
   },
   "dependencies": {
-    "@babel/core": "^7.28.0",
-    "@babel/preset-typescript": "^7.27.1",
     "@gpuix/native": "workspace:^",
-    "babel-preset-solid": "1.9.15"
+    "@solidjs/compiler": "2.0.0-rc.15",
+    "@solidjs/universal": "2.0.0-rc.15"
   },
   "peerDependencies": {
-    "solid-js": ">=1.9 <2"
+    "solid-js": "2.0.0-rc.15"
   },
   "devDependencies": {
-    "@types/babel__core": "^7.20.5",
     "@types/bun": "^1.4.0",
     "@types/node": "^25.3.3",
-    "solid-js": "1.9.15",
+    "solid-js": "2.0.0-rc.15",
     "typescript": "^5.3.0",
     "vitest": "^4.0.18"
   }

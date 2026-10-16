@@ -27,7 +27,7 @@ bun run dev
 the running window remounts on save. Click and keyboard handlers switch to the
 new tree without recreating the window.
 
-Using Solid 1 instead? Start with the [Solid quick start](#solid-quick-start).
+Using Solid 2 instead? Start with the [Solid quick start](#solid-quick-start).
 
 ### Build from scratch
 
@@ -536,7 +536,7 @@ Event handlers are stored in a JS-side registry keyed by `(elementId, eventType)
 - **`@gpuix/native/testing`**: the shared `TestRenderer` over the real `TestGpuixRenderer`.
 - **`@gpuix/native/automation`**: the shared automation protocol, client, locators, and process launcher.
 - **`@gpuix/react`**: the React reconciler and React components. It preserves its existing exports and re-exports shared testing, automation, search, and observer APIs.
-- **`@gpuix/solid`**: the Solid 1 universal renderer, Solid primitives, motion, Select, Combobox, Tooltip, Bun preload, and build plugin.
+- **`@gpuix/solid`**: the Solid 2 universal renderer, Solid primitives, motion, Select, Combobox, Tooltip, Bun preload, and build plugin.
 - **`@gpuix/cli`** — `gpuix new` downloads `example-app/`, sets its published React dependency, and installs it as a standalone project.
 
 Pin the selected adapter and `@gpuix/native` to the **same exact version**.
@@ -548,11 +548,13 @@ together.
 Install Solid and the official Solid adapter:
 
 ```bash
-bun add --exact @gpuix/solid @gpuix/native solid-js
+bun add --exact @gpuix/solid @gpuix/native solid-js@2.0.0-rc.15
 ```
 
 Use Solid's preserved JSX. The preload compiles application `.tsx` and `.jsx`
-files for Solid's universal renderer and selects the reactive client runtime.
+files with Solid's compiler (`@solidjs/compiler`) for its universal renderer,
+and selects Solid's client runtime: the development build, with Solid's
+checks and warnings, unless `NODE_ENV` is `production`.
 
 ```json
 {
@@ -598,7 +600,8 @@ bun app.tsx
 bun --hot app.tsx
 ```
 
-For production `Bun.build`, pass the exported plugin:
+For production `Bun.build`, pass the exported plugin, and run the build with
+`NODE_ENV=production` for Solid's production build:
 
 ```ts
 import solidPlugin from '@gpuix/solid/bun-plugin'
@@ -611,7 +614,13 @@ await Bun.build({
 })
 ```
 
-`@gpuix/solid` targets stable Solid 1.9. Its peer range is `>=1.9 <2`.
+`@gpuix/solid` targets Solid 2.0, pinned to `2.0.0-rc.15` until 2.0 is
+released. Solid 2.0 changes how updates apply: a signal write shows up in
+reads and in the window after Solid's next microtask flush, not right away.
+Event handlers flush before they return; in tests, call `flushSync` on the
+test root. The [Solid 2.0 migration guide](https://github.com/solidjs/solid/blob/solid-js%402.0.0-rc.15/documentation/solid-2.0/MIGRATION.md)
+covers the rest (`omit`/`merge`, split effects, `onSettled`, contexts as
+providers).
 
 The full Solid adapter API is in the [Solid guide](./website/src/guides/solid.mdx).
 

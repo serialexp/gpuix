@@ -1,6 +1,7 @@
 /** Headless Base UI-shaped Button: a focusable `div` that acts like `<button>`. */
 
-import { splitProps, type JSX } from "solid-js"
+import { merge, omit } from "solid-js"
+import type { JSX } from "../jsx-runtime.js"
 import type { EventPayload } from "@gpuix/native"
 import type { HostProps, KeyEvent } from "@gpuix/native/host"
 import { renderSlot, resolveStyle, type StateStyle } from "./floating.js"
@@ -59,23 +60,27 @@ export interface ButtonProps
   style?: StateStyle<ButtonState>
 }
 
-export function Button(allProps: ButtonProps): JSX.Element {
-  const [behavior, local, props] = splitProps(
-    allProps,
-    ["disabled", "focusableWhenDisabled", "onClick", "onKeyDown", "onKeyUp", "tabIndex"],
-    ["asChild", "children", "style"]
-  )
-  const button = buttonProps(behavior)
+export function Button(props: ButtonProps): JSX.Element {
   return renderSlot({
-    asChild: local.asChild,
-    children: local.children,
-    props: Object.defineProperties(
-      { ...props },
+    asChild: props.asChild,
+    get children() { return props.children },
+    props: merge(
+      omit(
+        props,
+        "disabled",
+        "focusableWhenDisabled",
+        "onClick",
+        "onKeyDown",
+        "onKeyUp",
+        "tabIndex",
+        "asChild",
+        "children",
+        "style"
+      ),
+      buttonProps(props),
       {
-        ...Object.getOwnPropertyDescriptors(button),
-        style: {
-          enumerable: true,
-          get: () => resolveStyle(local.style, { disabled: behavior.disabled ?? false }),
+        get style() {
+          return resolveStyle(props.style, { disabled: props.disabled ?? false })
         },
       }
     ),

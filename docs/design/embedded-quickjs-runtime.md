@@ -91,6 +91,12 @@ Tracking the gap between this design and what's on the main branch.
   `.node` file built with `bun run build:quickjs`, and skip without one
   (`quickjs-parity.test.tsx`, `feat(native): compare React apps under gpx
   with Node in tests`)
+- [x] Phase 5: `@gpuix/solid`, its components and `examples/solid` on
+  Solid 2.0 (`solid-js`, `@solidjs/universal` and `@solidjs/compiler`
+  pinned to `2.0.0-rc.15`), Node and Bun apps included. The Bun preload and
+  plugin compile with `@solidjs/compiler` and load Solid's development build
+  unless `NODE_ENV` is `production` (`packages/solid/`, `feat(solid)!: move
+  @gpuix/solid to Solid 2.0`)
 
 ### Outstanding
 
@@ -106,8 +112,6 @@ Tracking the gap between this design and what's on the main branch.
 - [ ] Phase 4 follow-up: run the parity tests in CI (deferred: CI builds
   the `.node` file without QuickJS, so they skip there; a `build:quickjs`
   step costs a second release build of the crate)
-- [ ] Phase 5: move `@gpuix/solid` and its components to Solid 2.0 (Node
-  and Bun apps included), compiled with `@solidjs/compiler`
 - [ ] Phase 5: Solid JSX compile for app files with `@solidjs/compiler`'s
   Rust crate in universal mode, pinned to a git revision
 - [ ] Phase 5: embedded `solid-js`, `@solidjs/*` and `@gpuix/solid` bundles,
@@ -192,6 +196,10 @@ apps with no Node or Bun.
 - `@gpuix/solid` compiles JSX with Babel's `babel-preset-solid` in universal
   mode (`packages/solid/src/bun-plugin.ts`). `@gpuix/react` uses
   `jsxImportSource: "@gpuix/react"`.
+
+  > **2026-10-16 update:** `@gpuix/solid` is on Solid 2.0 now and its Bun
+  > plugin compiles with `@solidjs/compiler` (napi) in universal mode; Babel
+  > is gone. See Phasing item 5.
 
 ## Design
 
@@ -451,6 +459,17 @@ JavaScript app loop in `src/quickjs_app.rs`. Details the design left open:
 5. Solid apps end to end, once open question 2 is settled.
 
    > **2026-10-13 update:** this phase starts by moving `@gpuix/solid` to Solid 2.0.
+
+   > **2026-10-16 update:** that move is done, at `2.0.0-rc.15`. Two 2.0
+   > behaviours shaped it. A signal write shows up after Solid's next
+   > microtask flush, so the root flushes Solid after each native event's
+   > handlers (through `createRendererState`'s `schedule` hook, as React's
+   > discrete events do), and components that wrote then read back keep the
+   > truth in plain variables (`AnimatePresence`) or compute from the new
+   > value (`Combobox.setInput`). And `useContext` throws without a
+   > provider, so optional contexts default to `null`. The port also fixed
+   > props that controls copied with `{...props}`, which lost reactivity
+   > under 1.x too.
 6. Hot reload, docs, changeset, benchmarks.
 
 ## Open questions for review
@@ -509,6 +528,9 @@ JavaScript app loop in `src/quickjs_app.rs`. Details the design left open:
    official compiler supports universal mode (README: `generate: "dom"`,
    `"ssr"`, `"universal"` or `"dynamic"`), so solid-jsx-oxc needs no work, and
    nothing is built that 2.0 would replace. Solid 2.0 was at `2.0.0-rc.14`.
+
+   > **2026-10-16 update:** `@gpuix/solid` moved at `2.0.0-rc.15`, the
+   > release current then; the Rust crate pin should match it.
 3. **Which npm packages can apps import?** The embedded bundles cover the
    frameworks. Other packages could be:
    - not supported in the first version (recommended, as for Lua);

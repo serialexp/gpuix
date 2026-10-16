@@ -1,4 +1,4 @@
-import type { JSX } from "solid-js"
+import type { JSX } from "./jsx-runtime.js"
 import { GpuixRenderer, type WindowOptions } from "@gpuix/native"
 import type { NativeRenderer, RootEventHandlers } from "@gpuix/native/host"
 import {

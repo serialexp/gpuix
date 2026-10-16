@@ -25,7 +25,7 @@
   "dependencies": {
     "@gpuix/react": "workspace:^",
     "@gpuix/solid": "workspace:^",
-    "solid-js": "1.9.15",
+    "solid-js": "2.0.0-rc.15",
     "@kmamal/sdl": "^0.11.12",
     "diff": "^7.0.0",
     "react": "^19.2.4",

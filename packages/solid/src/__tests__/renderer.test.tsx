@@ -3,6 +3,10 @@ import { describe, expect, it } from "bun:test"
 import { AnimatePresence, motion } from "../index.js"
 import { createTestRoot, hasNativeTestRenderer } from "../testing.js"
 
+/** Solid 2.0 applies writes on a microtask, and the native tree takes the
+ *  mutations on the next one; a task later both have run. */
+const nextTask = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+
 describe.skipIf(!hasNativeTestRenderer)("Solid renderer", () => {
   it("mounts and applies signal text and property updates", () => {
     const [count, setCount] = createSignal(0)
@@ -24,7 +28,7 @@ describe.skipIf(!hasNativeTestRenderer)("Solid renderer", () => {
     app.render(() => <text>{count()}</text>)
 
     setCount(1)
-    await Promise.resolve()
+    await nextTask()
 
     expect(app.renderer.getAllText()).toEqual(["1"])
   })
@@ -158,6 +162,45 @@ describe.skipIf(!hasNativeTestRenderer)("Solid renderer", () => {
     expect(exits).toBe(1)
   })
 
+  it("skips the first render's enter animations with initial={false}", () => {
+    const [items, setItems] = createSignal(["a"])
+    const app = createTestRoot()
+    app.render(() => (
+      <AnimatePresence initial={false}>
+        <For each={items()}>
+          {(item) => (
+            <motion.div testId={item} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} />
+          )}
+        </For>
+      </AnimatePresence>
+    ))
+    const initial = (id: string) => app.renderer.findByTestId(id)?.customProps?.motion?.initial
+    expect(initial("a")).toBe(false)
+    app.flushSync(() => setItems(["a", "b"]))
+    expect(initial("b")).toEqual({ opacity: 0 })
+  })
+
+  it("brings an exiting child back when it returns before its exit ends", () => {
+    const [visible, setVisible] = createSignal(true)
+    let exits = 0
+    const app = createTestRoot()
+    app.render(() => {
+      // One element that leaves and comes back, not a new one each time.
+      const toast = <div testId="toast" motion={{ animate: { opacity: 1 }, exit: { opacity: 0 } }} />
+      return (
+        <AnimatePresence onExitComplete={() => exits++}>
+          {visible() ? toast : null}
+        </AnimatePresence>
+      )
+    })
+    const toastMotion = () => app.renderer.findByTestId("toast")?.customProps?.motion
+    app.flushSync(() => setVisible(false))
+    expect(toastMotion()).toMatchObject({ isExit: true })
+    app.flushSync(() => setVisible(true))
+    expect(toastMotion()).toMatchObject({ isExit: false, animate: { opacity: 1 } })
+    expect(exits).toBe(0)
+  })
+
   it("ignores stale motion completion targets", async () => {
     const [opacity, setOpacity] = createSignal(0)
     let completions = 0
@@ -173,7 +216,7 @@ describe.skipIf(!hasNativeTestRenderer)("Solid renderer", () => {
     const firstGeneration = Number(target.customProps?.motion?.generation)
 
     setOpacity(1)
-    await Promise.resolve()
+    await nextTask()
     const nextGeneration = Number(
       app.renderer.findByTestId("motion-target")?.customProps?.motion?.generation
     )

@@ -102,7 +102,7 @@ React (TypeScript)  →  napi-rs  →  GPUI (Rust)  →  GPU
 │  └─────────────────────────────────────────────────────────┘   │
 │  ┌─────────────────────────────────────────────────────────┐   │
 │  │  @gpuix/solid (packages/solid)                           │   │
-│  │  - Solid 1 universal renderer and reactive components   │   │
+│  │  - Solid 2 universal renderer and reactive components   │   │
 │  │  - Bun preload and production build plugin              │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                              ↓ JSON                             │
@@ -161,9 +161,12 @@ The native package is ESM-first. Generate `index.js` with
 documented Hermes CJS runtime. Keep both loaders beside the `.node` file.
 
 Solid applications use `jsx: "preserve"`, `jsxImportSource: "@gpuix/solid"`,
-and `@gpuix/solid/preload` in `bunfig.toml`. The preload runs the Solid
-universal compiler and selects Solid's client runtime. Do not add Vite or a
-wrapper CLI.
+and `@gpuix/solid/preload` in `bunfig.toml`. The preload runs Solid's
+compiler (`@solidjs/compiler`) in universal mode and selects Solid's client
+runtime, the development build unless `NODE_ENV` is `production`. Do not add
+Vite or a wrapper CLI. `@gpuix/solid` is on Solid 2.0, pinned to
+`2.0.0-rc.15`: a signal write applies on Solid's next microtask, so Solid
+tests wrap writes in `flushSync` before asserting.
 
 ## Package Structure
 
@@ -205,7 +208,7 @@ gpuix/
 │       │   └── types/
 │       │       └── host.ts     # TypeScript types
 │       └── package.json
-│   └── solid/                  # Solid 1 universal renderer
+│   └── solid/                  # Solid 2 universal renderer
 │       ├── src/                # Host tree, roots, primitives, controls
 │       └── package.json
 │

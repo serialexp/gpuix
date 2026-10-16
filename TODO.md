@@ -45,3 +45,8 @@
   from outside it (`../shared/x.ts`) or a text import (`./notes.md`)
   changes. Watch the files the QuickJS loader actually loaded instead (it
   knows their paths).
+- Errors thrown from Solid TSX under Bun report line numbers in the
+  compiled output, not the source: `@gpuix/solid`'s Bun plugin returns the
+  compiler's code without a source map, and Bun ignored an inline
+  `sourceMappingURL` in plugin output when tried. Find a way to hand Bun
+  the compiler's map (`sourceMap: true` returns one).
