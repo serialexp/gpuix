@@ -8,6 +8,9 @@
     "jsxImportSource": "@gpuix/react",
     "types": ["bun"],
     "strict": true,
+    // gpx keeps every import not marked `type`, so a type imported without
+    // `type` is a typecheck error here instead of a failure at load.
+    "verbatimModuleSyntax": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "noEmit": true

@@ -10,8 +10,8 @@
   derivable impls, elidable lifetimes and more), and `cargo fmt --check`
   reports drift in `custom_elements/img.rs`, `custom_elements/input.rs`,
   `renderer.rs`, `retained_tree.rs`, `test_renderer.rs` and `text/search.rs`.
-  Both predate the QuickJS work and come from upstream code. Neither runs in
-  CI, so they accumulate. Decide whether to fix them here or upstream, then
+  Both predate the QuickJS work and come from upstream code. CI runs the
+  Rust tests but neither check, so they accumulate. Decide whether to fix them here or upstream, then
   add both checks to CI.
 - Offer the quickjs-ng `Map`/`Set` hash fix upstream (rust-js-vm
   `patches/rquickjs-sys-0.14.0-map-hash-mix.diff`, repro in
@@ -25,10 +25,13 @@
   from the current render. Accept staged nodes that a queued structural
   update already claimed, or flush the window's queued updates before its
   next event (`packages/native/src/lua_runtime.rs`, `set_children`).
-- CI runs no Rust tests: `cargo test --lib` in `packages/native` (Lua 5.4,
-  LuaJIT, and `--features quickjs` after `bun run build:embedded`) only runs
-  locally, so the 417 lib tests aren't checked on push. Adding a job means
-  building GPUI on a runner; decide whether that cost is worth it.
+- The `rust-test` CI job runs the native crate's tests on macOS and Linux
+  only. Add Windows once someone checks that the vendored LuaJIT and
+  quickjs-ng build there with MSVC.
+- `examples/` doesn't typecheck (`bunx tsc -p examples --noEmit`: 51
+  errors, mostly "cannot find module" for asset imports in `chat.tsx` and
+  `mail.tsx`, plus missing types for `diff`), and CI never runs it. Fix the
+  errors, then add the typecheck to CI next to the example-app one.
 - QuickJS cuts module names to 64 bytes (`ATOM_GET_STR_BUF_SIZE`) in some
   of its own messages, such as "Could not find export 'x' in module ...",
   and app module names are absolute paths. Show them in full, by a patch or

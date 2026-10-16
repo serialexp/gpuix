@@ -264,6 +264,80 @@ jobs:
         run: bun run build
         working-directory: cli
 
+  # The native crate's own tests: the retained tree, styles, the Lua runtime
+  # on Lua 5.4 and LuaJIT, the QuickJS runtime and the gpx app loop. They run
+  # on GPUI's test platform, so they need no GPU.
+  rust-test:
+    name: rust-test - ${{ matrix.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        host:
+          - macos-latest
+          - ubuntu-latest
+    runs-on: ${{ matrix.host }}
+    defaults:
+      run:
+        working-directory: packages/native
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
+
+      - name: Install Metal toolchain
+        if: runner.os == 'macOS'
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          sudo apt-get update && sudo apt-get install -y \
+            gcc g++ clang \
+            libfontconfig-dev \
+            libwayland-dev \
+            libxkbcommon-x11-dev \
+            libx11-xcb-dev \
+            libssl-dev \
+            libzstd-dev \
+            libvulkan1 \
+            vulkan-validationlayers
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/native/target/
+          key: rust-test-${{ matrix.host }}-cargo-${{ hashFiles('packages/native/Cargo.lock') }}
+          restore-keys: |
+            rust-test-${{ matrix.host }}-cargo-
+
+      - name: Install dependencies
+        working-directory: .
+        run: bun install
+
+      # build.rs embeds these bundles and fails when they are missing or stale.
+      - name: Build the embedded framework bundles
+        run: bun run build:embedded
+
+      # Default features (Lua 5.4) plus QuickJS, and the gpx binary's tests.
+      - name: Test with Lua 5.4 and QuickJS
+        run: cargo test --lib --bin gpx --features quickjs
+
+      - name: Test the Lua runtime on LuaJIT
+        run: cargo test --lib --no-default-features --features test-support,luajit lua
+
   test-windows:
     name: test-windows - ${{ matrix.settings.arch }}
     needs: build
@@ -376,6 +450,7 @@ jobs:
       - build
       - test
       - test-windows
+      - rust-test
     permissions:
       contents: write
       id-token: write
