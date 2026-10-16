@@ -1408,9 +1408,12 @@ impl TestGpuixRenderer {
             width: Some(size.width),
             height: Some(size.height),
         };
-        let (runtime, _window_options) =
-            crate::quickjs_app::start(std::path::Path::new(&entry), size)
-                .map_err(Error::from_reason)?;
+        let (runtime, _window_options) = crate::quickjs_app::start(
+            std::path::Path::new(&entry),
+            size,
+            crate::quickjs::Mode::Production,
+        )
+        .map_err(Error::from_reason)?;
         *self.tree.lock().unwrap() = runtime.with_tree(std::mem::take);
         let (results, prompts) = futures::channel::mpsc::unbounded();
         TEST_STATE.with(|cell| {

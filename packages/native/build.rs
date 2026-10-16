@@ -38,8 +38,16 @@ fn embed_modules() {
         match kind {
             "hash" => recorded = Some(rest),
             "input" => inputs.push(rest),
-            "module" => modules.push(rest.split_once(' ').expect("module <specifier> <file>")),
-            "file" => files.push(rest),
+            "module" => {
+                let (mode, rest) = rest
+                    .split_once(' ')
+                    .expect("module <mode> <specifier> <file>");
+                let (specifier, file) = rest
+                    .split_once(' ')
+                    .expect("module <mode> <specifier> <file>");
+                modules.push((mode, specifier, file));
+            }
+            "file" => files.push(rest.split_once(' ').expect("file <mode> <file>")),
             _ => panic!(
                 "{}: unexpected line {line:?}; {rebuild}",
                 manifest_path.display()
@@ -67,22 +75,27 @@ fn embed_modules() {
         panic!("the embedded framework bundles are stale (built from {recorded}, sources are {expected}); {rebuild}");
     }
 
-    let mut table = String::from("/// Import specifiers and the embedded file each one loads.\n");
-    table.push_str("pub(crate) static MODULES: &[(&str, &str)] = &[\n");
-    for (specifier, file) in &modules {
-        table.push_str(&format!("    ({specifier:?}, {file:?}),\n"));
-    }
-    table.push_str("];\n\n/// Every embedded file, by its path under `embedded/dist/modules`.\n");
-    table.push_str("pub(crate) static FILES: &[(&str, &str)] = &[\n");
-    for file in &files {
-        let path = manifest_dir.join("embedded/dist/modules").join(file);
-        println!("cargo:rerun-if-changed={}", path.display());
+    let mut table = String::new();
+    for (mode, name) in [("production", "PRODUCTION"), ("development", "DEVELOPMENT")] {
         table.push_str(&format!(
-            "    ({file:?}, include_str!({:?})),\n",
-            path.display().to_string()
+            "/// The {mode} builds: import specifiers and the embedded file each one\n\
+             /// loads, and every embedded file, by its path under `embedded/dist/{mode}`.\n\
+             pub(crate) static {name}: Bundle = Bundle {{\n    modules: &[\n"
         ));
+        for (_, specifier, file) in modules.iter().filter(|module| module.0 == mode) {
+            table.push_str(&format!("        ({specifier:?}, {file:?}),\n"));
+        }
+        table.push_str("    ],\n    files: &[\n");
+        for (_, file) in files.iter().filter(|file| file.0 == mode) {
+            let path = manifest_dir.join("embedded/dist").join(mode).join(file);
+            println!("cargo:rerun-if-changed={}", path.display());
+            table.push_str(&format!(
+                "        ({file:?}, include_str!({:?})),\n",
+                path.display().to_string()
+            ));
+        }
+        table.push_str("    ],\n};\n\n");
     }
-    table.push_str("];\n");
     let output = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("embedded_modules.rs");
     fs::write(&output, table)
         .unwrap_or_else(|error| panic!("failed to write {}: {error}", output.display()));

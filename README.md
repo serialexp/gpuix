@@ -3910,15 +3910,26 @@ cargo run --release --manifest-path packages/native/Cargo.toml \
 
 The entry file's extension picks the engine: `.tsx`, `.ts`, `.mts`, `.jsx`,
 `.js` and `.mjs` run in QuickJS, `.lua` and `.luax` in the Lua runtime below.
-`--check` loads the app without opening a window, and `--watch` restarts it
-when a JavaScript or TypeScript file in the entry file's directory changes
-(state is reset; a changed `tsconfig.json` needs a restart). The window uses the options the app passes to `render()`;
-`--title`, `--width` and `--height` beat them. Without a title, the window is
-named after the entry file.
+`--check` loads the app without opening a window. The window uses the options
+the app passes to `render()`; `--title`, `--width` and `--height` beat them.
+Without a title, the window is named after the entry file.
+
+`--watch` updates the app when a JavaScript or TypeScript file in the entry
+file's directory changes, and runs the frameworks' development builds, with
+their warnings and checks. A React app gets Fast Refresh, as under Vite: a
+changed file that exports only components runs again and React
+swaps them in place, keeping their state, unless their hooks changed. A
+changed file that exports anything else also runs again in the files that
+import it, up to files that export only components. A file that fails to
+compile or throws is reported, and the app runs on as it was; the next
+update brings in the rest of that one's changes. When a change reaches the
+entry file, or a Solid app changes, the app starts again in the same window,
+with its state reset. A changed `tsconfig.json` needs a restart.
 
 Apps import their own files, `react`, `@gpuix/react` and its components, or
-`solid-js`, `@gpuix/solid` and its components. Solid runs its production
-build. The nearest `tsconfig.json` (or `jsconfig.json`) above a file picks
+`solid-js`, `@gpuix/solid` and its components. Both run their production
+builds, or their development builds under `--watch`. The nearest
+`tsconfig.json` (or `jsconfig.json`) above a file picks
 which framework its JSX compiles for, by `compilerOptions.jsxImportSource`
 (`@gpuix/solid` or `@gpuix/react`), as TypeScript reads it; a file's own
 `@jsxImportSource` comment isn't read. Without a config, the app is Solid if

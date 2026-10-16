@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use super::compile::{compile, Jsx};
 use super::{
-    ConsoleLevel, Host, QuickJsOptions, QuickJsRuntime, SizeOverride, TreeHost, WindowCall,
+    ConsoleLevel, Host, HotUpdate, Mode, QuickJsOptions, QuickJsRuntime, SizeOverride, TreeHost,
+    WindowCall,
 };
 use crate::element_tree::{EventModifiers, EventPayload};
 use crate::retained_tree::RetainedTree;
@@ -72,16 +73,30 @@ struct App {
 
 impl App {
     fn try_load(source: &str) -> Result<Self, String> {
-        Self::start(|options| QuickJsRuntime::load(&format!("{BATCH}{source}"), "app.js", options))
+        Self::start(Mode::Production, |options| {
+            QuickJsRuntime::load(&format!("{BATCH}{source}"), "app.js", options)
+        })
     }
 
     fn try_load_module(entry: &Path) -> Result<Self, String> {
-        Self::start(|options| QuickJsRuntime::load_module(entry, options))
+        Self::start(Mode::Production, |options| {
+            QuickJsRuntime::load_module(entry, options)
+        })
     }
 
-    /// A runtime from `load`, on a fake clock, with its console captured, a
-    /// fixed environment and a [`TestHost`].
+    /// The app at `entry`, on the frameworks' development builds, as
+    /// `gpx --watch` runs it.
+    fn load_development(entry: &Path) -> Self {
+        Self::start(Mode::Development, |options| {
+            QuickJsRuntime::load_module(entry, options)
+        })
+        .unwrap()
+    }
+
+    /// A runtime from `load` in `mode`, on a fake clock, with its console
+    /// captured, a fixed environment and a [`TestHost`].
     fn start(
+        mode: Mode,
         load: impl FnOnce(QuickJsOptions) -> Result<QuickJsRuntime, String>,
     ) -> Result<Self, String> {
         let time = Rc::new(Cell::new(0.0));
@@ -96,6 +111,7 @@ impl App {
             }),
             env: vec![("GPX_TEST".to_string(), "on".to_string())],
             host: Box::new(host.clone()),
+            mode,
         })?;
         Ok(Self {
             js,
@@ -753,6 +769,7 @@ fn a_panic_in_a_native_function_fails_the_call_even_if_js_catches_it() {
             console: Box::new(|_, _| panic!("the sink broke")),
             env: Vec::new(),
             host: Box::new(TreeHost::default()),
+            mode: Mode::Production,
         },
     )
     .unwrap();
@@ -1011,6 +1028,7 @@ fn typescript_and_jsx_compile_to_plain_javascript() {
     let code = compile(
         "const size: number = 2;\nexport const view = <div style={{ width: size }}>{'hi'}</div>;\n",
         Path::new("view.tsx"),
+        Mode::Production,
         react,
     )
     .unwrap()
@@ -1020,17 +1038,35 @@ fn typescript_and_jsx_compile_to_plain_javascript() {
         "{code}"
     );
     assert!(!code.contains(": number"), "{code}");
-    assert!(compile("export const a = 1 as const;", Path::new("a.mts"), react).is_ok());
+    assert!(compile(
+        "export const a = 1 as const;",
+        Path::new("a.mts"),
+        Mode::Production,
+        react
+    )
+    .is_ok());
     for name in ["a.jsx", "a.js", "a.mjs"] {
-        assert!(compile("export const a = <b />;", Path::new(name), react).is_ok());
+        assert!(compile(
+            "export const a = <b />;",
+            Path::new(name),
+            Mode::Production,
+            react
+        )
+        .is_ok());
     }
     // TypeScript's own `<Type>value` casts stay unambiguous in `.ts`.
-    assert!(compile("export const a = <number>1;", Path::new("a.ts"), react).is_ok());
+    assert!(compile(
+        "export const a = <number>1;",
+        Path::new("a.ts"),
+        Mode::Production,
+        react
+    )
+    .is_ok());
 }
 
 #[test]
 fn what_quickjs_cant_run_fails_the_compile_where_it_is() {
-    let error = |source: &str| match compile(source, Path::new("app.ts"), react) {
+    let error = |source: &str| match compile(source, Path::new("app.ts"), Mode::Production, react) {
         Ok(compiled) => panic!("{source:?} compiled to {}", compiled.code),
         Err(error) => error,
     };
@@ -1066,7 +1102,7 @@ fn what_quickjs_cant_run_fails_the_compile_where_it_is() {
         "abstract class C { abstract accessor x: number }",
         "import type fs = require(\"fs\")",
     ] {
-        if let Err(error) = compile(source, Path::new("ok.ts"), react) {
+        if let Err(error) = compile(source, Path::new("ok.ts"), Mode::Production, react) {
             panic!("{source:?} failed: {error}");
         }
     }
@@ -1083,6 +1119,7 @@ fn imports_stay_unless_marked_as_types() {
         export const value: Shape | Only = used
         "#,
         Path::new("main.ts"),
+        Mode::Production,
         react,
     )
     .unwrap()
@@ -1098,14 +1135,20 @@ fn compile_errors_give_the_file_line_and_column() {
     let error = compile(
         "const a = 1;\nconst b = ;\n",
         Path::new("src/bad.ts"),
+        Mode::Production,
         react,
     )
     .err()
     .unwrap();
     assert!(error.starts_with("src/bad.ts:2:11: "), "{error}");
-    let error = compile("let a = 1;\nlet a = 2;\n", Path::new("twice.ts"), react)
-        .err()
-        .unwrap();
+    let error = compile(
+        "let a = 1;\nlet a = 2;\n",
+        Path::new("twice.ts"),
+        Mode::Production,
+        react,
+    )
+    .err()
+    .unwrap();
     assert_eq!(
         error,
         "twice.ts:1:5: Identifier `a` has already been declared\n  \
@@ -1113,18 +1156,30 @@ fn compile_errors_give_the_file_line_and_column() {
          twice.ts:2:5: It can not be redeclared here"
     );
     for name in ["types.d.ts", "old.cjs", "data.json"] {
-        let error = compile("", Path::new(name), react).err().unwrap();
+        let error = compile("", Path::new(name), Mode::Production, react)
+            .err()
+            .unwrap();
         assert!(error.contains("an app module must be"), "{error}");
     }
     // A byte-order mark isn't a column.
-    let error = compile("\u{FEFF}const b = ;", Path::new("bom.ts"), react)
-        .err()
-        .unwrap();
+    let error = compile(
+        "\u{FEFF}const b = ;",
+        Path::new("bom.ts"),
+        Mode::Production,
+        react,
+    )
+    .err()
+    .unwrap();
     assert!(error.starts_with("bom.ts:1:11: "), "{error}");
     // Columns count UTF-16 code units, as editors do: the emoji is two.
-    let error = compile("const a = \"😀\" + ;", Path::new("e.ts"), react)
-        .err()
-        .unwrap();
+    let error = compile(
+        "const a = \"😀\" + ;",
+        Path::new("e.ts"),
+        Mode::Production,
+        react,
+    )
+    .err()
+    .unwrap();
     assert!(error.starts_with("e.ts:1:18: "), "{error}");
 }
 
@@ -1251,6 +1306,7 @@ fn a_bad_regex_fails_the_compile_where_it_is() {
     let error = compile(
         "type T = number\nconst r = /[z-a]/\n",
         Path::new("re.ts"),
+        Mode::Production,
         react,
     )
     .err()
@@ -1345,7 +1401,7 @@ fn solid_jsx_compiles_to_gpuix_solid_calls() {
     let solid = || Ok(Jsx::Solid);
     let code = compile(
         "const size: number = 2;\nexport const view = () => <div style={{ width: size }}>{count()}</div>;\n",
-        Path::new("view.tsx"),
+        Path::new("view.tsx"), Mode::Production,
         solid,
     )
     .unwrap()
@@ -1354,15 +1410,23 @@ fn solid_jsx_compiles_to_gpuix_solid_calls() {
     assert!(!code.contains("jsx-runtime"), "{code}");
     assert!(!code.contains(": number"), "{code}");
     for name in ["a.jsx", "a.js", "a.mjs"] {
-        let code = compile("export const a = <b />;", Path::new(name), solid)
-            .unwrap()
-            .code;
+        let code = compile(
+            "export const a = <b />;",
+            Path::new(name),
+            Mode::Production,
+            solid,
+        )
+        .unwrap()
+        .code;
         assert!(code.contains(r#"from "@gpuix/solid""#), "{name}: {code}");
     }
     // `.ts` files can't hold JSX, so they don't ask.
-    let code = compile("export const a = <number>1;", Path::new("a.ts"), || {
-        panic!("asked for a .ts file")
-    })
+    let code = compile(
+        "export const a = <number>1;",
+        Path::new("a.ts"),
+        Mode::Production,
+        || panic!("asked for a .ts file"),
+    )
     .unwrap()
     .code;
     assert!(code.contains("export const a = 1"), "{code}");
@@ -1370,6 +1434,7 @@ fn solid_jsx_compiles_to_gpuix_solid_calls() {
     let error = compile(
         "const a = <div>\n  {b(}\n</div>",
         Path::new("bad.tsx"),
+        Mode::Production,
         solid,
     )
     .err()
@@ -2165,4 +2230,540 @@ fn a_path_prompt_before_the_window_opens_is_rejected() {
     )
     .unwrap();
     assert_eq!(output.borrow()[0].1, "Error: the window isn't open yet");
+}
+
+/// A React app whose `Counter` lives in its own file, with what it shows
+/// in `label.ts`.
+fn hot_app() -> AppDir {
+    AppDir::new(&[
+        (
+            "main.tsx",
+            r#"
+            import { render } from "@gpuix/react"
+            import { Counter } from "./counter"
+            render(<Counter />)
+            "#,
+        ),
+        ("label.ts", r#"export const label = "Count""#),
+        ("counter.tsx", &counter_source("", "")),
+    ])
+}
+
+/// `counter.tsx`, showing `prefix` before the label `label.ts` exports.
+fn counter_source(prefix: &str, extra: &str) -> String {
+    format!(
+        r#"
+        import {{ useState }} from "react"
+        import {{ label }} from "./label"
+        export function Counter() {{
+          const [count, setCount] = useState(0)
+          {extra}
+          return (
+            <div testId="counter" onClick={{() => setCount((value) => value + 1)}}>
+              <text>{{`{prefix}${{label}}: ${{count}}`}}</text>
+            </div>
+          )
+        }}
+        "#
+    )
+}
+
+/// Writes `source` to `name` in `dir`, and returns its canonical path.
+fn edit(dir: &AppDir, name: &str, source: &str) -> PathBuf {
+    std::fs::write(dir.path(name), source).unwrap();
+    std::fs::canonicalize(dir.path(name)).unwrap()
+}
+
+fn canonical(dir: &AppDir, name: &str) -> String {
+    std::fs::canonicalize(dir.path(name))
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn a_hot_update_swaps_a_component_and_keeps_its_state() {
+    let dir = hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    let counter = app.test_id("counter");
+    app.click(counter).unwrap();
+    assert_eq!(app.texts(), ["Count: 1"]);
+
+    let changed = edit(&dir, "counter.tsx", &counter_source("New ", ""));
+    let update = app.js.hot_update(&[changed]).unwrap();
+    assert_eq!(
+        update,
+        HotUpdate::Refreshed(vec![canonical(&dir, "counter.tsx")])
+    );
+    app.settle();
+    // New code, same state: a remount would show 0.
+    assert_eq!(app.texts(), ["New Count: 1"]);
+    // The element stayed, and its handler is the new version's.
+    app.click(app.test_id("counter")).unwrap();
+    assert_eq!(app.texts(), ["New Count: 2"]);
+}
+
+#[test]
+fn a_hot_update_runs_a_changed_modules_importers_up_to_a_component_module() {
+    let dir = hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    app.click(app.test_id("counter")).unwrap();
+
+    let changed = edit(&dir, "label.ts", r#"export const label = "Clicks""#);
+    let update = app.js.hot_update(&[changed]).unwrap();
+    assert_eq!(
+        update,
+        HotUpdate::Refreshed(vec![
+            canonical(&dir, "label.ts"),
+            canonical(&dir, "counter.tsx")
+        ])
+    );
+    app.settle();
+    assert_eq!(app.texts(), ["Clicks: 1"]);
+}
+
+#[test]
+fn a_hook_change_remounts_the_component() {
+    let dir = hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    app.click(app.test_id("counter")).unwrap();
+
+    // Another hook changes the component's signature, so React Refresh
+    // remounts it rather than keep state the hooks no longer match.
+    let source = counter_source("", r#"const [other] = useState("x")"#);
+    let changed = edit(&dir, "counter.tsx", &source);
+    assert!(matches!(
+        app.js.hot_update(&[changed]),
+        Ok(HotUpdate::Refreshed(_))
+    ));
+    app.settle();
+    assert_eq!(app.texts(), ["Count: 0"]);
+}
+
+#[test]
+fn a_hot_update_that_reaches_the_entry_needs_a_restart() {
+    let dir = hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    let changed = edit(
+        &dir,
+        "main.tsx",
+        r#"
+        import { render } from "@gpuix/react"
+        import { Counter } from "./counter"
+        render(<Counter />, { title: "Changed" })
+        "#,
+    );
+    let update = app.js.hot_update(&[changed]).unwrap();
+    let HotUpdate::Restart(reason) = update else {
+        panic!("{update:?}");
+    };
+    assert!(reason.contains("the entry file"), "{reason}");
+}
+
+#[test]
+fn a_file_that_fails_to_compile_leaves_the_app_as_it_was() {
+    let dir = hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    app.click(app.test_id("counter")).unwrap();
+
+    let changed = edit(
+        &dir,
+        "counter.tsx",
+        "export function Counter() { return <div> }",
+    );
+    let error = app
+        .js
+        .hot_update(std::slice::from_ref(&changed))
+        .unwrap_err();
+    assert!(
+        error.starts_with(&format!("SyntaxError: {}:1:", changed.display())),
+        "{error}"
+    );
+    app.click(app.test_id("counter")).unwrap();
+    assert_eq!(app.texts(), ["Count: 2"]);
+
+    // Fixed, it updates, and imports get the new version.
+    let changed = edit(&dir, "counter.tsx", &counter_source("Fixed ", ""));
+    assert!(matches!(
+        app.js.hot_update(&[changed]),
+        Ok(HotUpdate::Refreshed(_))
+    ));
+    app.settle();
+    assert_eq!(app.texts(), ["Fixed Count: 2"]);
+}
+
+#[test]
+fn a_file_the_app_never_loaded_changes_nothing() {
+    let dir = hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    let changed = edit(&dir, "notes.ts", "export const notes = 1");
+    assert_eq!(app.js.hot_update(&[changed]), Ok(HotUpdate::Unchanged));
+}
+
+#[test]
+fn a_solid_app_restarts_on_a_change() {
+    let dir = AppDir::new(&[
+        (
+            "main.tsx",
+            r#"
+            import { render } from "@gpuix/solid"
+            import { Label } from "./label"
+            render(() => <Label />)
+            "#,
+        ),
+        ("label.tsx", "export const Label = () => <text>one</text>"),
+    ]);
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    assert_eq!(app.texts(), ["one"]);
+    let changed = edit(
+        &dir,
+        "label.tsx",
+        "export const Label = () => <text>two</text>",
+    );
+    assert!(matches!(
+        app.js.hot_update(&[changed]),
+        Ok(HotUpdate::Restart(_))
+    ));
+}
+
+#[test]
+fn production_builds_restart_on_a_change() {
+    let dir = hot_app();
+    let mut app = App::try_load_module(&dir.path("main.tsx")).unwrap();
+    app.settle();
+    let changed = edit(&dir, "counter.tsx", &counter_source("New ", ""));
+    assert!(matches!(
+        app.js.hot_update(&[changed]),
+        Ok(HotUpdate::Restart(_))
+    ));
+}
+
+#[test]
+fn only_watched_react_apps_compile_for_react_refresh() {
+    let solid = || Ok(Jsx::Solid);
+    let refresh = |path: &str, mode: Mode, jsx: fn() -> Result<Jsx, String>| {
+        let compiled = compile(
+            "export function Label() { return null }",
+            Path::new(path),
+            mode,
+            jsx,
+        )
+        .unwrap();
+        let registers = compiled.code.contains("import.meta.$RefreshReg$");
+        assert_eq!(compiled.refresh, registers, "{}", compiled.code);
+        registers
+    };
+    assert!(refresh("label.tsx", Mode::Development, react));
+    assert!(refresh("label.ts", Mode::Development, react));
+    assert!(!refresh("label.tsx", Mode::Production, react));
+    // A Solid app's `.ts` files aren't React components.
+    assert!(!refresh("label.ts", Mode::Development, solid));
+}
+
+#[test]
+fn a_hot_update_runs_each_module_once_after_what_it_imports() {
+    // `theme.ts` reaches `app.tsx` directly and through `tokens.ts` and
+    // `hooks.ts`: `app.tsx` runs once, with all three new.
+    let dir = AppDir::new(&[
+        (
+            "main.tsx",
+            r#"
+            import { render } from "@gpuix/react"
+            import { App } from "./app"
+            render(<App />)
+            "#,
+        ),
+        (
+            "app.tsx",
+            r#"
+            import { name } from "./theme"
+            import { useColor } from "./hooks"
+            export function App() {
+              return <text>{`${name}/${useColor()}`}</text>
+            }
+            "#,
+        ),
+        (
+            "theme.ts",
+            r#"export const name = "a"; export const color = "red""#,
+        ),
+        (
+            "tokens.ts",
+            r#"import { color } from "./theme"; export const tokens = { color }"#,
+        ),
+        (
+            "hooks.ts",
+            r#"import { tokens } from "./tokens"; export const useColor = () => tokens.color"#,
+        ),
+    ]);
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    assert_eq!(app.texts(), ["a/red"]);
+
+    let changed = edit(
+        &dir,
+        "theme.ts",
+        r#"export const name = "b"; export const color = "blue""#,
+    );
+    let update = app.js.hot_update(&[changed]).unwrap();
+    assert_eq!(
+        update,
+        HotUpdate::Refreshed(
+            ["theme.ts", "app.tsx", "tokens.ts", "hooks.ts"]
+                .map(|name| canonical(&dir, name))
+                .to_vec()
+        )
+    );
+    app.settle();
+    assert_eq!(app.texts(), ["b/blue"]);
+}
+
+#[test]
+fn a_failed_hot_update_keeps_its_other_changes_for_the_next() {
+    let dir = hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    let label = edit(&dir, "label.ts", r#"export const label = "Clicks""#);
+    let counter = edit(
+        &dir,
+        "counter.tsx",
+        "export function Counter() { return <div> }",
+    );
+    assert!(app.js.hot_update(&[label, counter]).is_err());
+    assert_eq!(app.texts(), ["Count: 0"]);
+
+    // Only the fix changes, and `label.ts`'s change comes with it.
+    let counter = edit(&dir, "counter.tsx", &counter_source("", ""));
+    assert_eq!(
+        app.js.hot_update(&[counter]),
+        Ok(HotUpdate::Refreshed(vec![
+            canonical(&dir, "counter.tsx"),
+            canonical(&dir, "label.ts"),
+        ]))
+    );
+    app.settle();
+    assert_eq!(app.texts(), ["Clicks: 0"]);
+}
+
+#[test]
+fn a_module_that_throws_fails_the_hot_update() {
+    let dir = hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    app.click(app.test_id("counter")).unwrap();
+    let source = format!("throw new Error(\"boom\")\n{}", counter_source("New ", ""));
+    let changed = edit(&dir, "counter.tsx", &source);
+    let error = app.js.hot_update(&[changed]).unwrap_err();
+    assert!(error.contains("boom"), "{error}");
+    app.click(app.test_id("counter")).unwrap();
+    assert_eq!(app.texts(), ["Count: 2"]);
+}
+
+#[test]
+fn a_module_nothing_imports_any_more_changes_nothing() {
+    let dir = hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    let source = counter_source("", "").replace(
+        r#"import { label } from "./label""#,
+        "const label = \"Own\"",
+    );
+    let changed = edit(&dir, "counter.tsx", &source);
+    assert!(matches!(
+        app.js.hot_update(&[changed]),
+        Ok(HotUpdate::Refreshed(_))
+    ));
+    let changed = edit(&dir, "label.ts", r#"export const label = "Clicks""#);
+    assert_eq!(app.js.hot_update(&[changed]), Ok(HotUpdate::Unchanged));
+    app.settle();
+    assert_eq!(app.texts(), ["Own: 0"]);
+}
+
+#[test]
+fn removing_a_loaded_file_needs_a_restart() {
+    // The app directory is a temporary one, which on macOS is reached
+    // through a link (/var is /private/var), as the watcher reports it.
+    let dir = hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    std::fs::remove_file(dir.path("label.ts")).unwrap();
+    let update = app.js.hot_update(&[dir.path("label.ts")]).unwrap();
+    let HotUpdate::Restart(reason) = update else {
+        panic!("{update:?}");
+    };
+    assert!(reason.ends_with("label.ts was removed"), "{reason}");
+}
+
+#[test]
+fn a_component_module_that_changes_its_exports_updates_its_importers() {
+    // A new export, even a component, is one `main.tsx` didn't bind.
+    let dir = hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    let source = format!(
+        "{}\nexport function Other() {{ return null }}",
+        counter_source("", "")
+    );
+    let changed = edit(&dir, "counter.tsx", &source);
+    let update = app.js.hot_update(&[changed]).unwrap();
+    let HotUpdate::Restart(reason) = update else {
+        panic!("{update:?}");
+    };
+    assert!(reason.contains("the entry file"), "{reason}");
+}
+
+#[test]
+fn a_text_import_updates_its_importer() {
+    let dir = AppDir::new(&[
+        (
+            "main.tsx",
+            r#"
+            import { render } from "@gpuix/react"
+            import { Label } from "./label"
+            render(<Label />)
+            "#,
+        ),
+        (
+            "label.tsx",
+            r#"
+            import text from "./label.txt" with { type: "text" }
+            export function Label() { return <text>{text}</text> }
+            "#,
+        ),
+        ("label.txt", "one"),
+    ]);
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    let changed = edit(&dir, "label.txt", "two");
+    assert_eq!(
+        app.js.hot_update(&[changed]),
+        Ok(HotUpdate::Refreshed(vec![
+            canonical(&dir, "label.txt"),
+            canonical(&dir, "label.tsx"),
+        ]))
+    );
+    app.settle();
+    assert_eq!(app.texts(), ["two"]);
+}
+
+#[test]
+fn a_solid_apps_plain_typescript_change_restarts_before_it_runs() {
+    let dir = AppDir::new(&[
+        (
+            "main.tsx",
+            r#"
+            import { render } from "@gpuix/solid"
+            import { Label } from "./label"
+            render(() => <text>{Label()}</text>)
+            "#,
+        ),
+        ("label.ts", "export function Label() { return \"one\" }"),
+    ]);
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    let changed = edit(
+        &dir,
+        "label.ts",
+        "console.log(\"ran\")\nexport function Label() { return \"two\" }",
+    );
+    assert!(matches!(
+        app.js.hot_update(&[changed]),
+        Ok(HotUpdate::Restart(_))
+    ));
+    assert!(
+        !app.log().iter().any(|line| line == "ran"),
+        "{:?}",
+        app.log()
+    );
+}
+
+#[test]
+fn a_boundary_that_changes_its_exports_reloads_what_an_earlier_boundary_loaded() {
+    // One save changes `app.tsx` and `button.tsx`. `app.tsx` loads first,
+    // with `utils.ts` as it was, which then has to load again, as
+    // `button.tsx`'s exports changed.
+    let dir = AppDir::new(&[
+        (
+            "main.tsx",
+            r#"
+            import { render } from "@gpuix/react"
+            import { App } from "./app"
+            render(<App />)
+            "#,
+        ),
+        (
+            "app.tsx",
+            r#"
+            import { names } from "./utils"
+            export function App() { return <text>{names()}</text> }
+            "#,
+        ),
+        (
+            "utils.ts",
+            r#"
+            import * as button from "./button"
+            export const names = () => Object.keys(button).join(",")
+            "#,
+        ),
+        ("button.tsx", "export function Button() { return null }"),
+    ]);
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    assert_eq!(app.texts(), ["Button"]);
+
+    let changed_app = edit(
+        &dir,
+        "app.tsx",
+        r#"
+        import { names } from "./utils"
+        export function App() { return <text>{`now ${names()}`}</text> }
+        "#,
+    );
+    let changed_button = edit(
+        &dir,
+        "button.tsx",
+        "export function Button() { return null }\nexport function Extra() { return null }",
+    );
+    assert!(matches!(
+        app.js.hot_update(&[changed_app, changed_button]),
+        Ok(HotUpdate::Refreshed(_))
+    ));
+    app.settle();
+    assert_eq!(app.texts(), ["now Button,Extra"]);
+}
+
+#[test]
+fn a_new_import_that_failed_loads_again_once_fixed() {
+    let dir = hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    std::fs::write(
+        dir.path("note.tsx"),
+        "throw new Error(\"not yet\")\nexport const label = \"Note\"",
+    )
+    .unwrap();
+    let source = counter_source("", "").replace(
+        r#"import { label } from "./label""#,
+        r#"import { label } from "./note""#,
+    );
+    let counter = edit(&dir, "counter.tsx", &source);
+    let error = app.js.hot_update(&[counter]).unwrap_err();
+    assert!(error.contains("not yet"), "{error}");
+
+    // Only `note.tsx` changes; the app watches it, and loads it again.
+    let note = edit(&dir, "note.tsx", r#"export const label = "Noted""#);
+    assert!(matches!(
+        app.js.hot_update(&[note]),
+        Ok(HotUpdate::Refreshed(_))
+    ));
+    app.settle();
+    assert_eq!(app.texts(), ["Noted: 0"]);
 }

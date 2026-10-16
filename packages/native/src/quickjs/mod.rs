@@ -17,7 +17,9 @@
 //! Apps are ES modules: [`QuickJsRuntime::load_module`] imports the entry
 //! file, and `modules.rs` resolves its imports to app files (compiled by
 //! `compile.rs`, for the framework `framework.rs` picks) or to the embedded
-//! framework bundles.
+//! framework bundles. In [`Mode::Development`] those are the frameworks'
+//! development builds, and `hot.rs` updates the app in place when its files
+//! change.
 //!
 //! A call fails if JS threw into it, a promise job threw, a promise was
 //! rejected with no handler by the time the jobs ran out, or the app called
@@ -46,6 +48,7 @@ use crate::retained_tree::RetainedTree;
 
 mod compile;
 mod framework;
+mod hot;
 mod modules;
 #[cfg(test)]
 mod tests;
@@ -54,6 +57,18 @@ mod window;
 pub(crate) use window::{Host, PathPromptResult, SizeOverride, TreeHost, WindowCall};
 
 pub(crate) use compile::EXTENSIONS;
+pub(crate) use hot::HotUpdate;
+
+/// Which builds of the frameworks an app runs with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Mode {
+    /// Their production builds, as `NODE_ENV=production` picks under Node.
+    #[default]
+    Production,
+    /// Their development builds, with their checks and warnings, and React
+    /// Fast Refresh (`gpx --watch`).
+    Development,
+}
 
 const PRELUDE: &str = include_str!("prelude.js");
 
@@ -91,6 +106,7 @@ pub(crate) struct QuickJsOptions {
     pub env: Vec<(String, String)>,
     /// The tree the app's batches change, and the window drawing it.
     pub host: Box<dyn Host>,
+    pub mode: Mode,
 }
 
 impl Default for QuickJsOptions {
@@ -107,6 +123,7 @@ impl Default for QuickJsOptions {
                 })
                 .collect(),
             host: Box::new(TreeHost::default()),
+            mode: Mode::Production,
         }
     }
 }
@@ -125,6 +142,11 @@ struct Shared {
     positions: RefCell<HashMap<String, compile::PositionMap>>,
     /// Which framework app files' JSX is for, as worked out so far.
     frameworks: RefCell<framework::Frameworks>,
+    mode: Mode,
+    /// The app modules loaded, for hot updates.
+    graph: RefCell<hot::Graph>,
+    /// React Refresh, in development.
+    refresh: RefCell<Option<hot::Refresh>>,
     /// The options the app's renderer passed to `init`, once it has.
     window_options: RefCell<Option<WindowOptions>>,
     /// Whether a batch changed the tree since the host last asked.
@@ -185,6 +207,7 @@ impl Drop for QuickJsRuntime {
         // call that unwound may not have. A prompt still open never settles.
         self.shared.rejections.borrow_mut().clear();
         self.shared.prompts.borrow_mut().clear();
+        self.shared.refresh.borrow_mut().take();
     }
 }
 
@@ -221,7 +244,8 @@ impl QuickJsRuntime {
         // Named as the loader will name it, so `import.meta.main` finds it
         // even when `app.js` loads `app.ts`. A missing entry keeps its
         // path, and the import reports it.
-        let module_name = modules::resolve("", entry).unwrap_or_else(|_| entry.to_string());
+        let module_name = modules::resolve(modules::bundle(options.mode), "", entry)
+            .unwrap_or_else(|_| entry.to_string());
         let js = Self::start(options, Some(module_name))?;
         js.call(|ctx, hooks| {
             // The entry runs inside `import`, so its failure is reported
@@ -250,6 +274,9 @@ impl QuickJsRuntime {
             console: RefCell::new(options.console),
             positions: RefCell::new(HashMap::new()),
             frameworks: RefCell::new(framework::Frameworks::default()),
+            mode: options.mode,
+            graph: RefCell::new(hot::Graph::default()),
+            refresh: RefCell::new(None),
             window_options: RefCell::new(None),
             tree_changed: Cell::new(false),
             entry,
@@ -289,6 +316,9 @@ impl QuickJsRuntime {
             runtime,
         };
         js.set_source_position_hook(Rc::as_ptr(&js.shared));
+        if js.shared.mode == Mode::Development {
+            js.install_refresh()?;
+        }
         Ok(js)
     }
 
@@ -321,6 +351,11 @@ impl QuickJsRuntime {
         let json = serde_json::to_string(payload)
             .map_err(|error| format!("cannot encode a {} event: {error}", payload.event_type))?;
         self.call(|ctx, hooks| hooks.dispatch_event.clone().restore(ctx)?.call((json,)))
+    }
+
+    /// The framework builds the app runs with.
+    pub(crate) fn mode(&self) -> Mode {
+        self.shared.mode
     }
 
     /// The window options the app's renderer passed to `init`, once it has:

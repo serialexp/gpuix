@@ -32,17 +32,39 @@ fn source_snapshot(root: &Path, is_source: fn(&Path) -> bool) -> std::io::Result
     Ok(SourceSnapshot(sources))
 }
 
+/// The files added, removed or changed from `before` to `after`.
+fn changed_paths(before: &SourceSnapshot, after: &SourceSnapshot) -> Vec<PathBuf> {
+    let before: std::collections::HashMap<&PathBuf, u64> =
+        before.0.iter().map(|(path, hash)| (path, *hash)).collect();
+    let after_paths: std::collections::HashSet<&PathBuf> =
+        after.0.iter().map(|(path, _)| path).collect();
+    let mut changed: Vec<PathBuf> = after
+        .0
+        .iter()
+        .filter(|(path, hash)| before.get(path) != Some(hash))
+        .map(|(path, _)| path.clone())
+        .chain(
+            before
+                .keys()
+                .filter(|path| !after_paths.contains(*path))
+                .map(|path| (*path).clone()),
+        )
+        .collect();
+    changed.sort_unstable();
+    changed
+}
+
 /// Watch the files in the entry file's directory tree that `is_source`
-/// accepts, outside `node_modules` and dot directories, and send `()`
-/// once they change and then hold still for one poll, so an editor that
-/// writes a file in several steps triggers one reload. Polls every 100 ms
-/// on a thread of its own, which ends when the receiver is dropped.
-/// `log_prefix` names the program in messages.
+/// accepts, outside `node_modules` and dot directories, and send the ones
+/// added, removed or changed once they change and then hold still for one
+/// poll, so an editor that writes a file in several steps triggers one
+/// reload. Polls every 100 ms on a thread of its own, which ends when the
+/// receiver is dropped. `log_prefix` names the program in messages.
 pub(crate) fn watch_sources(
     entry: &Path,
     is_source: fn(&Path) -> bool,
     log_prefix: &'static str,
-) -> futures::channel::mpsc::UnboundedReceiver<()> {
+) -> futures::channel::mpsc::UnboundedReceiver<Vec<PathBuf>> {
     let root = entry_directory(entry);
     let (sender, receiver) = futures::channel::mpsc::unbounded();
     eprintln!("{log_prefix}: watching {}", root.display());
@@ -54,7 +76,7 @@ pub(crate) fn watch_sources(
                 return;
             }
         };
-        let mut pending_reload = false;
+        let mut pending = std::collections::BTreeSet::new();
         loop {
             std::thread::sleep(Duration::from_millis(100));
             if sender.is_closed() {
@@ -71,13 +93,13 @@ pub(crate) fn watch_sources(
                 }
             };
             if current != observed {
+                pending.extend(changed_paths(&observed, &current));
                 observed = current;
-                pending_reload = true;
                 continue;
             }
-            if pending_reload {
-                pending_reload = false;
-                if sender.unbounded_send(()).is_err() {
+            if !pending.is_empty() {
+                let changed = std::mem::take(&mut pending).into_iter().collect();
+                if sender.unbounded_send(changed).is_err() {
                     return;
                 }
             }
@@ -132,6 +154,28 @@ fn collect_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_snapshot_change_names_the_files_added_removed_and_changed() {
+        let snapshot = |files: &[(&str, u64)]| {
+            SourceSnapshot(
+                files
+                    .iter()
+                    .map(|(path, hash)| (PathBuf::from(path), *hash))
+                    .collect(),
+            )
+        };
+        let before = snapshot(&[("a.ts", 1), ("b.ts", 2), ("c.ts", 3)]);
+        let after = snapshot(&[("a.ts", 1), ("b.ts", 20), ("d.ts", 4)]);
+        assert_eq!(
+            changed_paths(&before, &after),
+            [
+                PathBuf::from("b.ts"),
+                PathBuf::from("c.ts"),
+                PathBuf::from("d.ts")
+            ]
+        );
+    }
 
     #[test]
     fn an_entry_is_watched_from_its_directory() {

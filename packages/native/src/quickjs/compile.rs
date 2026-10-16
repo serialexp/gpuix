@@ -14,6 +14,11 @@
 //!
 //! Each compile also returns a [`PositionMap`], which the runtime uses to
 //! put the app's own lines and columns in stack traces.
+//!
+//! In [`Mode::Development`] (`gpx --watch`), React files also get React
+//! Refresh's registrations, as `import.meta.$RefreshReg$` and
+//! `import.meta.$RefreshSig$` calls the loader provides, and Solid's compiler
+//! writes its development output.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
@@ -29,8 +34,12 @@ use oxc::diagnostics::{OxcDiagnostic, Severity};
 use oxc::parser::{ParseOptions, Parser};
 use oxc::semantic::SemanticBuilder;
 use oxc::span::{SourceType, Span};
-use oxc::transformer::{JsxOptions, JsxRuntime, TransformOptions, Transformer, TypeScriptOptions};
+use oxc::transformer::{
+    JsxOptions, JsxRuntime, ReactRefreshOptions, TransformOptions, Transformer, TypeScriptOptions,
+};
 use oxc_sourcemap::SourceMap;
+
+use super::Mode;
 use solidjs_compiler::{CompileOptions, Generate, Syntax};
 
 /// Which framework an app file's JSX is compiled for.
@@ -67,6 +76,9 @@ pub(crate) const EXTENSIONS: [&str; 6] = ["tsx", "ts", "mts", "jsx", "js", "mjs"
 pub(crate) struct Compiled {
     pub code: String,
     pub positions: PositionMap,
+    /// Whether the code registers with React Refresh, through
+    /// `import.meta.$RefreshReg$` and `import.meta.$RefreshSig$`.
+    pub refresh: bool,
 }
 
 /// Compiles one app module to JavaScript. `path` picks the syntax by its
@@ -74,10 +86,12 @@ pub(crate) struct Compiled {
 /// the JSX is for; it is only asked for a file that can hold JSX. Each reads
 /// `path:line:column: message`, followed by an indented line for each place
 /// the error points to that has its own note. Columns count UTF-16 code
-/// units, as editors and Node do.
+/// units, as editors and Node do. `mode` is the framework builds the app
+/// runs with.
 pub(crate) fn compile(
     source: &str,
     path: &Path,
+    mode: Mode,
     jsx: impl FnOnce() -> Result<Jsx, String>,
 ) -> Result<Compiled, String> {
     let source_type = source_type(path)?;
@@ -86,24 +100,34 @@ pub(crate) fn compile(
     // oxc panics on some input it doesn't expect. The loader runs inside a
     // QuickJS callback, which can't unwind, so a panic would abort the app.
     catch_unwind(AssertUnwindSafe(|| {
-        // `.ts` files can't hold JSX, so they skip the question, and Solid's
-        // compiler. A config naming some other JSX source only matters to a
-        // file with JSX in it.
-        let jsx = if source_type.is_jsx() {
-            match jsx() {
-                Ok(jsx) => jsx,
-                Err(error) if has_jsx(source, source_type) => return Err(error),
-                Err(_) => Jsx::React,
-            }
-        } else {
-            Jsx::React
+        // `.ts` files can't hold JSX, so they skip Solid's compiler, and only
+        // ask under `--watch`: one in a React app registers its components
+        // with React Refresh. A config naming some other JSX source only
+        // matters to a file with JSX in it.
+        let development = mode == Mode::Development;
+        let framework = (source_type.is_jsx() || development).then(jsx);
+        let jsx = match framework {
+            Some(Ok(jsx)) if source_type.is_jsx() => jsx,
+            Some(Err(error)) if has_jsx(source, source_type) => return Err(error),
+            _ => Jsx::React,
         };
+        let refresh = development && matches!(framework, Some(Ok(Jsx::React)));
         let (code, tokens) = match jsx {
-            Jsx::Solid => compile_solid(source, path, source_type)?,
-            Jsx::React => compile_source(source, path, source_type, Some(jsx), Origin::Source)?,
+            Jsx::Solid => compile_solid(source, path, source_type, mode)?,
+            Jsx::React => compile_source(
+                source,
+                path,
+                source_type,
+                Some((jsx, refresh)),
+                Origin::Source,
+            )?,
         };
         let positions = PositionMap::new(source, &code, tokens.into_iter());
-        Ok(Compiled { code, positions })
+        Ok(Compiled {
+            code,
+            positions,
+            refresh,
+        })
     }))
     .unwrap_or_else(|panic| {
         let message = panic
@@ -125,6 +149,7 @@ fn compile_solid(
     source: &str,
     path: &Path,
     source_type: SourceType,
+    mode: Mode,
 ) -> Result<(String, Vec<Token>), String> {
     // Solid's compiler reports errors without a position, so the source is
     // checked first, as the React path checks it.
@@ -146,8 +171,8 @@ fn compile_solid(
         syntax: Syntax::Jsx,
         module_name: Jsx::Solid.import_source().to_string(),
         generate: Generate::Universal,
-        // The embedded `solid-js` is its production build.
-        dev: false,
+        // As the embedded `solid-js` build is.
+        dev: mode == Mode::Development,
         source_map: true,
         built_ins: SOLID_BUILT_INS
             .iter()
@@ -244,12 +269,14 @@ fn analyze<'a>(
 }
 
 /// Compiles `source` with oxc, its JSX to React's automatic runtime, or left
-/// alone when `jsx` is `None`. Returns the code and its source map's tokens.
+/// alone when `jsx` is `None`. With `jsx`'s flag set, React components and
+/// hooks also register with React Refresh. Returns the code and its source
+/// map's tokens.
 fn compile_source(
     source: &str,
     path: &Path,
     source_type: SourceType,
-    jsx: Option<Jsx>,
+    jsx: Option<(Jsx, bool)>,
     origin: Origin,
 ) -> Result<(String, Vec<Token>), String> {
     let allocator = Allocator::default();
@@ -260,9 +287,16 @@ fn compile_source(
             ..TypeScriptOptions::default()
         },
         jsx: match jsx {
-            Some(jsx) => JsxOptions {
+            Some((jsx, refresh)) => JsxOptions {
                 runtime: JsxRuntime::Automatic,
                 import_source: Some(jsx.import_source().to_string()),
+                // As `import.meta` calls, so each module gets its own, and
+                // nothing is added that would move the source map's lines.
+                refresh: refresh.then(|| ReactRefreshOptions {
+                    refresh_reg: "import.meta.$RefreshReg$".to_string(),
+                    refresh_sig: "import.meta.$RefreshSig$".to_string(),
+                    ..ReactRefreshOptions::default()
+                }),
                 ..JsxOptions::enable()
             },
             None => JsxOptions::disable(),

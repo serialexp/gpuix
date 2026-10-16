@@ -52,6 +52,12 @@
   around it and fails on any other cycle. Report it to Bun with the small
   reproduction (two entries, `export * from` solid-js and from
   `@solidjs/universal`) and drop the workaround once it's fixed.
+- After a `gpx --watch` hot update, stack traces name the new module
+  versions with their `?hot=N` (`counter.tsx?hot=3:4:7`), which editors
+  don't open as a file link, and the runtime keeps a position map for each
+  version. QuickJS names a module's functions by its module name, so drop
+  the suffix where traces are built (the source-position patch could
+  rewrite the file name too) and free old versions' maps.
 - `gpx` reads a JavaScript app's `tsconfig.json` to pick Solid or React,
   but `--watch` doesn't watch it, so changing `jsxImportSource` takes a
   restart. Add the configs it read to what it watches.

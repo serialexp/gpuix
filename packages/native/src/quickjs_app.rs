@@ -20,7 +20,8 @@ use futures::{FutureExt as _, StreamExt as _};
 
 use crate::element_tree::EventPayload;
 use crate::quickjs::{
-    PathPromptResult, QuickJsOptions, QuickJsRuntime, SizeOverride, TreeHost, WindowCall,
+    HotUpdate, Mode, PathPromptResult, QuickJsOptions, QuickJsRuntime, SizeOverride, TreeHost,
+    WindowCall,
 };
 use crate::quickjs_window::WindowHost;
 use crate::renderer::{init_app, open_main_window, EventCallback, GpuixView, WindowOptions};
@@ -54,14 +55,21 @@ pub fn is_js_source(path: &Path) -> bool {
 /// fails if a module can't be found or compiled, the app throws while it
 /// starts, or it never calls `render()`.
 pub fn check_js_file(path: impl AsRef<Path>) -> Result<(), String> {
-    start(path.as_ref(), SizeOverride::default())?;
+    start(path.as_ref(), SizeOverride::default(), Mode::Production)?;
     Ok(())
 }
 
 /// Runs the app at `path` in a window until the window closes.
 pub fn run_js_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), String> {
     let path = path.as_ref().to_path_buf();
-    let (js, app_window_options) = start(&path, command_line_size(&options))?;
+    // `--watch` runs the frameworks' development builds, for React Fast
+    // Refresh.
+    let mode = if options.watch {
+        Mode::Development
+    } else {
+        Mode::Production
+    };
+    let (js, app_window_options) = start(&path, command_line_size(&options), mode)?;
     let window_options = window_options(app_window_options, &path, &options);
     let startup_error = Rc::new(RefCell::new(None));
     let startup_error_for_app = startup_error.clone();
@@ -99,7 +107,7 @@ pub(crate) fn launch(
     path: PathBuf,
     js: QuickJsRuntime,
     window_options: &WindowOptions,
-    reloads: Option<UnboundedReceiver<()>>,
+    reloads: Option<UnboundedReceiver<Vec<PathBuf>>>,
     cx: &mut gpui::App,
 ) -> Result<(gpui::WindowHandle<GpuixView>, gpui::Task<()>), String> {
     let tree = Arc::new(Mutex::new(js.with_tree(std::mem::take)));
@@ -141,9 +149,11 @@ pub(crate) fn launch(
 pub(crate) fn start(
     path: &Path,
     size: SizeOverride,
+    mode: Mode,
 ) -> Result<(QuickJsRuntime, WindowOptions), String> {
     let options = QuickJsOptions {
         host: Box::new(TreeHost::new(size)),
+        mode,
         ..QuickJsOptions::default()
     };
     let mut js = QuickJsRuntime::load_module(path, options)?;
@@ -209,7 +219,7 @@ enum Wake {
     Event(Option<Box<EventPayload>>),
     PathPrompt(Option<(u64, PathPromptResult)>),
     Timer,
-    SourceChange(Option<()>),
+    SourceChange(Option<Vec<PathBuf>>),
 }
 
 impl RunningApp {
@@ -221,7 +231,7 @@ impl RunningApp {
         pending: Vec<WindowCall>,
         mut events: UnboundedReceiver<EventPayload>,
         mut prompts: UnboundedReceiver<(u64, PathPromptResult)>,
-        mut reloads: Option<UnboundedReceiver<()>>,
+        mut reloads: Option<UnboundedReceiver<Vec<PathBuf>>>,
         cx: &mut gpui::AsyncApp,
     ) {
         self.replay(pending);
@@ -269,10 +279,12 @@ impl RunningApp {
                 // The host holds a sender for as long as the app runs.
                 Wake::PathPrompt(None) => {}
                 Wake::Timer => self.run_timers(),
-                Wake::SourceChange(Some(())) => {
-                    if let Some((reloaded_events, reloaded_prompts)) = self.reload(cx) {
-                        events = reloaded_events;
-                        prompts = reloaded_prompts;
+                Wake::SourceChange(Some(changed)) => {
+                    if self.hot_update(&changed) {
+                        if let Some((reloaded_events, reloaded_prompts)) = self.reload(cx) {
+                            events = reloaded_events;
+                            prompts = reloaded_prompts;
+                        }
                     }
                 }
                 // The watcher stopped; it said why.
@@ -306,6 +318,46 @@ impl RunningApp {
         }
     }
 
+    /// Updates the app in place for the files at `changed`, if it can, and
+    /// says whether it has to start again instead. A file that fails to
+    /// compile or run leaves the app as it was, until the next change.
+    fn hot_update(&mut self, changed: &[PathBuf]) -> bool {
+        match self.js.hot_update(changed) {
+            Ok(HotUpdate::Refreshed(files)) => {
+                let names: Vec<String> = files.iter().map(|file| self.display(file)).collect();
+                eprintln!("gpx: hot updated {}", names.join(", "));
+                false
+            }
+            Ok(HotUpdate::Unchanged) => false,
+            Ok(HotUpdate::Restart(reason)) => {
+                eprintln!("gpx: {reason}, so the app starts again");
+                true
+            }
+            Err(error) => {
+                eprintln!("gpx: hot update failed: {error}");
+                false
+            }
+        }
+    }
+
+    /// `file` relative to the entry file's directory, when it is in it.
+    fn display(&self, file: &str) -> String {
+        let directory = std::fs::canonicalize(&self.path)
+            .ok()
+            .and_then(|entry| entry.parent().map(Path::to_path_buf));
+        directory
+            .and_then(|directory| {
+                Path::new(file)
+                    .strip_prefix(directory)
+                    .ok()
+                    .map(Path::to_path_buf)
+            })
+            .map_or_else(
+                || file.to_string(),
+                |relative| relative.display().to_string(),
+            )
+    }
+
     /// Starts the app again in a new runtime, and swaps it in with a new
     /// view, so nothing the old tree's element ids keyed carries over. The
     /// window and its options stay; the app's state is reset. Returns where
@@ -323,7 +375,7 @@ impl RunningApp {
                 }
             })
             .unwrap_or_default();
-        let js = match start(&self.path, size) {
+        let js = match start(&self.path, size, self.js.mode()) {
             Ok((js, _window_options)) => js,
             Err(error) => {
                 eprintln!("gpx: reload failed: {error}");
@@ -376,7 +428,7 @@ fn yield_now() -> impl std::future::Future<Output = ()> {
     })
 }
 
-fn watch_sources(entry: &Path) -> UnboundedReceiver<()> {
+fn watch_sources(entry: &Path) -> UnboundedReceiver<Vec<PathBuf>> {
     reload::watch_sources(entry, is_js_source, "gpx")
 }
 
@@ -404,6 +456,11 @@ mod tests {
 
         fn write(&self, source: &str) {
             std::fs::write(&self.0, source).unwrap();
+        }
+
+        /// Writes `source` to `name`, next to the entry file.
+        fn write_file(&self, name: &str, source: &str) {
+            std::fs::write(self.0.parent().unwrap().join(name), source).unwrap();
         }
     }
 
@@ -436,19 +493,43 @@ mod tests {
         )
     }
 
+    /// `Counter` in a file of its own, for a hot update to change.
+    fn component(label: &str) -> String {
+        format!(
+            r#"import {{ useState }} from "react"
+            export function Counter() {{
+              const [count, setCount] = useState(0)
+              return (
+                <div testId="button" onClick={{() => setCount(count + 1)}}>
+                  <text testId="count">{{`{label} ${{count}}`}}</text>
+                </div>
+              )
+            }}"#
+        )
+    }
+
+    const COMPONENT_ENTRY: &str = r#"import { render } from "@gpuix/react"
+        import { Counter } from "./counter"
+        render(<Counter />, { title: "Counter", focus: false })"#;
+
     /// An app `launch`ed on a GPUI test app, with a reload channel the test
     /// drives.
     struct Launched {
         cx: gpui::TestAppContext,
         window: gpui::WindowHandle<GpuixView>,
         task: Option<gpui::Task<()>>,
-        reload: UnboundedSender<()>,
+        reload: UnboundedSender<Vec<PathBuf>>,
+        entry: PathBuf,
     }
 
     impl Launched {
         fn new(app: &App) -> Self {
+            Self::in_mode(app, Mode::Production)
+        }
+
+        fn in_mode(app: &App, mode: Mode) -> Self {
             let cx = gpui::TestAppContext::single();
-            let (js, options) = start(&app.0, SizeOverride::default()).unwrap();
+            let (js, options) = start(&app.0, SizeOverride::default(), mode).unwrap();
             let (reload, reloads) = futures::channel::mpsc::unbounded();
             let (window, task) = cx
                 .update(|cx| launch(app.0.clone(), js, &options, Some(reloads), cx))
@@ -458,6 +539,7 @@ mod tests {
                 window,
                 task: Some(task),
                 reload,
+                entry: app.0.clone(),
             }
         }
 
@@ -516,8 +598,23 @@ mod tests {
             self.click_with(&callback, test_id);
         }
 
+        /// Reports that the entry file changed, as the watcher would.
         fn reload(&mut self) {
-            self.reload.unbounded_send(()).unwrap();
+            let name = self
+                .entry
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string();
+            self.changed(&[&name]);
+        }
+
+        /// Reports that the files `names`, next to the entry, changed.
+        fn changed(&mut self, names: &[&str]) {
+            let directory = self.entry.parent().unwrap();
+            let paths = names.iter().map(|name| directory.join(name)).collect();
+            self.reload.unbounded_send(paths).unwrap();
             self.cx.run_until_parked();
         }
 
@@ -637,6 +734,37 @@ mod tests {
         assert_eq!(launched.text("count"), "Clicks 0");
         launched.click("button");
         assert_eq!(launched.text("count"), "Clicks 1");
+    }
+
+    #[test]
+    fn a_watched_app_updates_a_component_in_place() {
+        let app = App::new("main.tsx", COMPONENT_ENTRY);
+        app.write_file("counter.tsx", &component("Count"));
+        let mut launched = Launched::in_mode(&app, Mode::Development);
+        launched.click("button");
+        let callback = launched.callback();
+        app.write_file("counter.tsx", &component("Clicks"));
+        launched.changed(&["counter.tsx"]);
+        assert_eq!(launched.text("count"), "Clicks 1");
+        // The same view: its events still reach the app.
+        launched.click_with(&callback, "button");
+        assert_eq!(launched.text("count"), "Clicks 2");
+    }
+
+    #[test]
+    fn a_watched_app_starts_again_when_its_entry_changes() {
+        let app = App::new("main.tsx", COMPONENT_ENTRY);
+        app.write_file("counter.tsx", &component("Count"));
+        let mut launched = Launched::in_mode(&app, Mode::Development);
+        launched.click("button");
+        app.write(&format!(
+            "{COMPONENT_ENTRY}
+// changed"
+        ));
+        launched.reload();
+        assert_eq!(launched.text("count"), "Count 0");
+        launched.click("button");
+        assert_eq!(launched.text("count"), "Count 1");
     }
 
     #[test]

@@ -4,14 +4,21 @@
 //
 //     bun run build:embedded      # from packages/native
 //
-// One build with code splitting covers every module an app can import, so
-// each package is in the output once. React and Solid each have a single
-// copy, the one `@gpuix/react` or `@gpuix/solid` resolves. Each entry is named after its import specifier
-// (`dist/modules/@gpuix/react.js`); shared code goes to `chunk-*.js`.
+// It writes two sets. `dist/production/` has the frameworks' production
+// builds, which `gpx` runs apps with. `dist/development/` has their
+// development builds and `react-refresh/runtime`, for `gpx --watch`: React
+// Fast Refresh needs React's development build.
 //
-// `dist/manifest.txt` lists the modules and every file the build read, with
-// a hash of them. `build.rs` checks the hash when the `quickjs` feature is
-// on, so a stale bundle fails the build instead of being embedded.
+// In each set, one build with code splitting covers every module an app can
+// import, so each package is in the output once. React and Solid each have a
+// single copy, the one `@gpuix/react` or `@gpuix/solid` resolves. Each entry
+// is named after its import specifier (`@gpuix/react.js`); shared code goes
+// to `chunk-*.js`.
+//
+// `dist/manifest.txt` lists both sets' modules and every file the builds
+// read, with a hash of them. `build.rs` checks the hash when the `quickjs`
+// feature is on, so a stale bundle fails the build instead of being
+// embedded.
 
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs"
 import { createRequire } from "node:module"
@@ -22,8 +29,8 @@ const NATIVE = dirname(import.meta.dir)
 const REACT = join(NATIVE, "../react")
 const SOLID = join(NATIVE, "../solid")
 const DIST = join(NATIVE, "embedded/dist")
-const ENTRIES = join(DIST, ".entries")
-const MODULES = join(DIST, "modules")
+const MODES = ["production", "development"] as const
+type Mode = (typeof MODES)[number]
 
 // Paths in the manifest, and in Bun's metafile, are relative to the package,
 // with forward slashes on every platform.
@@ -34,13 +41,13 @@ const portable = (path: string) => path.split(sep).join("/")
 const SKIPPED_SUBPATHS = new Set(["./testing", "./automation", "./preload", "./bun-plugin"])
 
 /** Every module an app can import, by specifier, with its entry source. */
-const entries = new Map<string, string>()
+type Entries = Map<string, string>
 
 // React is CommonJS. An ES module can only export names it knows when it is
-// built, so the entry lists them, read from React's production build.
-function commonJsEntry(specifier: string, productionFile: string): void {
+// built, so the entry lists them, read from `file`, one of its builds.
+function commonJsEntry(entries: Entries, specifier: string, file: string): void {
   const resolved = Bun.resolveSync(specifier, REACT)
-  const exports = createRequire(resolved)(join(dirname(resolved), productionFile))
+  const exports = createRequire(resolved)(join(dirname(resolved), file))
   const names = Object.keys(exports)
     .filter((name) => name !== "default" && /^[A-Za-z_$][\w$]*$/.test(name))
     .sort()
@@ -69,7 +76,7 @@ function scanner(file: string): Bun.Transpiler {
   return scanner
 }
 
-function reexportEntry(specifier: string, file: string): void {
+function reexportEntry(entries: Entries, specifier: string, file: string): void {
   const path = JSON.stringify(file)
   const hasDefault = scanner(file).scan(readFileSync(file, "utf8")).exports.includes("default")
   entries.set(
@@ -78,11 +85,11 @@ function reexportEntry(specifier: string, file: string): void {
   )
 }
 
-/** The production client build of an ES module package the package in
- *  `from` depends on, as its `exports` name it for browsers, and its
- *  manifest. Bun's own resolver would pick the `bun` or `node` condition,
- *  Solid's server build. */
-function clientBuild(name: string, from: string): { file: string; manifest: string } {
+/** The client build of an ES module package the package in `from` depends
+ *  on, as its `exports` name it for browsers, in `mode`, and its manifest.
+ *  Bun's own resolver would pick the `bun` or `node` condition, Solid's
+ *  server build. */
+function clientBuild(name: string, from: string, mode: Mode): { file: string; manifest: string } {
   let directory = from
   while (!existsSync(join(directory, "node_modules", name))) {
     if (dirname(directory) === directory) throw new Error(`Cannot find ${name} from ${from}`)
@@ -93,15 +100,14 @@ function clientBuild(name: string, from: string): { file: string; manifest: stri
   let target: unknown = JSON.parse(readFileSync(manifest, "utf8")).exports["."]
   while (typeof target === "object" && target !== null) {
     const conditions = target as Record<string, unknown>
-    target = conditions.browser ?? conditions.default
+    target = conditions.browser
+      ?? (mode === "development" ? conditions.development : undefined)
+      ?? conditions.default
   }
   if (typeof target !== "string") throw new Error(`No client build for ${name}`)
   return { file: join(packageDir, target), manifest }
 }
 
-const SOLID_JS = clientBuild("solid-js", SOLID)
-const SOLID_UNIVERSAL = clientBuild("@solidjs/universal", SOLID)
-const SOLID_SIGNALS = clientBuild("@solidjs/signals", dirname(SOLID_JS.manifest))
 
 /** A package's `dist/*.js` export, as the TypeScript source it is built from. */
 function sourceOf(packageDir: string, sourceDir: string, target: string): string {
@@ -113,102 +119,21 @@ function sourceOf(packageDir: string, sourceDir: string, target: string): string
   throw new Error(`No source for ${target} in ${packageDir}`)
 }
 
-function packageEntries(name: string, packageDir: string, sourceDir: string): void {
+function packageEntries(entries: Entries, name: string, packageDir: string, sourceDir: string): void {
   const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"))
   for (const [subpath, target] of Object.entries<{ import: string }>(manifest.exports)) {
     if (SKIPPED_SUBPATHS.has(subpath)) continue
     const specifier = subpath === "." ? name : `${name}/${subpath.slice(2)}`
     if (specifier === "@gpuix/native") {
-      reexportEntry(specifier, join(NATIVE, "embedded/native.ts"))
+      reexportEntry(entries, specifier, join(NATIVE, "embedded/native.ts"))
     } else {
-      reexportEntry(specifier, sourceOf(packageDir, sourceDir, target.import))
+      reexportEntry(entries, specifier, sourceOf(packageDir, sourceDir, target.import))
     }
   }
 }
 
-commonJsEntry("react", "cjs/react.production.js")
-commonJsEntry("react/jsx-runtime", "cjs/react-jsx-runtime.production.js")
-packageEntries("@gpuix/react", REACT, "src")
-reexportEntry("solid-js", SOLID_JS.file)
-packageEntries("@gpuix/solid", SOLID, "src")
-packageEntries("@gpuix/native", NATIVE, "js")
-
-const plugin: BunPlugin = {
-  name: "gpuix-embedded",
-  setup(build) {
-    // One React for everything: the copy `@gpuix/react` is built against.
-    build.onResolve({ filter: /^(react|react-reconciler)(\/.*)?$/ }, ({ path }) => ({
-      path: Bun.resolveSync(path, REACT),
-    }))
-    // One Solid: the client build `@gpuix/solid` is built against.
-    build.onResolve({ filter: /^solid-js$/ }, () => ({ path: SOLID_JS.file }))
-    build.onResolve({ filter: /^@solidjs\/universal$/ }, () => ({ path: SOLID_UNIVERSAL.file }))
-    build.onResolve({ filter: /^@solidjs\/signals$/ }, () => ({ path: SIGNALS }))
-    build.onResolve({ filter: /^\.\/automation\/client\.js$|^@gpuix\/native\/automation$/ }, () => ({
-      path: join(NATIVE, "embedded/automation.ts"),
-    }))
-    build.onResolve({ filter: /^@gpuix\/native$/ }, () => ({
-      path: join(NATIVE, "embedded/native.ts"),
-    }))
-    // The TypeScript sources, so the bundle doesn't depend on `build:js`.
-    build.onResolve({ filter: /^@gpuix\/native\/.+$/ }, ({ path }) => {
-      const subpath = path.slice("@gpuix/native/".length)
-      const file = join(NATIVE, "js", `${subpath}.ts`)
-      return { path: existsSync(file) ? file : join(NATIVE, "js", subpath, "index.ts") }
-    })
-  },
-}
-
-rmSync(DIST, { recursive: true, force: true })
-
-// Bun 1.4.0's code splitting can run the modules of an import cycle in the
-// wrong order once two entries share them: `@solidjs/signals`' core.js ran
-// before scheduler.js, which it imports and which imports it, and failed on
-// a class scheduler.js hadn't defined yet. Without splitting Bun keeps
-// their order, so signals is built alone first, into one module with no
-// cycle left, and the main build takes that. `checkCycles` below fails the
-// build if another cycle turns up.
-const SIGNALS = join(DIST, ".signals/signals.js")
-const signals = await Bun.build({
-  entrypoints: [SOLID_SIGNALS.file],
-  outdir: dirname(SIGNALS),
-  naming: "signals.js",
-  target: "browser",
-  format: "esm",
-  define: { "process.env.NODE_ENV": '"production"' },
-  metafile: true,
-})
-if (!signals.success) {
-  for (const message of signals.logs) console.error(message)
-  process.exit(1)
-}
-
-const entryFiles: string[] = []
-for (const [specifier, source] of entries) {
-  const file = join(ENTRIES, `${specifier}.js`)
-  await Bun.write(file, source)
-  entryFiles.push(file)
-}
-
-const result = await Bun.build({
-  entrypoints: entryFiles,
-  root: ENTRIES,
-  outdir: MODULES,
-  target: "browser",
-  format: "esm",
-  splitting: true,
-  naming: { entry: "[dir]/[name].[ext]", chunk: "chunk-[hash].[ext]" },
-  define: { "process.env.NODE_ENV": '"production"' },
-  metafile: true,
-  plugins: [plugin],
-})
-if (!result.success) {
-  for (const message of result.logs) console.error(message)
-  process.exit(1)
-}
-
 /** Fails the build on an import cycle among the modules it bundled, which
- *  code splitting may run in the wrong order (see SIGNALS above). */
+ *  code splitting may run in the wrong order (see `signals` below). */
 function checkCycles(inputs: Record<string, { imports: { path: string }[] }>): void {
   const state = new Map<string, "open" | "done">()
   const stack: string[] = []
@@ -229,16 +154,140 @@ function checkCycles(inputs: Record<string, { imports: { path: string }[] }>): v
   }
   for (const path of Object.keys(inputs)) if (!state.has(path)) visit(path)
 }
-checkCycles(result.metafile!.inputs)
 
-// Besides the sources, the build reads the package manifests (exports) and
-// the tsconfig files Bun takes JSX settings from. The generated entries and
-// signals module stand for the sources they were made from.
-const generated = [ENTRIES, dirname(SIGNALS)].map((dir) => `${portable(relative(NATIVE, dir))}/`)
-const inputs = [...Object.keys(result.metafile!.inputs), ...Object.keys(signals.metafile!.inputs)]
-  .map(portable)
-  .filter((path) => !generated.some((dir) => path.startsWith(dir)))
-  .concat(
+/** What one set's build made and read. */
+interface Built {
+  mode: Mode
+  entries: Entries
+  /** The output files, relative to the set's directory. */
+  files: string[]
+  /** The files the build read, relative to the package. */
+  inputs: string[]
+  /** The package manifests it took client builds from. */
+  manifests: string[]
+  bytes: number
+}
+
+async function buildSet(mode: Mode): Promise<Built> {
+  const out = join(DIST, mode)
+  const entriesDir = join(DIST, `.entries-${mode}`)
+  const define = { "process.env.NODE_ENV": JSON.stringify(mode) }
+  const solidJs = clientBuild("solid-js", SOLID, mode)
+  const solidUniversal = clientBuild("@solidjs/universal", SOLID, mode)
+  const solidSignals = clientBuild("@solidjs/signals", dirname(solidJs.manifest), mode)
+
+  const entries: Entries = new Map()
+  commonJsEntry(entries, "react", `cjs/react.${mode}.js`)
+  commonJsEntry(entries, "react/jsx-runtime", `cjs/react-jsx-runtime.${mode}.js`)
+  if (mode === "development") {
+    // Throws in its production build, so only `gpx --watch` has it.
+    commonJsEntry(entries, "react-refresh/runtime", "cjs/react-refresh-runtime.development.js")
+  }
+  packageEntries(entries, "@gpuix/react", REACT, "src")
+  reexportEntry(entries, "solid-js", solidJs.file)
+  packageEntries(entries, "@gpuix/solid", SOLID, "src")
+  packageEntries(entries, "@gpuix/native", NATIVE, "js")
+
+  // Bun 1.4.0's code splitting can run the modules of an import cycle in the
+  // wrong order once two entries share them: `@solidjs/signals`' core.js ran
+  // before scheduler.js, which it imports and which imports it, and failed on
+  // a class scheduler.js hadn't defined yet. Without splitting Bun keeps
+  // their order, so signals is built alone first, into one module with no
+  // cycle left, and the main build takes that. `checkCycles` fails the
+  // build if another cycle turns up.
+  const signalsFile = join(DIST, `.signals-${mode}/signals.js`)
+  const signals = await Bun.build({
+    entrypoints: [solidSignals.file],
+    outdir: dirname(signalsFile),
+    naming: "signals.js",
+    target: "browser",
+    format: "esm",
+    define,
+    metafile: true,
+  })
+  if (!signals.success) {
+    for (const message of signals.logs) console.error(message)
+    process.exit(1)
+  }
+
+  const plugin: BunPlugin = {
+    name: "gpuix-embedded",
+    setup(build) {
+      // One React for everything: the copy `@gpuix/react` is built against.
+      build.onResolve({ filter: /^(react|react-reconciler|react-refresh)(\/.*)?$/ }, ({ path }) => ({
+        path: Bun.resolveSync(path, REACT),
+      }))
+      // One Solid: the client build `@gpuix/solid` is built against.
+      build.onResolve({ filter: /^solid-js$/ }, () => ({ path: solidJs.file }))
+      build.onResolve({ filter: /^@solidjs\/universal$/ }, () => ({ path: solidUniversal.file }))
+      build.onResolve({ filter: /^@solidjs\/signals$/ }, () => ({ path: signalsFile }))
+      build.onResolve({ filter: /^\.\/automation\/client\.js$|^@gpuix\/native\/automation$/ }, () => ({
+        path: join(NATIVE, "embedded/automation.ts"),
+      }))
+      build.onResolve({ filter: /^@gpuix\/native$/ }, () => ({
+        path: join(NATIVE, "embedded/native.ts"),
+      }))
+      // The TypeScript sources, so the bundle doesn't depend on `build:js`.
+      build.onResolve({ filter: /^@gpuix\/native\/.+$/ }, ({ path }) => {
+        const subpath = path.slice("@gpuix/native/".length)
+        const file = join(NATIVE, "js", `${subpath}.ts`)
+        return { path: existsSync(file) ? file : join(NATIVE, "js", subpath, "index.ts") }
+      })
+    },
+  }
+
+  const entryFiles: string[] = []
+  for (const [specifier, source] of entries) {
+    const file = join(entriesDir, `${specifier}.js`)
+    await Bun.write(file, source)
+    entryFiles.push(file)
+  }
+
+  const result = await Bun.build({
+    entrypoints: entryFiles,
+    root: entriesDir,
+    outdir: out,
+    target: "browser",
+    format: "esm",
+    splitting: true,
+    naming: { entry: "[dir]/[name].[ext]", chunk: "chunk-[hash].[ext]" },
+    define,
+    metafile: true,
+    plugins: [plugin],
+  })
+  if (!result.success) {
+    for (const message of result.logs) console.error(message)
+    process.exit(1)
+  }
+  checkCycles(result.metafile!.inputs)
+
+  // The generated entries and signals module stand for the sources they
+  // were made from.
+  const generated = [entriesDir, dirname(signalsFile)].map((dir) => `${portable(relative(NATIVE, dir))}/`)
+  const inputs = [...Object.keys(result.metafile!.inputs), ...Object.keys(signals.metafile!.inputs)]
+    .map(portable)
+    .filter((path) => !generated.some((dir) => path.startsWith(dir)))
+  rmSync(entriesDir, { recursive: true, force: true })
+  rmSync(dirname(signalsFile), { recursive: true, force: true })
+  return {
+    mode,
+    entries,
+    files: result.outputs.map((output) => portable(relative(out, output.path))).sort(),
+    inputs,
+    manifests: [solidJs, solidUniversal, solidSignals].map(({ manifest }) => portable(relative(NATIVE, manifest))),
+    bytes: result.outputs.reduce((total, output) => total + output.size, 0),
+  }
+}
+
+rmSync(DIST, { recursive: true, force: true })
+const sets: Built[] = []
+for (const mode of MODES) sets.push(await buildSet(mode))
+
+// Besides the sources, the builds read the package manifests (exports) and
+// the tsconfig files Bun takes JSX settings from.
+const inputs = [
+  ...new Set([
+    ...sets.flatMap((set) => [...set.inputs, ...set.manifests]),
     "embedded/build.ts",
     "embedded/tsconfig.json",
     "package.json",
@@ -247,9 +296,8 @@ const inputs = [...Object.keys(result.metafile!.inputs), ...Object.keys(signals.
     "../react/tsconfig.json",
     "../solid/package.json",
     "../solid/tsconfig.json",
-    ...[SOLID_JS, SOLID_UNIVERSAL, SOLID_SIGNALS].map(({ manifest }) => portable(relative(NATIVE, manifest)))
-  )
-  .sort()
+  ]),
+].sort()
 
 // FNV-1a, 64-bit, over each input's path and bytes, each followed by a zero
 // byte. `build.rs` computes the same.
@@ -263,17 +311,17 @@ for (const path of inputs) {
   }
 }
 
-const files = result.outputs.map((output) => portable(relative(MODULES, output.path))).sort()
 const lines = [
   "# Written by embedded/build.ts. build.rs checks `hash` against the inputs.",
   `hash ${hash.toString(16).padStart(16, "0")}`,
   ...inputs.map((path) => `input ${path}`),
-  ...[...entries.keys()].map((specifier) => `module ${specifier} ${specifier}.js`),
-  ...files.map((file) => `file ${file}`),
+  ...sets.flatMap((set) => [
+    ...[...set.entries.keys()].map((specifier) => `module ${set.mode} ${specifier} ${specifier}.js`),
+    ...set.files.map((file) => `file ${set.mode} ${file}`),
+  ]),
 ]
 await Bun.write(join(DIST, "manifest.txt"), `${lines.join("\n")}\n`)
-rmSync(ENTRIES, { recursive: true, force: true })
-rmSync(dirname(SIGNALS), { recursive: true, force: true })
 
-const bytes = result.outputs.reduce((total, output) => total + output.size, 0)
-console.log(`${entries.size} modules, ${files.length} files, ${(bytes / 1024).toFixed(0)} KiB`)
+for (const set of sets) {
+  console.log(`${set.mode}: ${set.entries.size} modules, ${set.files.length} files, ${(set.bytes / 1024).toFixed(0)} KiB`)
+}

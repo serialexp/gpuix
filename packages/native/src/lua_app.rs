@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -590,7 +590,7 @@ fn reconcile_dirty_windows<C: gpui::AppContext>(
     }
 }
 
-fn watch_sources(entry: &Path) -> futures::channel::mpsc::UnboundedReceiver<()> {
+fn watch_sources(entry: &Path) -> futures::channel::mpsc::UnboundedReceiver<Vec<PathBuf>> {
     reload::watch_sources(entry, is_lua_source, "gpx")
 }
 
@@ -961,7 +961,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         let received = loop {
             match receiver.try_recv() {
-                Ok(()) => break true,
+                Ok(_) => break true,
                 Err(futures::channel::mpsc::TryRecvError::Closed) => break false,
                 Err(_) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(25));

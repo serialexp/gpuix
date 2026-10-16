@@ -97,6 +97,12 @@ Tracking the gap between this design and what's on the main branch.
   plugin compile with `@solidjs/compiler` and load Solid's development build
   unless `NODE_ENV` is `production` (`packages/solid/`, `feat(solid)!: move
   @gpuix/solid to Solid 2.0`)
+- [x] Phase 6: React Fast Refresh under `gpx --watch`: the development
+  bundle set with React's development build and `react-refresh/runtime`,
+  oxc's refresh transform, changed files loaded again as new module
+  versions up to modules that export only components, and a fresh runtime
+  when a change reaches the entry file (`src/quickjs/hot.rs`,
+  `feat(native): give gpx --watch React Fast Refresh`)
 - [x] Phase 5: Solid JSX compile for app files with `@solidjs/compiler`'s
   Rust crate (`solidjs-compiler`) in universal mode, pinned to the
   `solid-js@2.0.0-rc.15` git revision. The nearest tsconfig's
@@ -123,10 +129,13 @@ Tracking the gap between this design and what's on the main branch.
 - [ ] Phase 4 follow-up: run the parity tests in CI (deferred: CI builds
   the `.node` file without QuickJS, so they skip there; a `build:quickjs`
   step costs a second release build of the crate)
-- [ ] Phase 6: hot reload: React Fast Refresh via oxc's refresh transform;
-  Solid remounts
-- [ ] Phase 6: README section, changeset, and benchmark numbers in
-  `docs/lua-runtime.md`'s benchmark table
+- [ ] Phase 6: Solid hot refresh under `gpx --watch`, with Solid 2.0's
+  `solid-js/refresh` and its compiler's refresh pass. The pass only builds
+  with the crate's napi feature, so this waits on an upstream PR exposing
+  it, pinned to a fork's revision until it lands (decided by Bart on
+  2026-10-16). Until then a Solid change starts the app again
+- [ ] Phase 6: benchmark numbers in `docs/lua-runtime.md`'s benchmark
+  table (the README's `gpx` section and the changesets are in)
 - [ ] Rust-reconciler React-style API for JS, shared with Lua's hooks
   (deferred: Phase 0 showed real React is slower but acceptable; revisit
   only if apps need it)
@@ -504,6 +513,33 @@ JavaScript app loop in `src/quickjs_app.rs`. Details the design left open:
    > logged, as `@gpuix/react` logs its uncaught errors, rather than
    > dropped.
 6. Hot reload, docs, changeset, benchmarks.
+
+   > **2026-10-16 update:** React Fast Refresh shipped as follows. Bart
+   > chose to embed React's development build for `--watch` only (Fast
+   > Refresh needs it), so `embedded/build.ts` writes a production and a
+   > development set, both embedded (the development one adds about
+   > 1.2 MB, as the bundles aren't minified). `--watch` runs the
+   > development set, Solid's development build included, and compiles
+   > React files with oxc's refresh transform, its calls written as
+   > `import.meta.$RefreshReg$`/`$RefreshSig$`, which the loader sets per
+   > module, so no lines are added and the position maps hold. QuickJS can't
+   > run a module again in place, so a changed file loads again as a new
+   > module (`path?hot=N`), and imports resolve to the newest version.
+   > Like Vite's, an update stops at modules that export only components,
+   > the same names as before, and goes up the import graph past any other;
+   > reaching the entry file starts the app again, as before. It works out
+   > every module it loads again before running any, so each runs once,
+   > after the new versions of what it imports, and a failed update's
+   > changes carry over to the next. Old modules' side effects (timers
+   > they started) stay, and old modules stay in memory, as with other
+   > hot reloaders.
+   >
+   > For Solid, research found Solid 2.0 has its own hot refresh
+   > (`solid-js/refresh`, in its development build) and a Rust transform
+   > for it in the compiler crate, but only behind the crate's napi
+   > feature. Unlike React's, the edited component itself remounts; its
+   > parents and siblings keep their state. Bart chose an upstream PR
+   > exposing the pass, with a fork pinned meanwhile (2026-10-16).
 
 ## Open questions for review
 

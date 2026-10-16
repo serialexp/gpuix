@@ -5,8 +5,13 @@
 //! (`react`, `@gpuix/react` and the rest). Apps can import nothing else yet.
 //!
 //! App modules are named by their canonical path, so a file reached by two
-//! relative paths is one module. Embedded ones are named `gpuix:` and their
-//! path in the bundle, and their relative imports stay inside it.
+//! relative paths is one module. A hot update (`hot.rs`) loads a file again
+//! as a new module, named with `?hot=` and its version after the path, and
+//! imports resolve to a file's newest version; a text module's too. Each
+//! import is recorded in the runtime's import graph. Embedded ones are named
+//! `gpuix:` and their path in the bundle, and their relative imports stay
+//! inside it. The bundle is the production or development set, by the
+//! runtime's [`Mode`].
 //!
 //! As in Bun, an app file imported `with { type: "text" }` is a module whose
 //! default export is the file's text. It is named `text:` and the canonical
@@ -25,14 +30,64 @@ use rquickjs::module::Declared;
 use rquickjs::{Ctx, Exception, Module};
 
 use super::compile::compile;
-use super::{guard, throw_whole, ErrorKind, Shared};
+use super::{guard, throw_whole, ErrorKind, Mode, Shared};
 
 mod embedded {
+    /// One set of framework builds: each import specifier with the file it
+    /// loads, and every file, by its path in the set.
+    pub(crate) struct Bundle {
+        pub modules: &'static [(&'static str, &'static str)],
+        pub files: &'static [(&'static str, &'static str)],
+    }
+
     include!(concat!(env!("OUT_DIR"), "/embedded_modules.rs"));
+}
+
+pub(crate) use embedded::Bundle;
+
+/// The framework builds a runtime in `mode` loads.
+pub(crate) fn bundle(mode: Mode) -> &'static Bundle {
+    match mode {
+        Mode::Production => &embedded::PRODUCTION,
+        Mode::Development => &embedded::DEVELOPMENT,
+    }
 }
 
 const EMBEDDED: &str = "gpuix:";
 const TEXT: &str = "text:";
+const VERSION: &str = "?hot=";
+
+/// The module name of version `version` of the app file at `path`.
+pub(crate) fn versioned(path: &str, version: u32) -> String {
+    if version == 0 {
+        path.to_string()
+    } else {
+        format!("{path}{VERSION}{version}")
+    }
+}
+
+/// The app file a module name names, without its version.
+pub(crate) fn unversioned(name: &str) -> &str {
+    match name.rsplit_once(VERSION) {
+        Some((path, version)) if version.bytes().all(|byte| byte.is_ascii_digit()) => path,
+        _ => name,
+    }
+}
+
+/// Whether `name` names an embedded module, not an app file's code or text.
+pub(crate) fn is_embedded(name: &str) -> bool {
+    name.starts_with(EMBEDDED)
+}
+
+/// The module name of the app file at `path` imported as text.
+pub(crate) fn text_module(path: &str) -> String {
+    format!("{TEXT}{path}")
+}
+
+/// The app file an unversioned app module name names, as code or as text.
+pub(crate) fn module_file(name: &str) -> &str {
+    name.strip_prefix(TEXT).unwrap_or(name)
+}
 
 /// The extensions an import may leave out, in the order Bun tries them for
 /// an `import` statement.
@@ -53,14 +108,22 @@ impl Resolver for AppResolver {
                 Some(attributes) => attributes.get_type()?,
                 None => None,
             };
+            let bundle = bundle(self.0.mode);
+            let base_path = unversioned(base);
             let resolved = match kind.as_deref() {
-                None => resolve(base, name),
-                Some("text") => resolve_text(base, name),
+                None => resolve(bundle, base_path, name),
+                Some("text") => resolve_text(base_path, name),
                 Some(kind) => Err(format!(
                     "Cannot import {name:?} from {base}: `type: {kind:?}` imports aren't supported, only `type: \"text\"`"
                 )),
             };
-            resolved.map_err(|message| Exception::throw_message(ctx, &message))
+            let resolved = resolved.map_err(|message| Exception::throw_message(ctx, &message))?;
+            if is_embedded(&resolved) {
+                return Ok(resolved);
+            }
+            let mut graph = self.0.graph.borrow_mut();
+            graph.imported(base, base_path, &resolved);
+            Ok(versioned(&resolved, graph.version(&resolved)))
         })
     }
 }
@@ -76,12 +139,13 @@ impl Loader for AppLoader {
     ) -> rquickjs::Result<Module<'js, Declared>> {
         guard(&self.0, ctx, "import", || {
             if let Some(file) = name.strip_prefix(EMBEDDED) {
-                let source = embedded_file(file).ok_or_else(|| {
+                let source = embedded_file(bundle(self.0.mode), file).ok_or_else(|| {
                     Exception::throw_message(ctx, &format!("{name} isn't in the embedded bundle"))
                 })?;
                 return Module::declare(ctx.clone(), name, source);
             }
-            if let Some(file) = name.strip_prefix(TEXT) {
+            let module = unversioned(name);
+            if let Some(file) = module.strip_prefix(TEXT) {
                 // As `TextDecoder` and `Response.text()` do, bytes that aren't
                 // UTF-8 become U+FFFD rather than failing the import.
                 let bytes = fs::read(file).map_err(|error| cannot_read(ctx, file, error))?;
@@ -89,14 +153,18 @@ impl Loader for AppLoader {
                 let literal = serde_json::to_string(&text).map_err(|error| {
                     Exception::throw_message(ctx, &format!("Cannot import {file}: {error}"))
                 })?;
-                return Module::declare(ctx.clone(), name, format!("export default {literal};"));
+                let declared =
+                    Module::declare(ctx.clone(), name, format!("export default {literal};"))?;
+                self.0.graph.borrow_mut().loaded(module, false);
+                return Ok(declared);
             }
-            let path = Path::new(name);
-            let source = read(ctx, name)?;
+            let file = module;
+            let path = Path::new(file);
+            let source = read(ctx, file)?;
             let jsx = || {
                 self.0.frameworks.borrow_mut().for_file(path, || {
                     let entry = self.0.entry.as_deref()?;
-                    let source = if entry == name {
+                    let source = if entry == file {
                         source.clone()
                     } else {
                         fs::read_to_string(entry).ok()?
@@ -104,18 +172,26 @@ impl Loader for AppLoader {
                     Some((PathBuf::from(entry), source))
                 })
             };
-            let compiled = compile(&source, path, jsx)
+            let compiled = compile(&source, path, self.0.mode, jsx)
                 .map_err(|message| throw_whole(ctx, ErrorKind::Syntax, &message))?;
             self.0
                 .positions
                 .borrow_mut()
                 .insert(name.to_string(), compiled.positions);
+            // The new version's imports replace the last one's, as the
+            // resolver records them.
+            self.0.graph.borrow_mut().forget_imports(file);
             let module = Module::declare(ctx.clone(), name, compiled.code)?;
             let meta = module.meta()?;
             if let Ok(url) = url::Url::from_file_path(path) {
                 meta.set("url", url.as_str())?;
             }
-            meta.set("main", self.0.entry.as_deref() == Some(name))?;
+            meta.set("main", self.0.entry.as_deref() == Some(file))?;
+            let refresh = compiled.refresh && self.0.refresh.borrow().is_some();
+            if refresh {
+                super::hot::provide_refresh(ctx, &self.0, &meta, file)?;
+            }
+            self.0.graph.borrow_mut().loaded(file, refresh);
             Ok(module)
         })
     }
@@ -129,21 +205,23 @@ fn cannot_read(ctx: &Ctx<'_>, file: &str, error: std::io::Error) -> rquickjs::Er
     Exception::throw_message(ctx, &format!("Cannot read {file}: {error}"))
 }
 
-fn embedded_file(file: &str) -> Option<&'static str> {
-    embedded::FILES
+fn embedded_file(bundle: &Bundle, file: &str) -> Option<&'static str> {
+    bundle
+        .files
         .iter()
         .find(|(path, _)| *path == file)
         .map(|(_, source)| *source)
 }
 
-/// The module name `name` gets when `base` imports it. An empty `base` is
-/// the entry, which `QuickJsRuntime::load_module` also names with this.
-pub(super) fn resolve(base: &str, name: &str) -> Result<String, String> {
+/// The module name `name` gets when `base` imports it from `bundle`, before
+/// any version. An empty `base` is the entry, which
+/// `QuickJsRuntime::load_module` also names with this.
+pub(super) fn resolve(bundle: &Bundle, base: &str, name: &str) -> Result<String, String> {
     let relative = name.starts_with("./") || name.starts_with("../") || name == "." || name == "..";
     if let Some(file) = base.strip_prefix(EMBEDDED) {
         if relative {
             return embedded_join(file, name)
-                .filter(|file| embedded_file(file).is_some())
+                .filter(|file| embedded_file(bundle, file).is_some())
                 .map(|file| format!("{EMBEDDED}{file}"))
                 .ok_or_else(|| {
                     format!("Cannot import {name:?} from {base}: not in the embedded bundle")
@@ -171,12 +249,13 @@ pub(super) fn resolve(base: &str, name: &str) -> Result<String, String> {
             )
         });
     }
-    embedded::MODULES
+    bundle
+        .modules
         .iter()
         .find(|(specifier, _)| *specifier == name)
         .map(|(_, file)| format!("{EMBEDDED}{file}"))
         .ok_or_else(|| {
-            let bundled: Vec<&str> = embedded::MODULES.iter().map(|(specifier, _)| *specifier).collect();
+            let bundled: Vec<&str> = bundle.modules.iter().map(|(specifier, _)| *specifier).collect();
             format!(
                 "Cannot import {name:?} from {base}: apps can import their own files and the bundled modules ({})",
                 bundled.join(", ")
