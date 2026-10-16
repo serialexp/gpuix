@@ -4384,11 +4384,42 @@ source argument is supplied; an explicit source path overrides it.
 `"dist/GPUIX Solid.app/Contents/MacOS/GPUIX Solid" --check` validates the bundled
 application without opening windows.
 
-This first package is ad-hoc signed, **not notarized** and has no custom app
-icon. It is a local/test distribution artifact, not a production installer;
-downloaded copies may be blocked by Gatekeeper. Developer ID signing and
-notarization remain necessary for normal public distribution. Packaging does
+By default the package is ad-hoc signed, **not notarized**, and has no custom
+app icon. Downloaded test builds may be blocked by Gatekeeper. Packaging does
 not include updater or installer infrastructure.
+
+The **macOS distribution** GitHub Actions workflow builds an Apple Silicon ZIP
+on relevant pushes to `main`, or manually from the Actions tab. Download it
+from the run's artifacts. Automatic builds are ad-hoc signed. For a public
+distribution, manually run the workflow with **sign** enabled: it imports a
+Developer ID Application certificate into a temporary keychain, signs with
+the hardened runtime and secure timestamp, submits to Apple's notary service,
+staples and validates the ticket, and then creates the final ZIP. Signing
+credentials are removed even on failure. This does not publish a GitHub release.
+
+Configure these repository secrets (or organization secrets granting this
+repository access) before enabling signing:
+
+| Secret | Value |
+| --- | --- |
+| `MACOS_CERTIFICATE_P12_BASE64` | Base64-encoded export of a Developer ID Application certificate **and private key** |
+| `MACOS_CERTIFICATE_PASSWORD` | Password protecting that P12 export |
+| `MACOS_SIGNING_IDENTITY` | Full `Developer ID Application: Name (TEAMID)` identity |
+| `APPLE_ID` | Apple account used for notarization |
+| `APPLE_TEAM_ID` | Apple Developer team ID |
+| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password for that account |
+
+Never commit the certificate, private key, or passwords. Being under the
+`serialexp` organization does not alone grant access to its signing secrets;
+their repository access policy must include this repository. Missing credentials
+fail a requested signed build rather than silently producing an unsigned one.
+Fork pull requests never trigger this workflow.
+
+Locally, `MACOS_SIGNING_IDENTITY` selects a certificate already in your keychain.
+Set `MACOS_NOTARIZE=1` plus the three `APPLE_*` variables above to also notarize
+and staple when running `just package-solid`. Apple's
+[notarization documentation](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
+describes the Developer ID and hardened-runtime requirements.
 
 ## Status
 

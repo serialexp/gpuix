@@ -1,0 +1,102 @@
+name: macOS distribution
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/native/**'
+      - 'packages/lua/**'
+      - 'examples/solid-workspace/**'
+      - 'scripts/package-solid.sh'
+      - '.github/workflows/macos-distribution.yml'
+      - 'bun.lock'
+      - 'rust-toolchain.toml'
+      - 'zed'
+  workflow_dispatch:
+    inputs:
+      sign:
+        description: Developer ID sign and notarize (requires Apple secrets)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-distribution-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/native/target
+          key: macos-distribution-${{ runner.arch }}-${{ hashFiles('packages/native/Cargo.lock') }}
+      - run: xcodebuild -downloadComponent MetalToolchain
+      - run: bun install --frozen-lockfile
+
+      - name: Import Developer ID certificate
+        if: inputs.sign
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          : "${CERTIFICATE:?Missing certificate secret}"
+          : "${CERTIFICATE_PASSWORD:?Missing certificate password}"
+          : "${SIGNING_IDENTITY:?Missing Developer ID identity}"
+          KEYCHAIN="$RUNNER_TEMP/gpuix-signing.keychain-db"
+          PASSWORD="$(openssl rand -hex 32)"
+          echo "::add-mask::$PASSWORD"
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db"
+          rm "$RUNNER_TEMP/certificate.p12"
+
+      - name: Build test distribution
+        if: ${{ !inputs.sign }}
+        run: bash scripts/package-solid.sh
+
+      - name: Build signed and notarized distribution
+        if: inputs.sign
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARIZE: '1'
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          : "${MACOS_SIGNING_IDENTITY:?Missing signing identity}"
+          bash scripts/package-solid.sh
+
+      - name: Remove signing credentials
+        if: always() && inputs.sign
+        run: |
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          if [ -f "$RUNNER_TEMP/gpuix-signing.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/gpuix-signing.keychain-db"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GPUIX-Solid-macos-${{ runner.arch }}-${{ inputs.sign && 'notarized' || 'adhoc' }}
+          path: dist/GPUIX-Solid-macos-*.zip
+          if-no-files-found: error
