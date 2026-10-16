@@ -19,10 +19,10 @@ built-in JSX/TSX compilation) behind a shared core.
 - `gpuix.icon` completed from the September stash (build.rs packer,
   `mod phosphor`, `_phosphor_icon`, `phosphor:` svg sources). The stash itself
   is untouched at `stash@{0}`.
-- Zed fork rebased onto upstream c2e9f882030 as branch `gpuix-rebase`, pushed
-  to Aeolun/zed (origin is now SSH). `.gitmodules` still names the old
-  `gpuix` branch; Bart hasn't chosen between force-pushing `gpuix` and
-  pointing `.gitmodules` at `gpuix-rebase`.
+- Zed fork rebased onto upstream c2e9f882030 and force-pushed over the
+  `gpuix` branch of Aeolun/zed (02535d0, decided by Bart on 2026-10-16), so
+  `.gitmodules`' `branch = gpuix` matches the pinned commit again. The
+  temporary `gpuix-rebase` branch is deleted.
 - `wip` pushed to serialexp/gpuix (e42c991).
 - solid.lua: keyed `create_selector`; text/style/prop bindings skip unchanged
   values. `lua_runtime.rs` keeps a per-window `RootIndex` (handlers, tokens,
