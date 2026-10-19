@@ -188,7 +188,7 @@ impl Loader for AppLoader {
             }
             meta.set("main", self.0.entry.as_deref() == Some(file))?;
             let refresh = compiled.refresh && self.0.refresh.borrow().is_some();
-            if refresh {
+            if self.0.mode == Mode::Development {
                 super::hot::provide_refresh(ctx, &self.0, &meta, file)?;
             }
             self.0.graph.borrow_mut().loaded(file, refresh);

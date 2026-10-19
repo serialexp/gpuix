@@ -27,6 +27,7 @@ pub fn check_lua_file(path: impl AsRef<Path>) -> Result<(), String> {
 }
 
 pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), String> {
+    let dev_server = crate::script::server::Server::start(options.dev_server)?;
     let path = path.as_ref().to_path_buf();
     let runtime = LuaRuntime::load_application_file(&path)?;
     let application_entry = runtime.is_application_entry();
@@ -60,6 +61,9 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
         .run(move |cx| {
             crate::renderer::init_lua_focus_key_bindings(cx);
             crate::renderer::init_app(&app_name, cx);
+            if let Some(server) = dev_server {
+                server.attach(cx);
+            }
 
             let (event_sender, mut event_receiver) = futures::channel::mpsc::unbounded();
             let windows = Rc::new(LuaWindows::default());

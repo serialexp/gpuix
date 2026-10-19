@@ -27,7 +27,7 @@ import {
   type GrammarState,
   type ThemedToken,
 } from "shiki"
-import type { StructuredPatchHunk as Hunk } from "diff"
+import type { Change, Hunk } from "diff"
 
 // ── Color constants ──────────────────────────────────────────────────
 // All colors as hex strings (GPUIX parses #RRGGBB, #RRGGBBAA, and rgba())
@@ -203,7 +203,7 @@ function WordDiffTokens({
   parts,
   mode,
 }: {
-  parts: ReturnType<typeof diffWords>
+  parts: Change[]
   mode: "remove" | "add"
 }) {
   const highlightBg = mode === "remove" ? WORD_REMOVED_BG : WORD_ADDED_BG

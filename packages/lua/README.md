@@ -1,5 +1,13 @@
 # GPUIX Lua components
 
+This directory contains two separate component families: the React-like
+hook-based modules below and the signal-based `gpuix.solid.*` modules.
+Neither uses the JavaScript React/Solid adapters in `packages/react` and
+`packages/solid`. The public API contract is the root
+[README](../../README.md#experimental-luax-runtime); see its
+[Solid controls](../../README.md#solid-controls) section for accessor props,
+owner lifetimes and lazy content factories in the signal-based family.
+
 These modules are bundled into `gpx` and loaded through ordinary Lua
 imports:
 

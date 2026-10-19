@@ -23,7 +23,7 @@ leak. This applies to runtime APIs, bundled components, examples, tests, and doc
 
 **Read the GPUI docs and the GPUI source before you write native code.** `zed/crates/gpui`
 is checked out in this repository. `gpui::ListState`, `gpui::div`, `gpui::Window` and the
-rest are the real API; GPUIX only translates a React tree into calls on them.
+rest are the real API; GPUIX translates retained host nodes into calls on them.
 
 Do not invent behaviour on top of GPUI. If a GPUIX element needs something GPUI does not
 do, the order is:
@@ -60,7 +60,7 @@ GPUIX enables building **native GPU-accelerated desktop applications** using
 [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) (Zed's
 rendering framework).
 
-Instead of Electron/web rendering, your React components render directly to the GPU via Metal/Vulkan.
+React, Solid and embedded Lua/LuaX applications render through GPUI rather than a desktop web view. Desktop backends include Metal, Direct3D and Vulkan.
 
 ## Mouse capture is armed by the press
 
@@ -68,80 +68,44 @@ A `div` with `onMouseDown`, `onMouseMove`, and `onMouseUp` keeps move and up aft
 
 Put all three on the element the user grabs. Capture is armed by the **press**, so an overlay mounted during that press never arms it, and a release past the window edge is lost. `examples/timeline.tsx` drags clips, trims edges, scrubs, and marquee-selects with no overlay at all.
 
-```
-React (TypeScript)  →  napi-rs  →  GPUI (Rust)  →  GPU
-     Your code         Bridge      Native render    Metal/Vulkan
-```
-
 ## Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  JavaScript / TypeScript                                        │
-│                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  Your React App                                          │   │
-│  │                                                          │   │
-│  │  function App() {                                        │   │
-│  │    const [count, setCount] = useState(0)                 │   │
-│  │    return (                                              │   │
-│  │      <div style={{ display: 'flex', bg: '#1e1e2e' }}>    │   │
-│  │        <div onClick={() => setCount(c => c + 1)}>+</div> │   │
-│  │      </div>                                              │   │
-│  │    )                                                     │   │
-│  │  }                                                       │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                              ↓                                  │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  @gpuix/react (packages/react)                           │   │
-│  │                                                          │   │
-│  │  - React Reconciler (react-reconciler)                   │   │
-│  │  - Builds element tree from React components             │   │
-│  │  - Serializes to JSON ElementDesc                        │   │
-│  │  - Manages event handler registry                        │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  @gpuix/solid (packages/solid)                           │   │
-│  │  - Solid 2 universal renderer and reactive components   │   │
-│  │  - Bun preload and production build plugin              │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                              ↓ JSON                             │
-└─────────────────────────────────────────────────────────────────┘
-                               ↓ napi-rs FFI
-┌─────────────────────────────────────────────────────────────────┐
-│  Rust / Native                                                  │
-│                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  @gpuix/native (packages/native)                         │   │
-│  │                                                          │   │
-│  │  - GpuixRenderer: receives JSON, triggers re-render      │   │
-│  │  - build_element(): ElementDesc → GPUI elements          │   │
-│  │  - apply_styles(): StyleDesc → GPUI style methods        │   │
-│  │  - Event handlers → ThreadsafeFunction callbacks to JS   │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                              ↓                                  │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  GPUI (from zed)                                         │   │
-│  │                                                          │   │
-│  │  - Immediate-mode UI framework                           │   │
-│  │  - Flexbox layout via Taffy                              │   │
-│  │  - GPU rendering via Metal (macOS) / Vulkan (Linux)      │   │
-│  │  - Native window management                              │   │
-│  └─────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
+GPUIX has three execution paths, all feeding Rust's `RetainedTree`:
+
+```text
+React / Solid TypeScript (Bun or Node)
+  → @gpuix/native/host mutation queue → JSON applyBatch over napi
+React / Solid TypeScript (gpx, quickjs feature)
+  → embedded framework + native shim → JSON applyBatch in-process
+Lua / LuaX (gpx)
+  → Rust-owned render arena / direct updates, no JSON or napi
+                         ↓
+                    RetainedTree
+                         ↓
+                GPUI layout and paint
+                         ↓
+           Metal / Direct3D / Vulkan
 ```
 
-## Key Insight: Immediate Mode Alignment
+The browser build uses wasm-bindgen instead of napi. The JavaScript adapters
+share host contracts, mutation batching and event routing in
+`packages/native/js`. React produces host mutations during reconciler commits;
+Solid's universal renderer produces them from reactive updates. QuickJS reuses
+these adapters and the JSON mutation protocol; it is not a serialization-free
+direct host.
 
-GPUI is **immediate-mode** - it rebuilds the entire UI tree every frame. This actually aligns perfectly with React's model:
+Lua's React-like model returns packed integer arena handles and reconciles in
+Rust. Lua's Solid-like model updates individual retained nodes through
+owner-scoped bindings. These Lua libraries are distinct from the real React
+and Solid JavaScript frameworks.
 
-| Traditional DOM Renderer | GPUIX |
-|--------------------------|-------|
-| `appendChild(node)` | Rebuild tree each render |
-| `node.style.color = x` | Send full tree description |
-| Mutation-based | Description-based |
+### Retained mutations, immediate-mode painting
 
-We don't fight GPUI's architecture - we embrace it by sending a complete element description on every React render.
+GPUI rebuilds its render elements when drawing, but that does **not** require
+sending the application tree across the language boundary on every frame.
+Host nodes persist in `RetainedTree`; updates change only the affected nodes.
+A JavaScript commit sends an atomic batch of mutation tuples, not a full tree
+snapshot. Native painting reads the retained tree afterward.
 
 ## Shared JavaScript runtime
 
@@ -170,54 +134,46 @@ tests wrap writes in `flushSync` before asserting.
 
 ## Package Structure
 
+```text
+cli/                         gpuix new scaffolder
+packages/
+  native/
+    js/                      Shared TS host, runtime, testing and automation
+    embedded/                QuickJS framework bundles and native shim
+    src/
+      bin/gpx.rs             Standalone Lua / QuickJS launcher
+      script/                Shared embedded app registry and source watcher
+      lua_runtime.rs         Lua host, arena, hooks and reconciliation
+      lua_app.rs             Lua application/window integration
+      luax.rs                LuaX compiler
+      quickjs/               JS engine, module loader, TSX compiler, hot updates
+      quickjs_app.rs         JavaScript app loop
+      quickjs_window.rs      GPUI window host for embedded JavaScript
+      retained_tree.rs       Retained nodes, styles and mutation application
+      renderer.rs            GpuixRenderer, GpuixView and GPUI element building
+      element_tree.rs        Events and supporting payload types
+      style.rs, theme.rs     Styles, palette and metrics
+      custom_elements/       Native input, images, SVG, code, diff and markdown
+      text/, syntax/         Selection, search and syntax highlighting
+      motion.rs, updater.rs  Native transitions and application updates
+    vendor/                  Patched QuickJS dependency
+  react/src/                 React reconciler, hooks and components
+  solid/src/                 Solid 2 universal adapter, compiler plugins, controls
+  lua/gpuix/                 React-like and Solid-like Lua modules and widgets
+examples/                    React, Solid, Lua and LuaX apps, tests, benchmarks
+example-app/                 Published scaffolder template
+disktree/                    Disk usage example application
+hermes/                      Alternative JavaScript runtime experiment
+scripts/                     Build, development and distribution tooling
+docs/                        Design notes, benchmarks and runtime details
+website/                     Documentation website
+zed/                         Pinned GPUI fork submodule (see .gitmodules)
 ```
-gpuix/
-├── cli/                         # `gpuix new` project scaffolder
-│   ├── src/cli.ts               # Goke CLI and example-app extraction
-│   └── package.json
-│
-├── packages/
-│   ├── native/                 # Rust napi-rs bindings
-│   │   ├── js/                 # Shared host runtime, testing, automation
-│   │   ├── src/
-│   │   │   ├── lib.rs          # Module exports
-│   │   │   ├── renderer.rs     # GpuixRenderer, GpuixView, build_element()
-│   │   │   ├── element_tree.rs # ElementDesc, EventPayload types
-│   │   │   ├── style.rs        # StyleDesc, color parsing
-│   │   │   ├── theme.rs        # Comet palette, oklch helpers, JS overrides
-│   │   │   ├── text/           # Selection: state, paint registry, TextRuns
-│   │   │   ├── syntax/         # Syntect highlighting + bounded cache
-│   │   │   ├── markdown/       # pulldown-cmark parser + gpui renderer
-│   │   │   ├── diff/           # Unified-patch parser + row flattening
-│   │   │   └── custom_elements/# input, img, svg, anchored, code, diff, markdown
-│   │   ├── examples/
-│   │   │   └── hello.rs        # Pure GPUI test (no JS)
-│   │   ├── Cargo.toml
-│   │   └── build.rs
-│   │
-│   ├── react/                  # React reconciler
-│       ├── src/
-│       │   ├── index.ts        # Public exports
-│       │   ├── reconciler/
-│       │   │   ├── host-config.ts  # React reconciler implementation
-│       │   │   ├── reconciler.ts   # ReactReconciler instance
-│       │   │   └── renderer.ts     # createRoot(), event bridge
-│       │   ├── hooks/
-│       │   │   ├── use-gpuix.ts    # Context access
-│       │   │   └── use-window-size.ts
-│       │   └── types/
-│       │       └── host.ts     # TypeScript types
-│       └── package.json
-│   └── solid/                  # Solid 2 universal renderer
-│       ├── src/                # Host tree, roots, primitives, controls
-│       └── package.json
-│
-├── examples/
-│   ├── package.json            # Workspace package for examples
-│   └── counter.tsx             # Example React app
-│
-└── AGENTS.md                   # This file
-```
+
+`README.md` is the public API contract; `CURRENT_TASK.md` is a dated working
+handoff, not an API reference. `TODO.md` tracks follow-ups. Design documents
+contain both implemented phases and proposals; check their status before
+treating a planned capability as shipped. `CLAUDE.md` redirects to this guide.
 
 ## Text rendering: one funnel, no exceptions
 
@@ -954,109 +910,44 @@ on the tag *name*, so the release itself keeps its notes and its assets.
 
 ## Communication Flow
 
-### Render Flow (JS → Rust)
+### Updates (script → Rust)
 
-```
-1. React state changes
-         ↓
-2. React reconciler builds Instance tree
-         ↓
-3. instanceToElementDesc() converts to JSON-serializable format:
-   {
-     type: "div",
-     id: "btn-1", 
-     style: { display: "flex", backgroundColor: "#ff0000" },
-     events: ["click", "mouseEnter"],
-     children: [...]
-   }
-         ↓
-4. renderer.render(JSON.stringify(tree))
-         ↓
-5. Rust parses JSON into ElementDesc structs
-         ↓
-6. build_element() recursively builds GPUI elements:
-   div().id("btn-1").flex().bg(rgba(0xff0000ff)).on_click(...)
-         ↓
-7. GPUI renders to GPU
-```
+1. An event or application update changes React state, Solid signals, or Lua state.
+2. React commits host mutations; Solid updates affected host nodes.
+3. The shared JavaScript queue serializes mutation tuples and calls
+   `renderer.applyBatch(JSON.stringify(queue))`. Under Node/Bun this crosses
+   napi; under QuickJS it invokes the embedded native shim in-process.
+4. Rust applies the batch atomically to `RetainedTree`, invalidating affected
+   nodes and scheduling a repaint.
+5. GPUI builds, lays out and paints the retained content.
 
-### Event Flow (Rust → JS)
+Lua uses its own Rust arena/reconciliation or direct slot/prop/style updates
+instead of the JavaScript JSON queue.
 
-```
-1. User clicks element with id="btn-1"
-         ↓
-2. GPUI fires click event on element
-         ↓
-3. Rust closure calls emit_event("btn-1", "click", position)
-         ↓
-4. ThreadsafeFunction calls into JS with EventPayload
-         ↓
-5. JS event registry looks up handler:
-   eventHandlers.get("btn-1")?.click?.(event)
-         ↓
-6. React handler runs: onClick={() => setCount(c => c + 1)}
-         ↓
-7. State update triggers re-render → back to Render Flow
-```
+### Events (Rust → script)
+
+GPUI reports an event with a numeric host element ID. The Node/Bun path invokes
+a threadsafe callback with `EventPayload`; the browser uses its wasm callback;
+the QuickJS and Lua hosts dispatch into their embedded runtimes. JavaScript
+event routing resolves the ID through the renderer-local handler registry.
+A resulting update follows the flow above. Do not assume every event reruns
+every component, or that every repaint crosses napi.
 
 ## Key Types
 
-### ElementDesc (Rust ↔ JS)
+Use the declarations in source rather than copying partial struct definitions
+into this guide:
 
-```rust
-pub struct ElementDesc {
-    pub element_type: String,      // "div", "text", "img"
-    pub id: Option<String>,        // For event handling
-    pub style: Option<StyleDesc>,  // CSS-like styles
-    pub content: Option<String>,   // Text content
-    pub events: Option<Vec<String>>, // ["click", "mouseEnter"]
-    pub children: Option<Vec<ElementDesc>>,
-}
-```
+- `packages/native/src/retained_tree.rs`: `RetainedTree`,
+  `RetainedElement` and shared styles; numeric `u64` host IDs.
+- `packages/native/src/element_tree.rs`: `EventPayload` (numeric
+  `element_id`, event type and optional event-specific fields).
+- `packages/native/src/style.rs`: `StyleDesc` and dimension values.
+- `packages/native/js/host.ts`: shared TypeScript host contracts.
+- `packages/native/js/mutations.ts`: `MutationTuple`, mutation queue and
+  JSON `applyBatch` transport.
 
-### StyleDesc (CSS-like properties)
-
-```rust
-pub struct StyleDesc {
-    // Flexbox
-    pub display: Option<String>,        // "flex"
-    pub flex_direction: Option<String>, // "row", "column"
-    pub align_items: Option<String>,    // "center", "start", "end"
-    pub justify_content: Option<String>,
-    pub gap: Option<f64>,
-    
-    // Sizing
-    pub width: Option<DimensionValue>,
-    pub height: Option<DimensionValue>,
-    
-    // Spacing
-    pub padding: Option<f64>,
-    pub margin: Option<f64>,
-    
-    // Colors (parsed centrally in src/color.rs with csscolorparser 0.8.3;
-    // parser-version changes require running both absolute and relative matrices)
-    pub background_color: Option<String>,
-    pub color: Option<String>,
-    
-    // Border
-    pub border_radius: Option<f64>,
-    pub border_width: Option<f64>,
-    pub border_color: Option<String>,
-}
-```
-
-### EventPayload (Rust → JS)
-
-```rust
-pub struct EventPayload {
-    pub element_id: String,
-    pub event_type: String,  // "click", "mouseEnter", etc.
-    pub x: Option<f64>,
-    pub y: Option<f64>,
-    pub key: Option<String>,
-    pub modifiers: Option<EventModifiers>,
-}
-```
+There is no current `ElementDesc` full-tree wire type.
 
 ## Building
 
@@ -1248,6 +1139,10 @@ belong in README. This list is only the remaining engineering work.
 
 ### Completed
 
+- [x] Solid 2 universal JavaScript adapter
+- [x] Embedded Lua/LuaX runtime with React-like hooks and Solid-like signals
+- [x] Embedded QuickJS React/Solid apps with native TSX compilation
+- [x] React Fast Refresh and Solid component hot refresh under `gpx --watch`
 - [x] React reconciler with mutation-based protocol
 - [x] napi-rs FFI bindings and RetainedTree
 - [x] Style mapping, including native `hover` / `active`
@@ -1284,13 +1179,14 @@ belong in README. This list is only the remaining engineering work.
 #### Low Priority
 
 - [ ] **Window resize** - expose GPUI's runtime resize API
-- [ ] **Multiple windows** - Support multiple GPUI windows
+- [x] **Lua multiple windows** - Shared app state with independent native windows
+- [ ] **JavaScript multiple windows** - React/Solid application-level window API
 - [x] **JS remount** - `render()` plus `bun --hot` remounts the React tree on the same window
 - [x] **React Refresh in the browser** - `bun run web` keeps `useState` across saves
 - [ ] **React Refresh on desktop** - `bun --hot` is the runtime, not the bundler, so it runs no Fast Refresh transform. Tracked as [oven-sh/bun#40179](https://github.com/oven-sh/bun/issues/40179)
 - [ ] **Native hot reload** - cannot unload a `.node`. `bun run dev` rebuilds and restarts
 - [ ] **DevTools** - React DevTools integration
-- [ ] **Animations** - Interpolated style transitions
+- [x] **Animations** - Native `motion.div` transitions and `AnimatePresence` exits
 
 ## Testing
 
@@ -1434,9 +1330,12 @@ If remorses says OK, follow the rest of this file and these rules.
 
 **How to work**
 
-1. For Rust changes, work in `zed/crates/gpuix` (easier to build)
-2. Copy changes to `packages/native/src/` when ready
-3. TypeScript changes can be made directly in `packages/react/`
+1. GPUIX Rust changes belong in `packages/native/src/`; there is no
+   `zed/crates/gpuix` in this checkout. GPUI framework changes follow the
+   separate-worktree rules above.
+2. Framework-neutral TypeScript belongs in `packages/native/js/`.
+3. Adapter-specific TypeScript belongs in `packages/react/` or `packages/solid/`;
+   Lua libraries belong in `packages/lua/`.
 
 **Do not**
 
@@ -1464,6 +1363,7 @@ For example usage of projects depending on gpui in rust: opensrc https://github.
 
 For examples of NAPI rs native packages: https://github.com/napi-rs/package-template and https://github.com/Brooooooklyn/Image
 
-For reading gpui source code: https://github.com/zed-industries/sed inside crates/gpui
+For reading gpui source code: the pinned local `zed/crates/gpui` checkout,
+or https://github.com/zed-industries/zed inside crates/gpui
 
 For examples of a custom React renderer: https://github.com/anomalyco/opentui inside packages/react

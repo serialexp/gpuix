@@ -185,6 +185,11 @@ async function buildSet(mode: Mode): Promise<Built> {
   }
   packageEntries(entries, "@gpuix/react", REACT, "src")
   reexportEntry(entries, "solid-js", solidJs.file)
+  if (mode === "development") {
+    const directory = dirname(solidJs.file)
+    reexportEntry(entries, "solid-js/refresh", join(directory, "refresh.dev.js"))
+    reexportEntry(entries, "solid-js/internal", join(directory, "internal.js"))
+  }
   packageEntries(entries, "@gpuix/solid", SOLID, "src")
   packageEntries(entries, "@gpuix/native", NATIVE, "js")
 

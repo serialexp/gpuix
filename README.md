@@ -6,6 +6,23 @@ Write a React or Solid tree in TypeScript. GPUIX paints it with Metal, DirectX, 
 
 `useState` and JSX still apply. Layout, text, and input go through GPUI, not the DOM.
 
+### Runtime paths
+
+- **Bun/Node:** React's reconciler or Solid 2's universal renderer sends atomic
+  JSON mutation batches through `@gpuix/native`'s napi bridge. Updates do not
+  serialize the entire application tree.
+- **Embedded JavaScript:** `gpx` runs the same adapters in QuickJS, with native
+  TypeScript/JSX compilation and an in-process `applyBatch` host. This still
+  uses JSON mutation batches, but needs no Node/Bun runtime or napi crossing.
+- **Embedded Lua/LuaX:** `gpx` provides separate React-like hook and Solid-like
+  signal libraries. They use Rust-owned handles and retained-tree updates
+  without the JavaScript JSON transport. Lua's signal library is not SolidJS.
+
+All three paths feed Rust's `RetainedTree`, which GPUI uses for layout and
+painting. The browser build uses wasm-bindgen instead of napi. See the
+[embedded JavaScript](#experimental-embedded-javascript-runtime) and
+[LuaX](#experimental-luax-runtime) sections for their current limitations.
+
 ![A glass dashboard over a painted sky](./docs/images/mail-app.jpg)
 
 Everything above is GPUIX: the glass window, the cards, the schedule,
@@ -3527,6 +3544,80 @@ like in a browser.
 
 ## Automation
 
+### Embedded development API
+
+`gpx --dev-server PORT app.luax` (also `.tsx`, `.lua`, and the other supported
+entry extensions) starts a native HTTP testing API and enables `--watch`.
+It needs no JavaScript launcher for Lua apps. Bindings are IPv4 loopback only;
+port `0` chooses a free port, printed on stderr. Set `GPUIX_DEV_TOKEN` to a
+random secret of at least 32 ASCII letters/digits before starting:
+
+```sh
+export GPUIX_DEV_TOKEN="$(openssl rand -hex 32)"
+packages/native/target/release/gpx --dev-server 4318 examples/solid-workspace/main.luax
+curl http://127.0.0.1:4318/rpc \
+  -H "Authorization: Bearer $GPUIX_DEV_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"method":"windows"}'
+```
+
+Send JSON with `POST /rpc`. Responses contain either `{"result": ...}` or
+`{"error": "message"}`; inspect the body even for HTTP 200. Supported commands:
+
+| Request | Result |
+| --- | --- |
+| `{"method":"health"}` | `{ready, pid}`; ready means a GPUIX window exists |
+| `{"method":"windows"}` | Array of native numeric window IDs (including Lua secondary windows) |
+| `{"method":"tree","window":ID}` | Retained automation tree, including `testId` and text |
+| `{"method":"tree","window":ID,"details":true}` | Host tree with styles, event names and custom props |
+| `{"method":"subtree","window":ID,"nodeId":NODE}` | Selected subtree as `{nodeId, revision, unchanged, tree}` |
+| `{"method":"screenshot","window":ID}` | PNG as `{mimeType, encoding: "base64", data, width, height, scaleFactor}` |
+| `{"method":"click","window":ID,"x":40,"y":80}` | Dispatch a left click in window-local logical pixels |
+| `{"method":"press","window":ID,"keys":"tab space"}` | Dispatch space-separated GPUI keystrokes, e.g. `cmd-a` |
+
+After the initial `tree` call, pass any returned node's `id` as `nodeId` to
+`subtree`. Alternatively, use `testId: "section-name"` (must match exactly one
+mounted node). Provide only one selector; omitting both selects the window root.
+`details: true` includes styles, events and custom props, just as on `tree`.
+The response includes an opaque string `revision`. Poll the same selection with
+`ifRevision: "previous-token"`: unchanged responses contain only `nodeId`,
+`revision`, and `unchanged: true`, without serializing its descendants.
+Polling by `nodeId` also avoids walking those descendants.
+Changes outside the selected section do not invalidate its token. A change
+inside returns `unchanged: false` and a fresh **whole selected subtree**, not a
+mutation diff. Node-ID selection checks only the ancestor chain; `testId`
+selection searches the mounted tree, so retain `nodeId` for frequent polling.
+Missing, removed, detached or ambiguous selections return an error. Tokens
+distinguish tree replacements and detail modes; after reload, prefer `testId`
+to re-resolve nodes whose IDs may have changed. Revisions describe retained host
+state, not paint/scroll/animation changes or inherited appearance from ancestors;
+use screenshots for visual assertions. The original `tree` response is unchanged.
+
+Input uses GPUI's native dispatch, not direct script callbacks. Input responses
+acknowledge dispatch, **not** completed script work or paint; poll `tree` for the
+expected state. Window IDs remain valid only while that native window is open.
+The exported tree is the **retained host-element tree**, not React/Lua component
+functions or Solid owners. Trees intentionally omit painted bounds: the existing
+bounds registry is not window-scoped. Screenshots target that native window and
+capture its GPUI content from a freshly drawn frame, without desktop capture,
+window activation, or server-side file writes. Decode `result.data` as base64 to
+save a PNG on the client; dimensions are physical pixels, with `scaleFactor`
+relating them to logical click coordinates. Captures over 16 megapixels are
+rejected. Screenshots require the `test-support` build feature (enabled by
+default) and a backend supporting GPUI image readback; failures return `error`.
+Capturing a frame is not a barrier for arbitrary pending application work: poll
+the tree for the expected state before taking an assertion screenshot.
+The API does not expose locators, arbitrary evaluation, filesystem access, or
+the full JS automation protocol below.
+Source edits use the normal watcher/hot-refresh behavior. `--check` cannot be
+combined with `--dev-server`. Closing the app ends the server.
+
+Browser-origin requests and transfer-encoded bodies are rejected. Requests are
+handled serially, with an 8 KiB JSON limit, a 16 KiB total read limit, socket
+timeouts, and a five-second app-response timeout. Keep the token private; this
+is an opt-in local development interface, not a public application service.
+
+### JavaScript automation client
+
 Mark elements with **`testId`**, then drive them like Playwright. The same
 client works in vitest, inside browser pages, and against a child process.
 Mouse actions use the normal GPUI input path in all three hosts.
@@ -3898,8 +3989,9 @@ The test renderer uses `VisualTestAppContext` with a `TestDispatcher` for determ
 
 ## Experimental embedded JavaScript runtime
 
-`gpx` runs a React or Solid app without Node or Bun. It compiles the app's TypeScript
-and JSX with oxc, runs it in an embedded QuickJS engine, and draws it with
+`gpx` runs a React or Solid app without Node or Bun. It compiles TypeScript
+and React JSX with oxc, and Solid JSX with Solid's Rust compiler, then runs
+the app in an embedded QuickJS engine and draws it with
 GPUI, all in one process:
 
 ```bash
@@ -3922,9 +4014,26 @@ swaps them in place, keeping their state, unless their hooks changed. A
 changed file that exports anything else also runs again in the files that
 import it, up to files that export only components. A file that fails to
 compile or throws is reported, and the app runs on as it was; the next
-update brings in the rest of that one's changes. When a change reaches the
-entry file, or a Solid app changes, the app starts again in the same window,
-with its state reset. A changed `tsconfig.json` needs a restart.
+update brings in the rest of that one's changes. Solid apps use Solid 2's
+refresh transform and runtime: an edited component remounts when its signature
+or dependencies change, while unaffected parents and siblings retain their
+signals. Changes to ordinary imported modules propagate to the nearest
+self-accepting component modules. Syntax errors are checked before disposal,
+so a failed compile leaves the mounted UI intact and the next edit can recover.
+When a change reaches the entry file, or a hot module invalidates the update,
+the app starts again in the same window with its state reset. A changed
+`tsconfig.json` still needs a restart. Neither framework hot-reloads in
+production mode.
+
+Development app modules receive `import.meta.hot` with persistent per-module
+`data`, `accept(callback?)` for self-acceptance, `dispose(callback)`, `decline()`
+and `invalidate()`. Disposal callbacks receive `data` before replacement code
+runs. Declining a module propagates the update to its importers; invalidating
+an update requests a restart. Dependency-list forms of `accept` are not supported.
+Module-level side effects remain the app's responsibility: register disposal
+for timers and subscriptions that must not survive replacement. A runtime
+failure cannot undo arbitrary side effects already performed by replacement
+code or disposal callbacks.
 
 Apps import their own files, `react`, `@gpuix/react` and its components, or
 `solid-js`, `@gpuix/solid` and its components. Both run their production
@@ -4392,7 +4501,8 @@ owner's lifetime.
 #### Package the Solid workspace (macOS)
 
 Run `just package-solid` on macOS with Rust and Xcode command-line tools
-installed. It builds a release runner with vendored Lua 5.4, copies the example's
+installed, plus Bun for building embedded framework bundles. It builds the
+release `gpx` runner with vendored Lua 5.4 and QuickJS, copies the example's
 Lua/LuaX modules and assets into `Contents/Resources/app`, and produces:
 
 - `dist/GPUIX Solid.app`
@@ -4447,6 +4557,10 @@ describes the Developer ID and hardened-runtime requirements.
 ## Status
 
 - [x] React reconciler with mutation-based protocol
+- [x] Solid 2 universal JavaScript adapter
+- [x] Embedded QuickJS React/Solid apps with native TypeScript/JSX compilation
+- [x] React Fast Refresh and Solid component hot refresh under `gpx --watch`
+- [x] Embedded Lua/LuaX with React-like hooks and Solid-like reactive libraries
 - [x] Atomic `applyBatch()` mutation transport through napi-rs and wasm-bindgen
 - [x] RetainedTree (Rust-side element storage)
 - [x] Style mapping (CSS properties → GPUI style methods)
@@ -4487,7 +4601,9 @@ describes the Developer ID and hardened-runtime requirements.
 
 ## Documentation
 
-See [AGENTS.md](https://github.com/remorses/gpuix/blob/main/AGENTS.md) for detailed architecture, communication flow, and contributing guide.
+See [AGENTS.md](./AGENTS.md) for the repository map, architecture,
+communication flow and contributing guide. [CURRENT_TASK.md](./CURRENT_TASK.md)
+is a dated engineering handoff; [TODO.md](./TODO.md) lists follow-ups.
 
 ## License
 

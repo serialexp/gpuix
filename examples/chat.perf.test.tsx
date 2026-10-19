@@ -185,7 +185,7 @@ describeNative('chat performance', () => {
   it('keeps a highlight query change under budget', () => {
     const { render, renderer } = createTestRoot()
     const app = (query: string, activeIndex = 0) => (
-      <div style={{ flex: 1 }} highlight={query ? { query, activeIndex } : null}>
+      <div style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0 }} highlight={query ? { query, activeIndex } : null}>
         <ChatApp turnCount={TURNS} includeSafeMdx />
       </div>
     )

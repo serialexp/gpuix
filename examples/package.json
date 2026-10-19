@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "typecheck": "tsc -p . --noEmit",
     "blurred-window": "bun --hot blurred-window.tsx",
     "counter": "bun --hot counter.tsx",
     "counter:lua": "bun lua-counter.ts",
@@ -35,6 +36,7 @@
     "string-dedent": "^3.0.2"
   },
   "devDependencies": {
+    "@types/diff": "^7.0.0",
     "@types/mdast": "^4.0.4",
     "@types/react": "^19.2.0",
     "cbor-x": "^1.6.6",

@@ -2699,6 +2699,7 @@ dependencies = [
  "gpui_macos",
  "gpui_platform",
  "http_client",
+ "image",
  "js-sys",
  "log",
  "memchr",
@@ -6647,7 +6648,7 @@ dependencies = [
 [[package]]
 name = "solidjs-compiler"
 version = "0.0.0"
-source = "git+https://github.com/solidjs/solid?rev=4937f0a2bfddd45a65738c189075aff577530073#4937f0a2bfddd45a65738c189075aff577530073"
+source = "git+https://github.com/serialexp/solid?rev=7a236862b67c37cfda95e28ef199e9bc3251b489#7a236862b67c37cfda95e28ef199e9bc3251b489"
 dependencies = [
  "html5ever",
  "htmlize",

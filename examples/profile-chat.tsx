@@ -29,7 +29,7 @@ const TURNS = 1_000
 const word = 'performance of the renderer'
 
 const app = (query: string, activeIndex = 0) => (
-  <div style={{ flex: 1 }} highlight={query ? { query, activeIndex } : null}>
+  <div style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0 }} highlight={query ? { query, activeIndex } : null}>
     <ChatApp turnCount={TURNS} includeSafeMdx />
   </div>
 )

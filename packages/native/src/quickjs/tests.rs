@@ -2408,7 +2408,7 @@ fn a_file_the_app_never_loaded_changes_nothing() {
 }
 
 #[test]
-fn a_solid_app_restarts_on_a_change() {
+fn a_solid_app_refreshes_on_a_change() {
     let dir = AppDir::new(&[
         (
             "main.tsx",
@@ -2430,8 +2430,10 @@ fn a_solid_app_restarts_on_a_change() {
     );
     assert!(matches!(
         app.js.hot_update(&[changed]),
-        Ok(HotUpdate::Restart(_))
+        Ok(HotUpdate::Refreshed(_))
     ));
+    app.settle();
+    assert_eq!(app.texts(), ["two"]);
 }
 
 #[test]
@@ -2440,6 +2442,196 @@ fn production_builds_restart_on_a_change() {
     let mut app = App::try_load_module(&dir.path("main.tsx")).unwrap();
     app.settle();
     let changed = edit(&dir, "counter.tsx", &counter_source("New ", ""));
+    assert!(matches!(
+        app.js.hot_update(&[changed]),
+        Ok(HotUpdate::Restart(_))
+    ));
+}
+
+fn solid_hot_app() -> AppDir {
+    AppDir::new(&[
+        (
+            "main.tsx",
+            r#"
+            import { render } from "@gpuix/solid"
+            import { Parent } from "./parent"
+            render(() => <Parent />)
+        "#,
+        ),
+        (
+            "parent.tsx",
+            r#"
+            import { createSignal } from "solid-js"
+            import { Child } from "./child"
+            function Sibling() {
+                const [count, setCount] = createSignal(0)
+                return <div testId="sibling" onClick={() => setCount(count() + 1)}><text>{`Sibling: ${count()}`}</text></div>
+            }
+            export function Parent() {
+                const [count, setCount] = createSignal(0)
+                return <div>
+                    <div testId="parent" onClick={() => setCount(count() + 1)}><text>{`Parent: ${count()}`}</text></div>
+                    <Child /><Sibling />
+                </div>
+            }
+        "#,
+        ),
+        ("caption.ts", "export const caption = 'Child'"),
+        ("child.tsx", &solid_child_source("")),
+    ])
+}
+
+fn solid_child_source(prefix: &str) -> String {
+    format!(
+        r#"
+        import {{ createSignal }} from "solid-js"
+        import {{ caption }} from "./caption"
+        export function Child() {{
+            const [count, setCount] = createSignal(0)
+            return <div testId="child" onClick={{() => setCount(count() + 1)}}><text>{{`{prefix}${{caption}}: ${{count()}}`}}</text></div>
+        }}
+    "#
+    )
+}
+
+#[test]
+fn solid_hot_refresh_preserves_parent_and_sibling_signals() {
+    let dir = solid_hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    for name in ["parent", "child", "sibling"] {
+        let id = app.test_id(name);
+        app.click(id).unwrap();
+    }
+    assert_eq!(app.texts(), ["Child: 1", "Parent: 1", "Sibling: 1"]);
+    let parent = app.test_id("parent");
+    let sibling = app.test_id("sibling");
+    for prefix in ["New ", "Again "] {
+        let changed = edit(&dir, "child.tsx", &solid_child_source(prefix));
+        assert!(matches!(
+            app.js.hot_update(&[changed]),
+            Ok(HotUpdate::Refreshed(_))
+        ));
+        app.settle();
+        assert_eq!(
+            app.texts(),
+            [
+                format!("{prefix}Child: 0"),
+                "Parent: 1".to_string(),
+                "Sibling: 1".to_string()
+            ]
+        );
+        assert_eq!(app.test_id("parent"), parent);
+        assert_eq!(app.test_id("sibling"), sibling);
+    }
+}
+
+#[test]
+fn solid_hot_refresh_propagates_plain_typescript_changes() {
+    let dir = solid_hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    let parent = app.test_id("parent");
+    app.click(parent).unwrap();
+    let changed = edit(&dir, "caption.ts", "export const caption = 'Updated'");
+    assert!(matches!(
+        app.js.hot_update(&[changed]),
+        Ok(HotUpdate::Refreshed(_))
+    ));
+    app.settle();
+    assert_eq!(app.texts(), ["Parent: 1", "Sibling: 0", "Updated: 0"]);
+}
+
+#[test]
+fn solid_hot_refresh_recovers_from_compile_errors() {
+    let dir = solid_hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    let parent = app.test_id("parent");
+    app.click(parent).unwrap();
+    let changed = edit(&dir, "child.tsx", "export function Child( {");
+    assert!(app.js.hot_update(&[changed]).is_err());
+    assert_eq!(app.texts(), ["Child: 0", "Parent: 1", "Sibling: 0"]);
+    let changed = edit(&dir, "child.tsx", &solid_child_source("Fixed "));
+    assert!(matches!(
+        app.js.hot_update(&[changed]),
+        Ok(HotUpdate::Refreshed(_))
+    ));
+    app.settle();
+    assert_eq!(app.texts(), ["Fixed Child: 0", "Parent: 1", "Sibling: 0"]);
+}
+
+#[test]
+fn solid_hot_refresh_restarts_for_entry_changes() {
+    let dir = solid_hot_app();
+    let app = App::load_development(&dir.path("main.tsx"));
+    assert!(matches!(
+        app.js.hot_update(&[dir.path("main.tsx")]),
+        Ok(HotUpdate::Restart(_))
+    ));
+}
+
+#[test]
+fn solid_refresh_maps_event_errors_to_original_source() {
+    let dir = AppDir::new(&[
+        ("main.tsx", "import { render } from '@gpuix/solid'; import { Child } from './child'; render(() => <Child />)"),
+        ("child.tsx", "export function Child() {\nreturn <div testId='child' onClick={() => {\nthrow new Error('authored');\n}}>Child</div>;\n}"),
+    ]);
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    let child = app.test_id("child");
+    app.click(child).unwrap();
+    let error = app.log().join("\n");
+    assert!(error.contains("child.tsx:3:"), "{error}");
+}
+
+#[test]
+fn solid_hot_refresh_runs_disposal_once_and_retains_hot_data() {
+    let dir = solid_hot_app();
+    let source = |prefix| {
+        format!(
+            r#"
+        import.meta.hot.dispose(data => {{
+            data.visits = (data.visits ?? 0) + 1;
+            console.log("disposed " + data.visits);
+        }});
+        {}
+    "#,
+            solid_child_source(prefix)
+        )
+    };
+    edit(&dir, "child.tsx", &source(""));
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    let changed = edit(&dir, "child.tsx", "export function Child( {");
+    assert!(app.js.hot_update(&[changed]).is_err());
+    assert!(!app.log().iter().any(|line| line.starts_with("disposed ")));
+    for prefix in ["One ", "Two "] {
+        let changed = edit(&dir, "child.tsx", &source(prefix));
+        assert!(matches!(
+            app.js.hot_update(&[changed]),
+            Ok(HotUpdate::Refreshed(_))
+        ));
+        app.settle();
+    }
+    let disposed: Vec<_> = app
+        .log()
+        .into_iter()
+        .filter(|line| line.starts_with("disposed "))
+        .collect();
+    assert_eq!(disposed, ["disposed 1", "disposed 2"]);
+}
+
+#[test]
+fn solid_hot_refresh_honors_invalidation() {
+    let dir = solid_hot_app();
+    let source = format!(
+        "import.meta.hot.dispose(() => import.meta.hot.invalidate());\n{}",
+        solid_child_source("")
+    );
+    edit(&dir, "child.tsx", &source);
+    let app = App::load_development(&dir.path("main.tsx"));
+    let changed = edit(&dir, "child.tsx", &solid_child_source("New "));
     assert!(matches!(
         app.js.hot_update(&[changed]),
         Ok(HotUpdate::Restart(_))
@@ -2655,14 +2847,14 @@ fn a_text_import_updates_its_importer() {
 }
 
 #[test]
-fn a_solid_apps_plain_typescript_change_restarts_before_it_runs() {
+fn a_solid_apps_plain_typescript_component_refreshes() {
     let dir = AppDir::new(&[
         (
             "main.tsx",
             r#"
             import { render } from "@gpuix/solid"
             import { Label } from "./label"
-            render(() => <text>{Label()}</text>)
+            render(() => <Label />)
             "#,
         ),
         ("label.ts", "export function Label() { return \"one\" }"),
@@ -2676,13 +2868,11 @@ fn a_solid_apps_plain_typescript_change_restarts_before_it_runs() {
     );
     assert!(matches!(
         app.js.hot_update(&[changed]),
-        Ok(HotUpdate::Restart(_))
+        Ok(HotUpdate::Refreshed(_))
     ));
-    assert!(
-        !app.log().iter().any(|line| line == "ran"),
-        "{:?}",
-        app.log()
-    );
+    app.settle();
+    assert_eq!(app.texts(), ["two"]);
+    assert!(app.log().iter().any(|line| line == "ran"));
 }
 
 #[test]

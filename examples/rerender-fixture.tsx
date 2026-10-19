@@ -52,7 +52,7 @@ export function App({ tick, streaming }: { tick: number; streaming: string }) {
   return (
     <div style={{ flexDirection: 'column', width: 900, height: 700 }}>
       <text style={{ color: '#fff' }}>tick {tick}</text>
-      <div style={{ flexDirection: 'column', flex: 1, overflowY: 'scroll', gap: 8 }}>
+      <div style={{ flexDirection: 'column', flexGrow: 1, flexShrink: 1, flexBasis: 0, overflowY: 'scroll', gap: 8 }}>
         {Array.from({ length: ROWS }, (_, index) => (
           <Row key={index} index={index} body={index === ROWS - 1 ? streaming : `message body number ${index}`} />
         ))}

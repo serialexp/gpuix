@@ -1,5 +1,10 @@
 # Current task
 
+This is a working handoff, not a repository overview or public API contract.
+Implementation and verification notes below are dated snapshots; use
+`git status` and `git log` for current local changes and push state. See
+`README.md` and `AGENTS.md` for the current architecture and repository map.
+
 Bring the rust-js-vm experiments into GPUIX: keep the embedded Lua runtime on
 top of upstream, then add a QuickJS engine (React-style and Solid-style, with
 built-in JSX/TSX compilation) behind a shared core. rust-js-vm itself is
@@ -55,12 +60,49 @@ gone (2026-10-19); its measurements are in
 
 ## Next
 
+2026-10-19: Added an opt-in `gpx --dev-server PORT` loopback HTTP API shared by
+Lua and QuickJS. It enables the existing watcher and exposes authenticated
+`POST /rpc` commands for health, native window discovery, retained trees,
+clicks and keystrokes. `GPUIX_DEV_TOKEN` is required; see README for the wire
+contract and limits. Commands run on the GPUI foreground task. Input replies
+acknowledge dispatch rather than completion, so callers poll the tree.
+Paint bounds and locator actions are intentionally not exposed:
+the existing paint-bounds registry is not window-scoped. Preserve correct
+multiwindow routing before adding those operations.
+The API now also exports detailed host trees (`details: true`) and per-window
+base64 PNG screenshots from a freshly drawn GPUI frame. Screenshots use GPUI image
+readback with the default `test-support` feature, not desktop capture or file
+writes. This is a retained host tree, not a framework component/owner tree.
+
+Verification: 514 Rust library tests and 6 `gpx` CLI tests pass with
+`--release --features quickjs`.
+A rebuilt release runner passed real HTTP smoke tests against Lua, React and
+Solid apps: health, windows, tree reads, counter updates from native clicks,
+keystrokes, and rejection of unauthenticated requests. Input dispatch uses
+`AnyWindowHandle::update`, without borrowing the root view across event
+callbacks; using the typed view update there causes a GPUI entity reentry panic.
+Screenshot follow-up: the same three runtimes pass live PNG capture checks
+before/after counter changes, including separate captures of two Lua windows.
+PNG metadata/signatures and detailed styles/events are checked; the captured
+Lua PNG was also visually inspected. Capture uses public `Window::draw` plus
+`render_to_image` and clears the returned arena token. It does not wait on a
+platform frame callback, which can strand a capture of an inactive window.
+Subtree follow-up: `subtree` selects a mounted node by `nodeId` or unique
+`testId`, returning an opaque revision and only that section. `ifRevision`
+returns metadata alone when unchanged, without serializing descendants.
+Tokens include the tree incarnation and detail mode; there is no per-client
+snapshot cache. Event-listener and testId mutations now advance subtree
+revisions as well. These are conditional snapshots, not mutation patches or
+visual-change subscriptions; ancestor-inherited appearance is not covered.
+Verified subtree lookup and unchanged/changed conditional polling over real
+HTTP in Lua, React and Solid apps; the existing PNG/input/multiwindow checks
+still pass. The four subtree regression tests bring the Rust suite to 514.
+
 The QuickJS port follows `docs/design/embedded-quickjs-runtime.md`; its
 checklist is the source of truth for what's done. As of 2026-10-16,
 Phases 0 to 5 are in, and Phase 6's React Fast Refresh is too (51c5012).
-Nothing since `wip`'s last push is pushed. Another agent has uncommitted
-work in `examples/*`, `bun.lock` and `.github/workflows/ci.yml`; leave it
-alone.
+Other agents may have local changes; inspect `git status` before editing and
+leave unrelated work alone.
 
 Run `bun run build:embedded` in `packages/native` before a `--features
 quickjs` build, and `bun run build:quickjs` before the JS suites' QuickJS
@@ -68,14 +110,49 @@ tests. React's suite runs with `bun run test` (vitest); `bun test` hangs
 there. Agent-tool review subagents kept stalling; `claude -p` with the
 prompt on stdin worked.
 
-### 1. Solid hot refresh under `gpx --watch` (up next)
+### 1. Solid hot refresh under `gpx --watch` (implemented)
+
+2026-10-19 implementation update:
+
+- Local Solid checkout: `../gpuix-solid-refresh`, based on pinned commit
+  `4937f0a2bfddd45a65738c189075aff577530073`.
+- Reviewable upstream diff: `docs/design/solid-refresh-compiler.patch`.
+  Apply it from the Solid repository root with `git apply`.
+- Exposes `solidjs_compiler::refresh::transform_refresh` without the `node`
+  feature, returning `RefreshOutput { code, map }` and `CompileError`.
+  The Node adapter retains its existing result shape. Shared path/hash
+  helpers move out of the Node-only directives module; the transform itself
+  is unchanged.
+- Verification: 12 library tests, 3 existing host-independent interface
+  tests and 5 new refresh tests pass with `--no-default-features`.
+  Six refresh tests, including Node-adapter output parity, pass with
+  `--no-default-features --features node,napi/dyn-symbols` (dynamic symbols
+  let that Rust integration-test executable run without a Node host).
+  Formatting and diff checks pass; the normal no-default-features dependency
+  tree contains no NAPI dependency.
+- Bart approved publishing the fork. The compiler patch is committed and
+  pushed to `serialexp/solid` branch `gpuix-host-independent-refresh`, revision
+  `7a236862b67c37cfda95e28ef199e9bc3251b489`; GPUIX is pinned to that revision.
+  No upstream PR has been opened.
+- Runtime integration now embeds Solid's development refresh runtime,
+  installs per-module hot contexts, composes refresh/JSX source maps, and
+  uses the existing import graph for update propagation.
+- Verification: all 504 Rust library tests pass with `--release --features
+  quickjs`, including all 115 QuickJS tests. Coverage includes repeated child
+  edits retaining parent/sibling signals and node IDs, plain TypeScript
+  propagation, compile-error recovery, disposal/data persistence, invalidation,
+  entry restart, and authored-source error positions. All 36 Solid package
+  tests pass. Embedded framework bundles rebuild successfully. Targeted Rust
+  formatting and diff checks pass. A live GUI watch session has not been run
+  for this change; the new behavior is exercised through the native retained
+  tree/event tests. GPUIX changes remain uncommitted.
 
 Bart decided on 2026-10-16: an upstream PR to solidjs/solid that makes the
 compiler's refresh pass usable without napi, and `gpx` pinned to a fork's
 revision until it lands. Pushing the fork and opening the PR are
 outward-facing: show Bart the diff first.
 
-What's there:
+Compiler baseline before extraction (historical context):
 - `solidjs-compiler` is a git dependency pinned to rev `4937f0a2` (the
   `solid-js@2.0.0-rc.15` tag), with `default-features = false`
   (`packages/native/Cargo.toml`).
@@ -100,7 +177,7 @@ What's there:
 - Unlike React's refresh, the edited component remounts, losing its own
   signals; parents and siblings keep their state.
 
-Plan:
+Original implementation plan (retained for design context):
 1. The upstream change, in a local clone of solidjs/solid at the pinned
    rev:
    - split the refresh pass from napi: a plain Rust

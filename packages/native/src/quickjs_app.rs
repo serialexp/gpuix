@@ -61,6 +61,7 @@ pub fn check_js_file(path: impl AsRef<Path>) -> Result<(), String> {
 
 /// Runs the app at `path` in a window until the window closes.
 pub fn run_js_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), String> {
+    let dev_server = crate::script::server::Server::start(options.dev_server)?;
     let path = path.as_ref().to_path_buf();
     // `--watch` runs the frameworks' development builds, for React Fast
     // Refresh.
@@ -82,6 +83,9 @@ pub fn run_js_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), St
                 .clone()
                 .unwrap_or_else(|| window_options.title_or_default());
             init_app(&app_name, cx);
+            if let Some(server) = dev_server {
+                server.attach(cx);
+            }
             cx.on_window_closed(|_cx, native_id| crate::text::paint::remove_window(native_id))
                 .detach();
             let reloads = options.watch.then(|| watch_sources(&path));

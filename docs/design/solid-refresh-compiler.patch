@@ -1,0 +1,412 @@
+diff --git a/packages/compiler/README.md b/packages/compiler/README.md
+index ca3361d6..1b5e96a5 100644
+--- a/packages/compiler/README.md
++++ b/packages/compiler/README.md
+@@ -203,6 +203,15 @@ let virtual_tsx =
+ 
+ The unstable Rust typecheck projection reports embedded ranges in authored UTF-8 bytes. The N-API adapter converts those ranges to UTF-16 code units for JavaScript tooling.
+ 
++The host-independent `solidjs_compiler::refresh::transform_refresh` function
++also builds with `--no-default-features`. It accepts source code and optional
++`TransformRefreshOptions`, returning `RefreshOutput { code, map }` or a
++`CompileError`. Set `bundler: Some("vite".into())` for `import.meta.hot` hosts
++and `import_source: Some("solid-js/refresh".into())` for Solid's bundled
++refresh runtime. Run this pass before JSX compilation and compose its source
++map with the JSX compiler's map. The Node `transformRefresh` API retains its
++existing options and result shape.
++
+ > **Stability:** the Rust API is unstable while the compiler is pre-1.0. Options, output, and error types may change in any release — pin an exact revision when embedding it.
+ 
+ ## Performance
+diff --git a/packages/compiler/src/directives/mod.rs b/packages/compiler/src/directives/mod.rs
+index 271caa0a..014e112e 100644
+--- a/packages/compiler/src/directives/mod.rs
++++ b/packages/compiler/src/directives/mod.rs
+@@ -13,7 +13,7 @@
+ mod dce;
+ mod transform;
+ mod validate;
+-pub(crate) mod xxhash;
++use crate::shared::{paths::relative_id, xxhash};
+ 
+ use napi::bindgen_prelude::*;
+ use napi_derive::napi;
+@@ -240,50 +240,3 @@ fn import_def(option: Option<&DirectiveImportOption>, default_name: &str) -> Imp
+         },
+     }
+ }
+-
+-/// Node's `path.relative(root, id)` with separators normalized to `/` — the
+-/// hash input contract shared with the Babel implementation's `compile()`.
+-/// Also reused by the refresh pass for cwd-relative `location` strings.
+-pub(crate) fn relative_id(root: Option<&str>, filename: &str) -> String {
+-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+-    let root = normalize(&cwd, root.map(std::path::Path::new).unwrap_or(&cwd));
+-    let file = normalize(&cwd, std::path::Path::new(filename));
+-
+-    let mut root_parts = root.iter().peekable();
+-    let mut file_parts = file.iter().peekable();
+-    while let (Some(a), Some(b)) = (root_parts.peek(), file_parts.peek()) {
+-        if a != b {
+-            break;
+-        }
+-        root_parts.next();
+-        file_parts.next();
+-    }
+-    let mut parts: Vec<String> = Vec::new();
+-    for _ in root_parts {
+-        parts.push("..".to_string());
+-    }
+-    for part in file_parts {
+-        parts.push(part.to_string_lossy().into_owned());
+-    }
+-    parts.join("/")
+-}
+-
+-/// Resolve against `cwd` and fold `.`/`..` segments (Node `path.resolve`).
+-fn normalize(cwd: &std::path::Path, path: &std::path::Path) -> std::path::PathBuf {
+-    let joined = if path.is_absolute() {
+-        path.to_path_buf()
+-    } else {
+-        cwd.join(path)
+-    };
+-    let mut result = std::path::PathBuf::new();
+-    for component in joined.components() {
+-        match component {
+-            std::path::Component::CurDir => {}
+-            std::path::Component::ParentDir => {
+-                result.pop();
+-            }
+-            other => result.push(other.as_os_str()),
+-        }
+-    }
+-    result
+-}
+diff --git a/packages/compiler/src/lib.rs b/packages/compiler/src/lib.rs
+index 44749b31..1bd89223 100644
+--- a/packages/compiler/src/lib.rs
++++ b/packages/compiler/src/lib.rs
+@@ -25,8 +25,7 @@ mod error;
+ mod lazy;
+ #[cfg(feature = "node")]
+ mod node_adapter;
+-#[cfg(feature = "node")]
+-mod refresh;
++pub mod refresh;
+ mod shared;
+ #[cfg(feature = "node")]
+ mod source_names;
+diff --git a/packages/compiler/src/node_adapter.rs b/packages/compiler/src/node_adapter.rs
+index c433175a..56de8147 100644
+--- a/packages/compiler/src/node_adapter.rs
++++ b/packages/compiler/src/node_adapter.rs
+@@ -200,7 +200,14 @@ pub fn transform_refresh(
+     code: String,
+     options: Option<TransformRefreshOptions>,
+ ) -> Result<TransformResult> {
+-    crate::refresh::transform_refresh(code, options)
++    let output = crate::refresh::transform_refresh(code, options)
++        .map_err(|error| Error::from_reason(error.to_string()))?;
++    Ok(TransformResult {
++        code: output.code,
++        map: output.map,
++        css: None,
++        css_hash: None,
++    })
+ }
+ 
+ /// The `sourceNames.primitives` pass — names `createSignal`/`createMemo`/
+diff --git a/packages/compiler/src/refresh/mod.rs b/packages/compiler/src/refresh/mod.rs
+index fcdc2fe4..47c82e85 100644
+--- a/packages/compiler/src/refresh/mod.rs
++++ b/packages/compiler/src/refresh/mod.rs
+@@ -19,18 +19,17 @@
+ mod signature;
+ mod transform;
+ 
+-use napi::bindgen_prelude::*;
+-use napi_derive::napi;
++use crate::error::{Error, Result};
+ use oxc_allocator::Allocator;
+ use oxc_codegen::{Codegen, CodegenOptions};
+ use oxc_parser::{ParseOptions, Parser};
+ 
+-use crate::config::{TransformResult, source_type_for_filename};
++use oxc_span::SourceType;
+ use transform::{Bundler, RefreshConfig, RefreshTransform};
+ 
+ pub const DEFAULT_IMPORT_SOURCE: &str = "solid-refresh";
+ 
+-#[napi(object)]
++#[cfg_attr(feature = "node", napi_derive::napi(object))]
+ #[derive(Default)]
+ pub struct TransformRefreshOptions {
+     /// Used for `location` metadata (cwd-relative, like the Babel plugin)
+@@ -58,23 +57,29 @@ pub struct TransformRefreshOptions {
+     pub source_map: Option<bool>,
+ }
+ 
++#[derive(Debug)]
++pub struct RefreshOutput {
++    pub code: String,
++    pub map: Option<String>,
++}
++
+ pub fn transform_refresh(
+     code: String,
+     options: Option<TransformRefreshOptions>,
+-) -> Result<TransformResult> {
++) -> Result<RefreshOutput> {
+     let options = options.unwrap_or_default();
+ 
+     let bundler = match options.bundler.as_deref() {
+         None | Some("standard") => Bundler::Standard,
+         Some("vite") => Bundler::Vite,
+         Some(other) => {
+-            return Err(Error::from_reason(format!(
++            return Err(Error::configuration(format!(
+                 "transformRefresh `bundler` option must be \"vite\" or \"standard\", got {other:?}"
+             )));
+         }
+     };
+     if options.jsx == Some(true) {
+-        return Err(Error::from_reason(
++        return Err(Error::configuration(
+             "transformRefresh does not support `jsx: true` (JSX-granularity mode); pass `jsx: false` like vite-plugin-solid does",
+         ));
+     }
+@@ -90,7 +95,12 @@ pub fn transform_refresh(
+             .unwrap_or_else(|| DEFAULT_IMPORT_SOURCE.to_string()),
+     };
+ 
+-    let source_type = source_type_for_filename(options.filename.as_deref())?;
++    let source_type = match options.filename.as_deref() {
++        Some(filename) if filename.ends_with(".tsrx") => SourceType::tsx(),
++        Some(filename) => SourceType::from_path(filename)
++            .map_err(|error| Error::configuration(error.to_string()))?,
++        None => SourceType::tsx(),
++    };
+     let allocator = Allocator::default();
+     let parsed = Parser::new(&allocator, &code, source_type)
+         .with_options(ParseOptions {
+@@ -99,7 +109,7 @@ pub fn transform_refresh(
+         })
+         .parse();
+     if let Some(error) = crate::shared::parser::first_parser_error(parsed.diagnostics) {
+-        return Err(Error::from_reason(error));
++        return Err(Error::parse(error));
+     }
+ 
+     let mut program = parsed.program;
+@@ -110,12 +120,7 @@ pub fn transform_refresh(
+     if !changed {
+         // Skipped modules (`@refresh skip`) and modules with nothing to
+         // register come back untouched.
+-        return Ok(TransformResult {
+-            code,
+-            map: None,
+-            css: None,
+-            css_hash: None,
+-        });
++        return Ok(RefreshOutput { code, map: None });
+     }
+ 
+     let build = Codegen::new()
+@@ -127,10 +132,8 @@ pub fn transform_refresh(
+         })
+         .build(&program);
+ 
+-    Ok(TransformResult {
++    Ok(RefreshOutput {
+         code: build.code,
+         map: build.map.map(|map| map.to_json_string()),
+-        css: None,
+-        css_hash: None,
+     })
+ }
+diff --git a/packages/compiler/src/refresh/transform.rs b/packages/compiler/src/refresh/transform.rs
+index e4d0150b..df0e79d7 100644
+--- a/packages/compiler/src/refresh/transform.rs
++++ b/packages/compiler/src/refresh/transform.rs
+@@ -27,12 +27,12 @@ use oxc_ast_visit::{Visit, walk};
+ use oxc_semantic::{ScopeId, Scoping, SemanticBuilder, SymbolId};
+ use oxc_span::{GetSpan, Span};
+ 
+-use crate::directives::relative_id;
+-use crate::directives::xxhash::xxhash32;
+ use crate::shared::ast::{
+     expression_to_argument, import_named, object_property, variable_statement,
+ };
+ use crate::shared::ast_builder::AstBuilder;
++use crate::shared::paths::relative_id;
++use crate::shared::xxhash::xxhash32;
+ 
+ use super::signature::{CommentInfo, Printer};
+ 
+diff --git a/packages/compiler/src/shared/mod.rs b/packages/compiler/src/shared/mod.rs
+index 46217b6a..bba4d403 100644
+--- a/packages/compiler/src/shared/mod.rs
++++ b/packages/compiler/src/shared/mod.rs
+@@ -19,3 +19,6 @@ pub(crate) mod this;
+ pub(crate) mod transform;
+ pub(crate) mod utils;
+ pub(crate) mod validate;
++
++pub(crate) mod paths;
++pub(crate) mod xxhash;
+diff --git a/packages/compiler/src/shared/paths.rs b/packages/compiler/src/shared/paths.rs
+new file mode 100644
+index 00000000..6fb11884
+--- /dev/null
++++ b/packages/compiler/src/shared/paths.rs
+@@ -0,0 +1,46 @@
++/// Node's `path.relative(root, id)` with separators normalized to `/` — the
++/// hash input contract shared with the Babel implementation's `compile()`.
++/// Also reused by the refresh pass for cwd-relative `location` strings.
++pub(crate) fn relative_id(root: Option<&str>, filename: &str) -> String {
++    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
++    let root = normalize(&cwd, root.map(std::path::Path::new).unwrap_or(&cwd));
++    let file = normalize(&cwd, std::path::Path::new(filename));
++
++    let mut root_parts = root.iter().peekable();
++    let mut file_parts = file.iter().peekable();
++    while let (Some(a), Some(b)) = (root_parts.peek(), file_parts.peek()) {
++        if a != b {
++            break;
++        }
++        root_parts.next();
++        file_parts.next();
++    }
++    let mut parts: Vec<String> = Vec::new();
++    for _ in root_parts {
++        parts.push("..".to_string());
++    }
++    for part in file_parts {
++        parts.push(part.to_string_lossy().into_owned());
++    }
++    parts.join("/")
++}
++
++/// Resolve against `cwd` and fold `.`/`..` segments (Node `path.resolve`).
++fn normalize(cwd: &std::path::Path, path: &std::path::Path) -> std::path::PathBuf {
++    let joined = if path.is_absolute() {
++        path.to_path_buf()
++    } else {
++        cwd.join(path)
++    };
++    let mut result = std::path::PathBuf::new();
++    for component in joined.components() {
++        match component {
++            std::path::Component::CurDir => {}
++            std::path::Component::ParentDir => {
++                result.pop();
++            }
++            other => result.push(other.as_os_str()),
++        }
++    }
++    result
++}
+diff --git a/packages/compiler/src/directives/xxhash.rs b/packages/compiler/src/shared/xxhash.rs
+similarity index 99%
+rename from packages/compiler/src/directives/xxhash.rs
+rename to packages/compiler/src/shared/xxhash.rs
+index 0e4923f4..14761fc7 100644
+--- a/packages/compiler/src/directives/xxhash.rs
++++ b/packages/compiler/src/shared/xxhash.rs
+@@ -91,6 +91,7 @@ pub(crate) fn xxhash32(input: &str, seed: u32) -> u32 {
+ 
+ /// The JS side renders IDs with `xxHash32(text).toString(16)` — lowercase
+ /// hex, no zero padding.
++#[cfg(feature = "node")]
+ pub(crate) fn xxhash32_hex(input: &str) -> String {
+     format!("{:x}", xxhash32(input, 0))
+ }
+diff --git a/packages/compiler/tests/host_independent_refresh.rs b/packages/compiler/tests/host_independent_refresh.rs
+new file mode 100644
+index 00000000..73a445d5
+--- /dev/null
++++ b/packages/compiler/tests/host_independent_refresh.rs
+@@ -0,0 +1,83 @@
++use solidjs_compiler::CompileErrorKind;
++use solidjs_compiler::refresh::{TransformRefreshOptions, transform_refresh};
++
++fn options() -> TransformRefreshOptions {
++    TransformRefreshOptions {
++        filename: Some("Counter.tsx".to_string()),
++        bundler: Some("vite".to_string()),
++        import_source: Some("solid-js/refresh".to_string()),
++        fix_render: Some(false),
++        source_map: Some(true),
++        ..TransformRefreshOptions::default()
++    }
++}
++
++#[test]
++fn refresh_registers_components_without_a_node_host() {
++    let output = transform_refresh(
++        "export function Counter() { return <div>Count</div>; }".to_string(),
++        Some(options()),
++    )
++    .unwrap();
++    assert!(output.code.contains("solid-js/refresh"));
++    assert!(output.code.contains("$$component"));
++    assert!(output.code.contains("import.meta.hot"));
++    assert!(output.map.is_some());
++}
++
++#[test]
++fn refresh_leaves_skipped_modules_unchanged() {
++    let source = "/* @refresh skip */ export function Counter() { return <div />; }";
++    let output = transform_refresh(source.to_string(), Some(options())).unwrap();
++    assert_eq!(output.code, source);
++    assert!(output.map.is_none());
++}
++
++#[test]
++fn refresh_leaves_plain_modules_unchanged() {
++    let source = "export const value = 42;";
++    let output = transform_refresh(source.to_string(), Some(options())).unwrap();
++    assert_eq!(output.code, source);
++    assert!(output.map.is_none());
++}
++
++#[test]
++fn refresh_reports_configuration_errors() {
++    let error = transform_refresh(
++        "export const value = 42;".to_string(),
++        Some(TransformRefreshOptions {
++            bundler: Some("unknown".to_string()),
++            ..options()
++        }),
++    )
++    .unwrap_err();
++    assert_eq!(error.kind(), CompileErrorKind::Configuration);
++    let error = transform_refresh(
++        "".to_string(),
++        Some(TransformRefreshOptions {
++            jsx: Some(true),
++            ..options()
++        }),
++    )
++    .unwrap_err();
++    assert_eq!(error.kind(), CompileErrorKind::Configuration);
++}
++
++#[test]
++fn refresh_reports_parse_errors() {
++    let error =
++        transform_refresh("export function Broken( {".to_string(), Some(options())).unwrap_err();
++    assert_eq!(error.kind(), CompileErrorKind::Parse);
++}
++
++#[cfg(feature = "node")]
++#[test]
++fn node_refresh_adapter_preserves_the_output_shape() {
++    let source = "export function Counter() { return <div />; }";
++    let rust = transform_refresh(source.to_string(), Some(options())).unwrap();
++    let node = solidjs_compiler::transform_refresh(source.to_string(), Some(options())).unwrap();
++    assert_eq!(rust.code, node.code);
++    assert_eq!(rust.map, node.map);
++    assert!(node.css.is_none());
++    assert!(node.css_hash.is_none());
++}

@@ -130,6 +130,14 @@ fn parse_arguments_with_default(
         match argument.as_str() {
             "--check" => check = true,
             "--watch" => options.watch = true,
+            "--dev-server" => {
+                options.dev_server = Some(
+                    next_value(&mut arguments, "--dev-server")?
+                        .parse()
+                        .map_err(|_| "--dev-server requires a port from 0 to 65535")?,
+                );
+                options.watch = true;
+            }
             "--title" => options.title = Some(next_value(&mut arguments, "--title")?),
             "--width" => {
                 options.width = Some(dimension(next_value(&mut arguments, "--width")?, "width")?);
@@ -152,6 +160,9 @@ fn parse_arguments_with_default(
     }
 
     let path = path.or(default_path).ok_or_else(usage)?;
+    if check && options.dev_server.is_some() {
+        return Err("--check cannot be combined with --dev-server".into());
+    }
     Ok(Arguments {
         engine: engine(&path)?,
         path,
@@ -181,12 +192,13 @@ fn dimension(value: String, name: &str) -> Result<f32, String> {
 
 fn usage() -> String {
     format!(
-        "Usage: gpx [--check] [--watch] [--title TITLE] [--width PX] [--height PX] [app]\n\
+        "Usage: gpx [--check] [--watch] [--dev-server PORT] [--title TITLE] [--width PX] [--height PX] [app]\n\
          The app is a {} file, run in the embedded Lua runtime, or a {} file,\n\
          run in the embedded QuickJS runtime. It is required unless gpx is launched from an app\n\
          bundle with Resources/app/{}.\n\
          --check loads the app without opening a window. --watch reloads it when its files\n\
-         change. --title, --width and --height beat the app's own window options.",
+         change. --dev-server enables watching and an authenticated loopback testing API\n\
+         (requires GPUIX_DEV_TOKEN). --title, --width and --height beat the app's own window options.",
         either(LUA_EXTENSIONS.into_iter()),
         either(JS_EXTENSIONS.into_iter()),
         BUNDLED_ENTRIES.join(", ")
@@ -196,6 +208,21 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dev_server_enables_watching_and_validates_port() {
+        let args = parse_arguments(["--dev-server", "0", "app.luax"].map(String::from)).unwrap();
+        assert_eq!(args.options.dev_server, Some(0));
+        assert!(args.options.watch);
+        for args in [
+            vec!["--dev-server", "65536", "app.luax"],
+            vec!["--dev-server", "-1", "app.tsx"],
+            vec!["--dev-server"],
+            vec!["--dev-server", "4318", "--check", "app.lua"],
+        ] {
+            assert!(parse_arguments(args.into_iter().map(String::from)).is_err());
+        }
+    }
 
     #[test]
     fn packaged_runner_uses_the_bundled_source_and_allows_overrides() {

@@ -5,6 +5,7 @@
 
 pub(crate) mod app;
 pub(crate) mod reload;
+pub(crate) mod server;
 
 /// How `gpx` runs an app, from its command line.
 #[derive(Clone, Debug, Default)]
@@ -16,6 +17,7 @@ pub struct AppOptions {
     pub height: Option<f32>,
     /// Reload the app when a source file under its directory changes.
     pub watch: bool,
+    pub dev_server: Option<u16>,
 }
 
 /// An app's window title when neither the app nor the command line sets one:

@@ -18,7 +18,7 @@
 //! In [`Mode::Development`] (`gpx --watch`), React files also get React
 //! Refresh's registrations, as `import.meta.$RefreshReg$` and
 //! `import.meta.$RefreshSig$` calls the loader provides, and Solid's compiler
-//! writes its development output.
+//! writes its development output after its host-independent refresh pass.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
@@ -107,7 +107,7 @@ pub(crate) fn compile(
         let development = mode == Mode::Development;
         let framework = (source_type.is_jsx() || development).then(jsx);
         let jsx = match framework {
-            Some(Ok(jsx)) if source_type.is_jsx() => jsx,
+            Some(Ok(jsx)) if source_type.is_jsx() || development => jsx,
             Some(Err(error)) if has_jsx(source, source_type) => return Err(error),
             _ => Jsx::React,
         };
@@ -160,6 +160,36 @@ fn compile_solid(
         source_type,
         Origin::Source,
     )?;
+    let original = source;
+    let refreshed = if mode == Mode::Development {
+        Some(
+            solidjs_compiler::refresh::transform_refresh(
+                source.to_string(),
+                Some(solidjs_compiler::refresh::TransformRefreshOptions {
+                    filename: Some(path.display().to_string()),
+                    bundler: Some("vite".to_string()),
+                    import_source: Some("solid-js/refresh".to_string()),
+                    fix_render: Some(false),
+                    granular: Some(true),
+                    source_map: Some(true),
+                    ..Default::default()
+                }),
+            )
+            .map_err(|error| format!("{}: {error}", path.display()))?,
+        )
+    } else {
+        None
+    };
+    let refresh_map = refreshed
+        .as_ref()
+        .and_then(|output| output.map.as_deref())
+        .map(SourceMap::from_json_string)
+        .transpose()
+        .map_err(|error| format!("{}: bad refresh source map: {error}", path.display()))?;
+    let refresh_table = refresh_map.as_ref().map(SourceMap::generate_lookup_table);
+    let source = refreshed
+        .as_ref()
+        .map_or(source, |output| output.code.as_str());
     // Solid's compiler picks the syntax from the file name, and reads `.js`
     // as holding no JSX. Bun lets it hold JSX, so it gets named `.jsx`.
     let filename = match path.extension().and_then(|extension| extension.to_str()) {
@@ -196,10 +226,17 @@ fn compile_solid(
     // source map composition does.
     let to_source = |line: u32, column: u32| {
         let token = map.lookup_token_approx(&table, line, column)?;
-        Some((token.get_src_line(), token.get_src_col()))
+        let (line, column) = (token.get_src_line(), token.get_src_col());
+        match (&refresh_map, &refresh_table) {
+            (Some(map), Some(table)) => {
+                let token = map.lookup_token_approx(table, line, column)?;
+                Some((token.get_src_line(), token.get_src_col()))
+            }
+            _ => Some((line, column)),
+        }
     };
     let origin = Origin::Solid {
-        source,
+        source: original,
         to_source: &to_source,
     };
     let (code, tokens) = compile_source(&solid.code, path, source_type, None, origin)?;

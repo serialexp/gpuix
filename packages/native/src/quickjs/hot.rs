@@ -1,4 +1,4 @@
-//! Hot updates for `gpx --watch`, with React Fast Refresh.
+//! Hot updates for `gpx --watch`, with React and Solid refresh.
 //!
 //! In [`Mode::Development`] the runtime loads the frameworks' development
 //! builds and `react-refresh/runtime`, and installs its hook before any app
@@ -15,7 +15,7 @@
 //! That's enough when the module exports only components, and the same
 //! names as before: React swaps each family to its new version and keeps
 //! the components' state. A module that doesn't (a file not compiled for
-//! React Refresh, as a Solid file, among them) is loaded again in the
+//! React Refresh, unless it self-accepts through `import.meta.hot`) is loaded again in the
 //! modules that import it, up the import graph, until each path reaches
 //! one that does. One that reaches the entry file can't be updated in
 //! place, and the app starts again.
@@ -175,6 +175,7 @@ enum Change {
 
 /// `react-refresh/runtime`'s functions, saved once it loads.
 pub(crate) struct Refresh {
+    solid: Persistent<Object<'static>>,
     /// Takes a file's path, and returns its `$RefreshReg$`.
     register_for: Persistent<Function<'static>>,
     create_signature: Persistent<Function<'static>>,
@@ -194,6 +195,9 @@ pub(crate) fn provide_refresh<'js>(
     let Some(refresh) = refresh.as_ref() else {
         return Ok(());
     };
+    let solid = refresh.solid.clone().restore(ctx)?;
+    let provide: Function = solid.get("provide")?;
+    meta.set("hot", provide.call::<_, Object>((path,))?)?;
     let register_for = refresh.register_for.clone().restore(ctx)?;
     meta.set("$RefreshReg$", register_for.call::<_, Value>((path,))?)?;
     meta.set(
@@ -221,6 +225,7 @@ impl QuickJsRuntime {
                 Ok(Persistent::save(ctx, runtime.get::<_, Function>(name)?))
             };
             Ok(Refresh {
+                solid: Persistent::save(ctx, ctx.eval::<Object, _>(include_str!("solid_hot.js"))?),
                 register_for: Persistent::save(ctx, register_for),
                 create_signature: save("createSignatureFunctionForTransform")?,
                 perform: save("performReactRefresh")?,
@@ -269,6 +274,11 @@ impl QuickJsRuntime {
         };
         let update = self.update(&modules);
         if update.is_err() {
+            let _ = self.call(|ctx, _| {
+                let refresh = self.shared.refresh.borrow();
+                let solid = refresh.as_ref().unwrap().solid.clone().restore(ctx)?;
+                solid.get::<_, Function>("rollback")?.call::<_, ()>(())
+            });
             let mut graph = self.shared.graph.borrow_mut();
             let failed = std::mem::replace(&mut *graph, saved);
             graph.last_version = failed.last_version;
@@ -330,15 +340,41 @@ impl QuickJsRuntime {
         // as they were, so the next pass starts over. The plan only grows,
         // so the passes end.
         'pass: loop {
+            for module in &plan.modules {
+                if module_file(module) != module {
+                    continue;
+                }
+                let path = Path::new(module);
+                let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+                super::compile::compile(&source, path, self.shared.mode, || {
+                    self.shared.frameworks.borrow_mut().for_file(path, || {
+                        let entry = self.shared.entry.as_deref()?;
+                        Some((PathBuf::from(entry), std::fs::read_to_string(entry).ok()?))
+                    })
+                })
+                .map_err(|error| format!("SyntaxError: {error}"))?;
+            }
+            self.call(|ctx, _| {
+                let refresh = self.shared.refresh.borrow();
+                let solid = refresh.as_ref().unwrap().solid.clone().restore(ctx)?;
+                solid
+                    .get::<_, Function>("begin")?
+                    .call::<_, ()>((plan.modules.clone(),))
+            })?;
             {
                 let mut graph = self.shared.graph.borrow_mut();
                 for module in &plan.modules {
                     graph.bump(module);
                 }
             }
+            let mut solid_boundaries = Vec::new();
             for index in 0..plan.boundaries.len() {
                 let (boundary, names) = plan.boundaries[index].clone();
                 let namespace = self.import_now(&boundary)?;
+                if names.is_empty() {
+                    solid_boundaries.push((boundary, namespace));
+                    continue;
+                }
                 if self.component_exports(namespace)? == Some(names) {
                     continue;
                 }
@@ -353,6 +389,25 @@ impl QuickJsRuntime {
                     continue 'pass;
                 }
             }
+            for (path, namespace) in solid_boundaries {
+                let accepted = self.call(|ctx, _| {
+                    let refresh = self.shared.refresh.borrow();
+                    let solid = refresh.as_ref().unwrap().solid.clone().restore(ctx)?;
+                    solid
+                        .get::<_, Function>("commit")?
+                        .call::<_, bool>((path.as_str(), namespace.restore(ctx)?))
+                })?;
+                if !accepted {
+                    return Ok(HotUpdate::Restart(format!(
+                        "{path} invalidated its hot update"
+                    )));
+                }
+            }
+            self.call(|ctx, _| {
+                let refresh = self.shared.refresh.borrow();
+                let solid = refresh.as_ref().unwrap().solid.clone().restore(ctx)?;
+                solid.get::<_, Function>("finish")?.call::<_, ()>(())
+            })?;
             break;
         }
 
@@ -399,6 +454,17 @@ impl QuickJsRuntime {
                 return Ok(Some(format!("{module}, the entry file, would run again")));
             }
             let refreshable = self.shared.graph.borrow().runs_refreshable(&module);
+            let solid_boundary = self.call(|ctx, _| {
+                let refresh = self.shared.refresh.borrow();
+                let solid = refresh.as_ref().unwrap().solid.clone().restore(ctx)?;
+                solid
+                    .get::<_, Function>("accepts")?
+                    .call::<_, bool>((module.as_str(),))
+            })?;
+            if solid_boundary {
+                plan.boundaries.push((module, Vec::new()));
+                continue;
+            }
             if refreshable {
                 // The version running now, which loaded already, so this
                 // doesn't run it again.

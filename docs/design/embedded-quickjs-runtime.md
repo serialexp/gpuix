@@ -113,8 +113,20 @@ Tracking the gap between this design and what's on the main branch.
 - [x] Phase 5: Solid app parity tests, under Bun and under `gpx`'s
   QuickJS, skipped without a `build:quickjs` `.node` file
   (`packages/solid/src/__tests__/quickjs-parity.test.ts`, same commit)
+- [x] Phase 6: Solid hot refresh under `gpx --watch`, with Solid 2's
+  refresh runtime and host-independent compiler pass, per-module hot data,
+  disposal, acceptance, invalidation and composed source maps. Validated
+  2026-10-19 with all 504 Rust library tests and 36 Solid package tests.
 
 ### Outstanding
+
+2026-10-19: Solid hot refresh now uses the napi-free refresh extraction in
+`serialexp/solid` revision `7a236862b67c37cfda95e28ef199e9bc3251b489`.
+The compiler diff is recorded in `solid-refresh-compiler.patch`. The development
+bundle embeds `solid-js/refresh`; per-module hot contexts retain data and run
+disposal/accept callbacks through the existing update graph. Source positions
+compose the refresh, Solid JSX and oxc maps. Entry changes and invalidation
+restart; changed components remount without resetting unaffected owners.
 
 - [ ] Phase 1: `script/events.rs` (deferred: Lua's handler lookup, handle
   routing and dirty-window tracking are Lua-only, and QuickJS keeps its
@@ -128,11 +140,6 @@ Tracking the gap between this design and what's on the main branch.
 - [ ] Phase 4 follow-up: run the parity tests in CI (deferred: CI builds
   the `.node` file without QuickJS, so they skip there; a `build:quickjs`
   step costs a second release build of the crate)
-- [ ] Phase 6: Solid hot refresh under `gpx --watch`, with Solid 2.0's
-  `solid-js/refresh` and its compiler's refresh pass. The pass only builds
-  with the crate's napi feature, so this waits on an upstream PR exposing
-  it, pinned to a fork's revision until it lands (decided by Bart on
-  2026-10-16). Until then a Solid change starts the app again
 - [ ] Phase 6: benchmark numbers in `docs/lua-runtime.md`'s benchmark
   table (the README's `gpx` section and the changesets are in)
 - [ ] Rust-reconciler React-style API for JS, shared with Lua's hooks

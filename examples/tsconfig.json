@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
+    "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
@@ -13,5 +13,5 @@
     // must not litter the folder with .js next to every .tsx.
     "noEmit": true
   },
-  "include": ["./*.tsx"]
+  "include": ["./*.tsx", "./*.d.ts"]
 }

@@ -8,7 +8,10 @@
 /// passes them as numbers across napi (no string allocation).
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, LazyLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, LazyLock,
+};
 
 use crate::style::StyleDesc;
 
@@ -255,6 +258,7 @@ impl StyleTable {
 }
 
 pub struct RetainedTree {
+    pub(crate) automation_id: u64,
     pub elements: ElementMap,
     pub motion_ids: HashSet<u64>,
     /// Elements that `needs_focus`, in id order. Kept as mutations arrive so the
@@ -285,7 +289,9 @@ impl Default for RetainedTree {
 
 impl RetainedTree {
     pub fn new() -> Self {
+        static NEXT_AUTOMATION_ID: AtomicU64 = AtomicU64::new(1);
         Self {
+            automation_id: NEXT_AUTOMATION_ID.fetch_add(1, Ordering::Relaxed),
             elements: ElementMap::default(),
             motion_ids: HashSet::new(),
             focusable_ids: Default::default(),
@@ -657,6 +663,7 @@ impl RetainedTree {
             self.dirty |= changed;
             if changed {
                 self.track_focusable(id);
+                self.mark_render_changed(id);
             }
         }
     }
@@ -687,8 +694,10 @@ impl RetainedTree {
             }
             if key == "testId" {
                 let test_id = value.as_str().map(str::to_string);
-                self.dirty |= element.test_id != test_id;
-                element.test_id = test_id;
+                if element.test_id != test_id {
+                    element.test_id = test_id;
+                    self.mark_render_changed(id);
+                }
                 return;
             }
             if value.is_null() {
@@ -752,6 +761,10 @@ impl RetainedTree {
         bounds: &std::collections::HashMap<u64, crate::automation::ElementBounds>,
     ) -> serde_json::Value {
         self.to_json_detail(bounds, false)
+    }
+
+    pub(crate) fn subtree_to_json(&self, id: u64, details: bool) -> serde_json::Value {
+        element_to_json(id, self, &HashMap::new(), details)
     }
 
     /// The elements whose painted box holds the point, topmost first: the DOM's

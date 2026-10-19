@@ -97,19 +97,19 @@ local function MainWindow()
                     <text>ⓘ</text>
                 </Tooltip>
                 <div style={{ flexGrow = 1 }} />
-                <div testId="compact" tabIndex={0} style={button_style}
+                <Button testId="compact" style={button_style}
                     onClick={function() store.dispatch({ type = "compact" }) end}>
                     <text>{compact() and "Expand" or "Compact"}</text>
-                </div>
-                <div testId="reverse" tabIndex={0} style={button_style}
-                    onClick={function() store.dispatch({ type = "reverse" }) end}><text>Reverse</text></div>
+                </Button>
+                <Button testId="reverse" style={button_style}
+                    onClick={function() store.dispatch({ type = "reverse" }) end}><text>Reverse</text></Button>
                 <Checkbox testId="toggle-activity" checked={activity_visible} label="Activity"
                     style={{ display = "flex", flexDirection = "row", alignItems = "center",
                         gap = 8, padding = 10, background = colors.panel, borderRadius = 6,
                         focus = button_style.focus }}
                     onCheckedChange={function() store.dispatch({ type = "activity" }) end} />
-                <div testId="open-inspector" tabIndex={0} style={button_style}
-                    onClick={function() gpuix.open_window(app, "inspector") end}><text>Inspector</text></div>
+                <Button testId="open-inspector" style={button_style}
+                    onClick={function() gpuix.open_window(app, "inspector") end}><text>Inspector</text></Button>
             </div>
             <div style={{ display = "flex", flexDirection = "row", gap = 16, flexGrow = 1, minHeight = 0 }}>
                 <div testId="sidebar" style={{
@@ -157,10 +157,10 @@ local function MainWindow()
                             <Index each={activity} render={function(item, index)
                                 return <text>{index}. {item()}</text>
                             end} />
-                            <div testId="activity-click" tabIndex={0} style={button_style}
+                            <Button testId="activity-click" style={button_style}
                                 onClick={function() set_clicks(clicks() + 1) end}>
                                 <text>Panel clicks: {clicks()}</text>
-                            </div>
+                            </Button>
                         </div>
                     end} />
             </div>
@@ -191,10 +191,10 @@ local function InspectorWindow()
             <text>Selected: {selected()}</text>
             <text>Messages: {#messages()}</text>
             <text>Draft: {draft()}</text>
-            <div testId="inspector-reverse" tabIndex={0} style={button_style}
-                onClick={function() store.dispatch({ type = "reverse" }) end}><text>Reverse shared list</text></div>
-            <div testId="close-inspector" tabIndex={0} style={button_style}
-                onClick={function() gpuix.close_window(app, "inspector") end}><text>Close</text></div>
+            <Button testId="inspector-reverse" style={button_style}
+                onClick={function() store.dispatch({ type = "reverse" }) end}><text>Reverse shared list</text></Button>
+            <Button testId="close-inspector" style={button_style}
+                onClick={function() gpuix.close_window(app, "inspector") end}><text>Close</text></Button>
         </div>
     end)
 end

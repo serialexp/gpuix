@@ -11,7 +11,7 @@
  */
 
 import React from 'react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { flushSync } from '@gpuix/react'
 import { createTestRoot, hasNativeTestRenderer, type TestRoot } from '@gpuix/react/testing'
 import { App } from './rerender-fixture'
@@ -29,11 +29,11 @@ function measure(
   let ops = 0
   let bytes = 0
   const original = renderer.applyBatch.bind(renderer)
-  renderer.applyBatch = (json: string) => {
+  const applyBatch = vi.spyOn(renderer, 'applyBatch').mockImplementation((json: string) => {
     bytes += json.length
     ops += (JSON.parse(json) as unknown[]).length
     return original(json)
-  }
+  })
   // `ms` is React rendering and committing, which includes `applyBatch`.
   // `frameMs` is the native frame that follows. A real window only runs one when
   // a batch left something dirty, but the test renderer always does. Not
@@ -56,7 +56,7 @@ function measure(
       }
     }
   } finally {
-    renderer.applyBatch = original
+    applyBatch.mockRestore()
   }
   return { ms, frameMs, ops: ops / SAMPLES, bytes: bytes / SAMPLES }
 }
