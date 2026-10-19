@@ -1,7 +1,7 @@
 # Embedded QuickJS runtime
 
 **Status:** In progress
-**Last updated:** 2026-10-16
+**Last updated:** 2026-10-19
 
 ## Implementation status
 
@@ -9,13 +9,12 @@ Tracking the gap between this design and what's on the main branch.
 
 ### Done
 
-- [x] Engine comparison and design spike, outside this repo (rust-js-vm,
-  see References)
+- [x] Engine comparison and design spike, outside this repo (rust-js-vm;
+  its results are in `quickjs-phase0-results.md`)
 - [x] Phase 0: measure `@gpuix/react` and Solid 2.0 running inside QuickJS
-  on the rust-js-vm workload (rust-js-vm `src/js/react.rs`, `react/`,
-  `solid2/`; results in its README, "Real React and Solid 2.0", and under
-  open question 1 below. rust-js-vm is not a git repository, so there is
-  no commit)
+  on the rust-js-vm workload (results in `quickjs-phase0-results.md`,
+  "Real React and Solid 2.0", and under open question 1 below. rust-js-vm
+  was not a git repository, so there is no commit)
 - [x] Phase 0: settle open question 1: real `@gpuix/react` (decided
   2026-10-13)
 - [x] Phase 1: `script/app.rs`: window options, app commands, focus
@@ -570,8 +569,8 @@ JavaScript app loop in `src/quickjs_app.rs`. Details the design left open:
    > (14–15 ms). Two Solid 2.0 behaviours the QuickJS host has to allow for:
    > it renders `""` as no text node, and removed nodes stay in reference
    > cycles until QuickJS's cycle collector runs, so the host must run it
-   > (gpuix's idle GC would do). Full tables: rust-js-vm README, "Real React
-   > and Solid 2.0".
+   > (gpuix's idle GC would do). Full tables: `quickjs-phase0-results.md`,
+   > "Real React and Solid 2.0".
 
    > **2026-10-13 update:** decided: real `@gpuix/react`. Its cost shows up
    > during development, so app authors can see it and design for it; React
@@ -635,10 +634,12 @@ JavaScript app loop in `src/quickjs_app.rs`. Details the design left open:
 
 ## References
 
-- rust-js-vm (`~/Projects/rust-js-vm`): README results and design notes;
-  `src/core/` (shared core), `src/js/` (QuickJS binding and SolidJS host),
-  `solid/src/renderer.js` (SolidJS universal renderer over a direct host),
-  `patches/rquickjs-sys-0.14.0-map-hash-mix.diff`.
+- `quickjs-phase0-results.md`: rust-js-vm's measurements and findings.
+  rust-js-vm itself, the experiment crate the body refers to (`src/core/`,
+  `src/js/`, `solid/src/renderer.js`), was removed on 2026-10-19, once
+  nothing GPUIX builds on was left only in it.
+- `packages/native/vendor/rquickjs-sys-0.14.0-map-hash-mix.diff` and
+  `map-hash-repro.js`: the Map hash fix and its reproduction.
 - `docs/lua-runtime.md`: the Lua runtime this generalizes.
 - [Aeolun/solid-jsx-oxc](https://github.com/Aeolun/solid-jsx-oxc):
   `packages/solid-jsx-oxc/TODO.md` on universal mode.

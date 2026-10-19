@@ -17,7 +17,9 @@ and with it a final mix (the MurmurHash3 finalizer) in quickjs-ng's
 `map_hash_key`. quickjs-ng takes a Map or Set bucket from the low bits of the
 key's hash, and those bits are constant for small integers and for object
 pointers, so most such keys share a few buckets and lookups degrade towards a
-linear scan. Solid's `For` keys a Map by both. The patch also silences an
+linear scan. Solid's `For` keys a Map by both. `map-hash-repro.js` shows
+it: run it with quickjs-ng's `qjs` (or `gpx --check`, which has the fix),
+and integer and object keys only stay as fast as strings with the patch. The patch also silences an
 unused-variable C warning that only shows with assertions disabled.
 
 ### source-position

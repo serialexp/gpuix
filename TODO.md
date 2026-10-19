@@ -17,9 +17,10 @@
   Both predate the QuickJS work and come from upstream code. CI runs the
   Rust tests but neither check, so they accumulate. Decide whether to fix them here or upstream, then
   add both checks to CI.
-- Offer the quickjs-ng `Map`/`Set` hash fix upstream (rust-js-vm
-  `patches/rquickjs-sys-0.14.0-map-hash-mix.diff`, repro in
-  `examples/map_hash.rs`): rebase onto quickjs-ng main, prepare the PR text,
+- Offer the quickjs-ng `Map`/`Set` hash fix upstream
+  (`packages/native/vendor/rquickjs-sys-0.14.0-map-hash-mix.diff`, repro in
+  `packages/native/vendor/map-hash-repro.js`, numbers in
+  `docs/design/quickjs-phase0-results.md`): rebase onto quickjs-ng main, prepare the PR text,
   and Bart opens it (the local `gh` token can't reach quickjs-ng). Offer the
   `source-position` hook (`packages/native/vendor/README.md`) the same way.
   Once rquickjs ships both, gpuix can drop its vendored rquickjs-sys.

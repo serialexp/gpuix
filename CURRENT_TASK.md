@@ -2,7 +2,9 @@
 
 Bring the rust-js-vm experiments into GPUIX: keep the embedded Lua runtime on
 top of upstream, then add a QuickJS engine (React-style and Solid-style, with
-built-in JSX/TSX compilation) behind a shared core.
+built-in JSX/TSX compilation) behind a shared core. rust-js-vm itself is
+gone (2026-10-19); its measurements are in
+`docs/design/quickjs-phase0-results.md`.
 
 ## Done
 
