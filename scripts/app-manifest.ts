@@ -1,5 +1,5 @@
-import { lstat, readdir, readFile, realpath } from "node:fs/promises"
-import { dirname, isAbsolute, relative, resolve } from "node:path"
+import { readFile, realpath } from "node:fs/promises"
+import { dirname, isAbsolute } from "node:path"
 
 export interface AppManifest {
   schemaVersion: 1
@@ -63,34 +63,4 @@ export async function loadManifest(path: string) {
   const manifestPath = await realpath(path)
   const manifest = validateManifest(JSON.parse(await readFile(manifestPath, "utf8")))
   return { manifest, manifestPath, root: dirname(manifestPath) }
-}
-
-export async function collectFiles(root: string, includes: string[]) {
-  const files = new Map<string, string>()
-  const canonicalRoot = await realpath(root)
-  async function visit(path: string) {
-    const stat = await lstat(path)
-    if (stat.isSymbolicLink()) throw new Error(`Payload symlinks are not supported: ${path}`)
-    const canonical = await realpath(path)
-    const name = relative(canonicalRoot, canonical).split("\\").join("/")
-    if (name === ".." || name.startsWith("../") || isAbsolute(name)) throw new Error(`File escapes application root: ${path}`)
-    if (stat.isDirectory()) {
-      for (const child of (await readdir(path)).sort()) await visit(resolve(path, child))
-    } else if (stat.isFile()) {
-      appPath(name)
-      files.set(name, (await readFile(path)).toString("base64"))
-    } else {
-      throw new Error(`Unsupported payload file: ${path}`)
-    }
-  }
-  for (const include of includes) {
-    if (include !== ".") appPath(include)
-    let parent = canonicalRoot
-    for (const segment of include === "." ? [] : include.split("/")) {
-      parent = resolve(parent, segment)
-      if ((await lstat(parent)).isSymbolicLink()) throw new Error(`Payload symlinks are not supported: ${parent}`)
-    }
-    await visit(resolve(canonicalRoot, include))
-  }
-  return [...files].sort(([left], [right]) => left.localeCompare(right)).map(([path, data]) => ({ path, data }))
 }

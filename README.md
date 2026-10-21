@@ -4718,33 +4718,54 @@ the application or `--title`. Changing the manifest or app icon requires restart
 
 `gpx package gpuix.json [--format app|binary|deb] [--output PATH]` is the packaging
 CLI; `gpx package --help` shows its options. `just package MANIFEST` builds and
-invokes that command from a checkout. Packaging currently delegates to the
-repository's Bun build helpers and requires Bun, Rust, a GPUIX source checkout,
-and the normal native build prerequisites. It searches the working directory's
-ancestors, then its original build checkout; set `GPUIX_SOURCE_DIR` to select a
-checkout explicitly if needed. A copied `gpx` executable alone is not yet a
-self-contained packaging SDK. Manifest and explicit output paths resolve from
-the caller's working directory, with default outputs under that directory's
-`dist`. Packaged applications themselves do not need this build toolchain.
-The internal `gpx-app` Cargo target builds application runners separately so
-packaging never overwrites the running `gpx` tool, including on Windows. It
-builds the embedded framework bundles and compiles the manifest, application
-sources and assets into the release executable. No source sidecars or installed
-Lua/Node/Bun runtime are needed on the user's machine. The first format is
-uncompressed and contains source, not obfuscated code. Each launch extracts its
+invokes that command from a checkout. **An installed `gpx` packages applications
+by itself: no GPUIX checkout, Bun, Rust or compiler is required.** The native
+packer copies its own runner and inserts an application archive; it never
+recompiles GPUIX or invokes JavaScript build helpers. The runner already contains
+the script engines and embedded framework libraries. `GPUIX_SOURCE_DIR` and the
+old compile-time `GPUIX_APP_PAYLOAD` mechanism are no longer used.
+Manifest and explicit output paths resolve from the caller's working directory,
+with default outputs under that directory's `dist`. Packaging targets the
+installed runner's OS, architecture and native feature set; cross-compilation
+and universal Mach-O runners are not supported. Choose a runner that contains
+the script runtime your app needs.
+
+Binary packaging needs only the runner and your application files on Linux and
+Windows. macOS binary and app packaging additionally use the system `codesign`
+tool for ad-hoc signing; Debian packages need the tools documented below. Default
+icons are embedded in `gpx`, so they do not require a checkout either. The existing
+runner is never overwritten. Repackaging from an already-packaged executable
+replaces its archive rather than accumulating copies of previous applications.
+On macOS, the archive is included in the Mach-O link-edit region before signing;
+startup locates it before the signature, including after the app is re-signed.
+Windows Authenticode certificates are removed from copied runners; generated
+Windows binaries are unsigned and signing them afterward is not yet validated.
+
+No source sidecars or installed Lua/Node/Bun runtime are needed on the user's
+machine. The first archive format is uncompressed and contains source, not
+obfuscated code. Input files are limited to 384 MiB in total and the encoded
+archive to 512 MiB. Each launch reads its archive without reading the whole
+executable and extracts its
 payload to a private temporary directory kept for the application lifetime and
 removed on normal shutdown. Imports, native asset paths and ordinary file APIs
 therefore work without a separate virtual filesystem. Development and packaged
 manifest launches use the application root as their working directory; do not
 store persistent user data there. Abnormal termination may leave temporary files.
+See [native packaging internals](docs/design/native-packaging.md) for the archive
+layout, executable/signature handling and validation strategy.
 
 Default output is `dist/<name>.app` on macOS and a standalone executable in
 `dist` on other hosts. `--format binary` explicitly emits just the executable;
 `--format app` requires macOS. `--format deb` requires Debian/Ubuntu Linux and
 produces an installable package (details below). `--output PATH` overrides the destination and
-replaces an existing output bundle. macOS outputs are ad-hoc signed, not
+replaces an existing output after the new package validates; a failed build
+preserves the previous output. Output files must not be included in the payload
+or overwrite the runner, manifest, working directory or application source
+directory. Binary and Debian outputs cannot replace existing directories.
+macOS outputs are ad-hoc signed, not
 notarized. The command validates the result with `--check` before reporting
-success; this catches missing startup imports/assets, not every lazy code path.
+success, with a 60-second startup limit; this catches missing startup
+imports/assets, not every lazy code path.
 Embedded applications reject `--watch` and `--dev-server`; use the manifest's
 development command instead. `--check` works without source files. The older
 `Contents/Resources/app` layout is still supported by unembedded runners.
@@ -4754,8 +4775,8 @@ the macOS development host.
 
 #### Debian / Ubuntu packages
 
-On a native Debian/Ubuntu build host, install `dpkg-dev` and `desktop-file-utils`
-in addition to the usual GPUIX build dependencies, then run:
+On a native Debian/Ubuntu host with `gpx`, install `dpkg-dev` and
+`desktop-file-utils` (plus the system libraries required to run GPUIX), then run:
 
 ```sh
 gpx package path/to/gpuix.json --format deb
@@ -4843,6 +4864,14 @@ older distributions. CI also installs the `.deb` with apt, verifies its launcher
 and icon, checks its installed executable, and uninstalls it. Windows executables are built with MSVC and do not yet
 include installer/runtime prerequisite handling. Flatpak,
 Windows application icons/signing, and real GUI smoke tests remain follow-ups.
+
+All three platform jobs also test an isolated installed runner with Bun and
+Cargo removed from its PATH, running outside the checkout: it packages
+Lua and React/TypeScript fixtures, checks embedded imports/assets, repackages an
+existing output, verifies failure preserves the old output, and on macOS builds
+a signed `.app` using the embedded default icon. These are startup tests, not
+GUI-paint tests. CI builds `gpx` from source first; packaging an app afterward
+does not rebuild it.
 
 Configure these repository secrets (or organization secrets granting this
 repository access) before enabling signing:

@@ -118,11 +118,6 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_HiDpi"] 
 name = "gpx"
 required-features = ["quickjs"]
 
-[[bin]]
-name = "gpx-app"
-path = "src/bin/gpx_app.rs"
-required-features = ["quickjs"]
-
 [features]
 # test-support is default so published binaries include TestGpuixRenderer,
 # letting users write GPU-backed tests for their apps.

@@ -4,6 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
+#[path = "gpx/archive.rs"]
+mod archive;
 #[path = "gpx/package.rs"]
 mod package;
 #[path = "gpx/packager.rs"]

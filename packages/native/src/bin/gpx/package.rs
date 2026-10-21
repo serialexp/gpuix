@@ -2,26 +2,24 @@ use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 use base64::Engine as _;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-include!(concat!(env!("OUT_DIR"), "/packaged_app.rs"));
-
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Payload {
-    format_version: u32,
-    manifest: Manifest,
-    files: Vec<PayloadFile>,
+pub(super) struct Payload {
+    pub format_version: u32,
+    pub manifest: Manifest,
+    pub files: Vec<PayloadFile>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PayloadFile {
-    path: String,
-    data: String,
+pub(super) struct PayloadFile {
+    pub path: String,
+    pub data: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Manifest {
     pub schema_version: u32,
@@ -35,7 +33,7 @@ pub(super) struct Manifest {
     pub linux: Option<Linux>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Linux {
     pub package_name: Option<String>,
@@ -45,7 +43,7 @@ pub(super) struct Linux {
     pub categories: Option<Vec<String>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct MacOs {
     pub minimum_system_version: Option<String>,
@@ -92,6 +90,7 @@ impl Manifest {
             return Err("expected a numeric major.minor.patch version".into());
         }
         relative_path(&self.entry)?;
+        super::engine(Path::new(&self.entry))?;
         for file in &self.files {
             if file != "." {
                 relative_path(file)?;
@@ -146,12 +145,42 @@ impl Manifest {
                     return Err("invalid Linux desktop categories".into());
                 }
             }
+            if let Some(name) = &linux.package_name {
+                if name.len() < 2
+                    || !name.as_bytes()[0].is_ascii_lowercase()
+                        && !name.as_bytes()[0].is_ascii_digit()
+                    || !name.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"+.-".contains(&byte)
+                    })
+                {
+                    return Err("invalid Debian packageName".into());
+                }
+            }
+            if let Some(icon) = &linux.icon {
+                if !icon.ends_with(".svg") {
+                    return Err("linux.icon must name an SVG file".into());
+                }
+            }
+            if let Some(maintainer) = &linux.maintainer {
+                let Some((name, email)) = maintainer.split_once(" <") else {
+                    return Err("expected linux.maintainer as Name <email>".into());
+                };
+                if name.trim().is_empty()
+                    || !email.ends_with('>')
+                    || !email.contains('@')
+                    || email[..email.len() - 1]
+                        .chars()
+                        .any(|value| value.is_whitespace() || value == '<' || value == '>')
+                {
+                    return Err("expected linux.maintainer as Name <email>".into());
+                }
+            }
         }
         Ok(())
     }
 }
 
-fn relative_path(value: &str) -> Result<PathBuf, String> {
+pub(super) fn relative_path(value: &str) -> Result<PathBuf, String> {
     let path = Path::new(value);
     if value.is_empty()
         || value.contains(['\\', '\0', ':'])
@@ -187,10 +216,10 @@ impl Drop for WorkingDirectory {
 
 impl EmbeddedApp {
     pub fn load() -> Result<Option<Self>, String> {
-        if APP_PAYLOAD.is_empty() {
-            return Ok(None);
-        }
-        Self::extract(APP_PAYLOAD).map(Some)
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+        super::archive::read(&executable)?
+            .map(|bytes| Self::extract(&bytes))
+            .transpose()
     }
 
     fn extract(bytes: &[u8]) -> Result<Self, String> {
@@ -279,8 +308,11 @@ mod tests {
 
     #[test]
     fn rejects_unknown_manifest_fields_and_invalid_identity() {
-        let original: serde_json::Value =
-            serde_json::from_slice(&payload(serde_json::json!([]))).unwrap();
+        let original: serde_json::Value = serde_json::from_slice(&payload(serde_json::json!([
+            {"path": "main.lua", "data": ""}
+        ])))
+        .unwrap();
+        assert!(EmbeddedApp::extract(&serde_json::to_vec(&original).unwrap()).is_ok());
         for (key, value) in [
             ("permissions", serde_json::json!({})),
             ("schemaVersion", serde_json::json!(2)),
@@ -288,6 +320,13 @@ mod tests {
             ("version", serde_json::json!("next")),
             ("entry", serde_json::json!("../main.lua")),
             ("macos", serde_json::json!({"minimumSystemVersion": "13.0"})),
+            ("linux", serde_json::json!({"packageName": "../escape"})),
+            ("linux", serde_json::json!({"maintainer": "not an email"})),
+            (
+                "linux",
+                serde_json::json!({"categories": ["Utility;Exec=bad"]}),
+            ),
+            ("linux", serde_json::json!({"icon": "app.icns"})),
         ] {
             let mut invalid = original.clone();
             invalid["manifest"][key] = value;

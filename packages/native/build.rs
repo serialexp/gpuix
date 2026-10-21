@@ -7,7 +7,6 @@ const PHOSPHOR_WEIGHTS: [&str; 6] = ["regular", "thin", "light", "bold", "fill",
 
 fn main() {
     napi_build::setup();
-    embed_application();
     if std::env::var_os("CARGO_FEATURE_LUA54").is_some()
         || std::env::var_os("CARGO_FEATURE_LUAJIT").is_some()
     {
@@ -18,20 +17,6 @@ fn main() {
     if std::env::var_os("CARGO_FEATURE_QUICKJS").is_some() && !browser {
         embed_modules();
     }
-}
-
-fn embed_application() {
-    println!("cargo:rerun-if-env-changed=GPUIX_APP_PAYLOAD");
-    let output = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("packaged_app.rs");
-    let source = match std::env::var_os("GPUIX_APP_PAYLOAD") {
-        Some(path) => {
-            let path = fs::canonicalize(path).expect("GPUIX_APP_PAYLOAD must name a payload file");
-            println!("cargo:rerun-if-changed={}", path.display());
-            format!("static APP_PAYLOAD: &[u8] = include_bytes!({:?});", path)
-        }
-        None => "static APP_PAYLOAD: &[u8] = &[];".to_string(),
-    };
-    fs::write(output, source).expect("write packaged application table");
 }
 
 /// Checks the framework bundles `embedded/build.ts` wrote against the files

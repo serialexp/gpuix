@@ -1,5 +1,31 @@
 # Current task
 
+## 2026-10-21: Self-contained native packaging (supersedes source-build prototype)
+
+- Replaced the `gpx package` Bun/checkout wrapper with native Rust packaging.
+  The installed executable is the runner template; no source checkout, Bun,
+  Cargo or compiler is consulted when packaging an application.
+- Versioned archive trailers support ELF, PE32+ and thin Mach-O. Mach-O archives
+  extend __LINKEDIT and are located before the code signature. Repackaging strips
+  the previous archive; original runners and failed outputs remain untouched.
+- Native `.app` and `.deb` builders retain identity, embedded default icons,
+  signing and dependency generation. Platform format tools are still required.
+- Removed compile-time application embedding, the extra gpx-app target and
+  TypeScript packaging/Debian implementations. The Bun script is now dev-only.
+- Local isolated-runner smoke tests pass for Lua, React/TypeScript, replacement,
+  failure preservation and signed app bundles. Desktop CI runs the same checks
+  on each target OS, with Bun/Cargo absent from the packer's PATH.
+- Native tests cover ELF replacement, PE certificate removal and Mach-O signature
+  boundaries. The same Rust archive/packer/Debian modules passed tests and a real
+  apt install/check/remove cycle in a Debian arm64 container via a minimal runner
+  harness (no GPUI/Lua execution in that harness). Full Linux/Windows application
+  and GUI validation still await their native CI runners.
+- Final macOS validation: 20 native tests, development-manifest tests, TypeScript
+  checks and actionlint pass. The isolated CLI smoke covers a read-only installed
+  runner, binary assets, safe directory/output handling, Lua and React entries,
+  replacement without archive growth, and source-free startup. Re-signing a
+  generated app with hardened-runtime options preserves its archive and startup.
+
 ## 2026-10-21: Packaging belongs to the gpx CLI
 
 - Added `gpx package gpuix.json --format app|binary|deb --output PATH`.
