@@ -66,6 +66,13 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
             }
 
             let (event_sender, mut event_receiver) = futures::channel::mpsc::unbounded();
+            let tray_sender = event_sender.clone();
+            crate::script::tray_api::init(
+                move |action| {
+                    let _ = tray_sender.unbounded_send(LuaEvent::Tray(action));
+                },
+                cx,
+            );
             let windows = Rc::new(LuaWindows::default());
             let trees = Rc::new(RefCell::new(HashMap::new()));
             let native_ids = Rc::new(RefCell::new(HashMap::new()));
@@ -113,6 +120,8 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
                 }
                 close_runtime.lock().unwrap().unmount_window(&id);
                 reconcile_dirty_windows(&close_runtime, &close_windows, &close_trees, cx);
+                let commands = close_runtime.lock().unwrap().take_tray_commands();
+                apply_tray_commands(commands, cx);
             })
             .detach();
 
@@ -124,10 +133,16 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
             let definitions_for_events = definitions.clone();
             let event_sender_for_events = event_sender.clone();
             cx.spawn(async move |cx| {
-                while let Some((source_id, payload)) = event_receiver.next().await {
+                while let Some(event) = event_receiver.next().await {
                     let (changed, focus_request, commands) = {
                         let mut runtime = runtime_for_events.lock().unwrap();
-                        match runtime.dispatch_window_event(&source_id, payload) {
+                        let result = match event {
+                            LuaEvent::Window(source_id, payload) => {
+                                runtime.dispatch_window_event(&source_id, *payload)
+                            }
+                            LuaEvent::Tray(action) => runtime.dispatch_tray_action(action),
+                        };
+                        match result {
                             Ok(dirty_roots) => {
                                 let mut changed = Vec::new();
                                 for id in dirty_roots {
@@ -199,6 +214,8 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
                         &trees_for_events,
                         cx,
                     );
+                    let commands = runtime_for_events.lock().unwrap().take_tray_commands();
+                    cx.update(|cx| apply_tray_commands(commands, cx));
                 }
             })
             .detach();
@@ -227,6 +244,8 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
                                     continue;
                                 }
                             };
+                            let commands = runtime_for_reload.lock().unwrap().take_tray_commands();
+                            cx.update(|cx| apply_tray_commands(commands, cx));
                             *definitions_for_reload.borrow_mut() = reload
                                 .windows
                                 .iter()
@@ -334,6 +353,7 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
                 })
                 .detach();
             }
+            apply_tray_commands(runtime.lock().unwrap().take_tray_commands(), cx);
             if initial_windows
                 .iter()
                 .any(|window| window.open && window.focus)
@@ -349,7 +369,20 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
     }
 }
 
-type LuaEventSender = futures::channel::mpsc::UnboundedSender<(String, EventPayload)>;
+enum LuaEvent {
+    Window(String, Box<EventPayload>),
+    Tray(u64),
+}
+type LuaEventSender = futures::channel::mpsc::UnboundedSender<LuaEvent>;
+
+fn apply_tray_commands(commands: Vec<crate::script::tray_api::TrayCommand>, cx: &mut gpui::App) {
+    for command in commands {
+        if let Err(error) = crate::script::tray_api::apply(command, cx) {
+            eprintln!("gpx: {error}");
+        }
+    }
+    crate::script::tray_api::finish(cx);
+}
 #[derive(Default)]
 struct LuaWindows(RefCell<HashMap<String, gpui::WindowHandle<GpuixView>>>);
 
@@ -421,7 +454,10 @@ fn open_lua_window(
     let id = options.id.clone();
     let sender = event_sender.clone();
     let callback: EventCallback = Arc::new(move |payload| {
-        if sender.unbounded_send((id.clone(), payload)).is_err() {
+        if sender
+            .unbounded_send(LuaEvent::Window(id.clone(), Box::new(payload)))
+            .is_err()
+        {
             log::error!("The native Lua event loop is no longer running");
         }
     });

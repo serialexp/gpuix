@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "name": "GPUIX Workspace",
+  "identifier": "dev.gpuix.workspace",
+  "version": "0.1.0",
+  "entry": "main.luax",
+  "files": ["main.luax", "components", "data.lua", "icons.lua", "store.lua", "theme.lua"],
+  "icon": "../../scripts/assets/AppIcon.icns"
+}

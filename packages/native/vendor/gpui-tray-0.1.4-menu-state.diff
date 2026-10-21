@@ -1,0 +1,10 @@
+--- a/src/backend/macos.rs
++++ b/src/backend/macos.rs
+@@ -245,6 +245,7 @@ fn build_menu(
+     mtm: MainThreadMarker,
+ ) -> Result<Retained<NSMenu>> {
+     let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
++    menu.setAutoenablesItems(false);
+     for item in items {
+         match item {
+             NativeMenuItem::Separator => menu.addItem(&NSMenuItem::separatorItem(mtm)),

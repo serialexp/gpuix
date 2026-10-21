@@ -331,7 +331,7 @@ function api.Show(props)
     assert(type(props.when) == "function", "Show.when must be a signal accessor")
     assert(type(props.render) == "function", "Show.render must be a lazy function")
     local parent = current_owner
-    local slot = gpuix.div { testId = props.testId, style = props.style }
+    local slot = gpuix.div({ testId = props.testId, style = props.style })
     local branch_owner
     local previous
     api.on_cleanup(function()
@@ -367,7 +367,7 @@ local function create_list(props, indexed)
     end
     assert(type(props.render) == "function", name .. ".render must be a lazy function")
     local parent = current_owner
-    local slot = gpuix.div { testId = props.testId, style = props.style }
+    local slot = gpuix.div({ testId = props.testId, style = props.style })
     local rows = {}
     api.on_cleanup(function()
         for _, row in pairs(rows) do api.dispose(row.owner) end

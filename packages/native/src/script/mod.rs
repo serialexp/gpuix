@@ -6,6 +6,8 @@
 pub(crate) mod app;
 pub(crate) mod reload;
 pub(crate) mod server;
+pub(crate) mod tray;
+pub(crate) mod tray_api;
 
 /// How `gpx` runs an app, from its command line.
 #[derive(Clone, Debug, Default)]

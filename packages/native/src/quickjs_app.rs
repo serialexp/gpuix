@@ -23,8 +23,9 @@ use crate::quickjs::{
     HotUpdate, Mode, PathPromptResult, QuickJsOptions, QuickJsRuntime, SizeOverride, TreeHost,
     WindowCall,
 };
-use crate::quickjs_window::WindowHost;
+use crate::quickjs_window::{WindowHost, WindowSubscriptions};
 use crate::renderer::{init_app, open_main_window, EventCallback, GpuixView, WindowOptions};
+use crate::retained_tree::RetainedTree;
 use crate::script::{default_title, reload, AppOptions};
 use crate::text::SharedSelection;
 
@@ -59,7 +60,7 @@ pub fn check_js_file(path: impl AsRef<Path>) -> Result<(), String> {
     Ok(())
 }
 
-/// Runs the app at `path` in a window until the window closes.
+/// Runs the app at `path`, optionally keeping it available through a tray icon.
 pub fn run_js_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), String> {
     let dev_server = crate::script::server::Server::start(options.dev_server)?;
     let path = path.as_ref().to_path_buf();
@@ -71,17 +72,17 @@ pub fn run_js_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), St
         Mode::Production
     };
     let (js, app_window_options) = start(&path, command_line_size(&options), mode)?;
-    let window_options = window_options(app_window_options, &path, &options);
+    let native_options = window_options(app_window_options, &path, &options);
     let startup_error = Rc::new(RefCell::new(None));
     let startup_error_for_app = startup_error.clone();
 
     gpui_platform::application()
         .with_quit_mode(gpui::QuitMode::LastWindowClosed)
         .run(move |cx| {
-            let app_name = window_options
+            let app_name = native_options
                 .app_name
                 .clone()
-                .unwrap_or_else(|| window_options.title_or_default());
+                .unwrap_or_else(|| native_options.title_or_default());
             init_app(&app_name, cx);
             if let Some(server) = dev_server {
                 server.attach(cx);
@@ -89,8 +90,10 @@ pub fn run_js_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), St
             cx.on_window_closed(|_cx, native_id| crate::text::paint::remove_window(native_id))
                 .detach();
             let reloads = options.watch.then(|| watch_sources(&path));
-            match launch(path, js, &window_options, reloads, cx) {
-                Ok((_window, task)) => task.detach(),
+            match launch(path.clone(), js, &native_options, reloads, cx) {
+                Ok((_window, task)) => {
+                    task.detach();
+                }
                 Err(error) => {
                     *startup_error_for_app.borrow_mut() = Some(error);
                     cx.quit();
@@ -106,7 +109,7 @@ pub fn run_js_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), St
 }
 
 /// Opens the window for a started app, and returns it with the task that
-/// runs the app in it until the window closes.
+/// runs the application, including its window-independent tray callbacks.
 pub(crate) fn launch(
     path: PathBuf,
     js: QuickJsRuntime,
@@ -120,28 +123,49 @@ pub(crate) fn launch(
     let window = open_main_window(
         window_options,
         tree.clone(),
-        Some(callback),
+        Some(callback.clone()),
         selection.clone(),
         cx,
     )?;
     let (prompt_results, prompts) = futures::channel::mpsc::unbounded();
-    let startup = js.set_host(Box::new(WindowHost::new(
-        tree,
-        window,
-        selection,
-        prompt_results,
-        cx.to_async(),
-    )));
+    let subscriptions = Rc::new(RefCell::new(WindowSubscriptions::default()));
+    let startup = js.set_host(Box::new(
+        WindowHost::new(
+            tree.clone(),
+            window,
+            selection.clone(),
+            prompt_results.clone(),
+            cx.to_async(),
+        )
+        .with_subscriptions(subscriptions.clone()),
+    ));
     // The new window draws the tree as it stands.
     js.take_tree_changed();
+    let (tray_sender, tray_events) = futures::channel::mpsc::unbounded();
+    crate::script::tray_api::init(
+        move |action| {
+            let _ = tray_sender.unbounded_send(action);
+        },
+        cx,
+    );
     let app = RunningApp {
         path,
         js,
         window,
         title: window_options.title_or_default(),
+        tree,
+        selection,
+        options: window_options.clone(),
+        callback: Some(callback),
+        prompt_results,
+        tray_ids: std::collections::HashSet::new(),
+        subscriptions,
     };
     let pending = startup.into_pending();
-    let task = cx.spawn(async move |cx| app.run(pending, events, prompts, reloads, cx).await);
+    let task = cx.spawn(async move |cx| {
+        app.run(pending, events, prompts, reloads, tray_events, cx)
+            .await
+    });
     Ok((window, task))
 }
 
@@ -191,10 +215,9 @@ fn command_line_size(app: &AppOptions) -> SizeOverride {
     }
 }
 
-/// A view's event callback, and where its events arrive. Each view gets a
-/// channel of its own: closing the window drops the only sender, which ends
-/// the app's task, and a reloaded app never sees events for the old tree's
-/// element ids.
+/// An application's event callback and receiver. The runtime retains the
+/// callback while its window is closed; a full reload replaces the channel
+/// so the new app never sees events for the old tree's element ids.
 fn event_channel() -> (EventCallback, UnboundedReceiver<EventPayload>) {
     let (sender, receiver) = futures::channel::mpsc::unbounded();
     let callback: EventCallback = Arc::new(move |payload| {
@@ -209,6 +232,13 @@ struct RunningApp {
     js: QuickJsRuntime,
     window: gpui::WindowHandle<GpuixView>,
     title: String,
+    tree: Arc<Mutex<RetainedTree>>,
+    selection: SharedSelection,
+    options: WindowOptions,
+    callback: Option<EventCallback>,
+    prompt_results: futures::channel::mpsc::UnboundedSender<(u64, PathPromptResult)>,
+    tray_ids: std::collections::HashSet<u64>,
+    subscriptions: Rc<RefCell<WindowSubscriptions>>,
 }
 
 /// Where a reloaded app's events and path prompt results arrive.
@@ -220,6 +250,7 @@ type Reloaded = (
 /// What woke the app's task. The event is boxed: it is far larger than the
 /// other variants.
 enum Wake {
+    Tray(Option<u64>),
     Event(Option<Box<EventPayload>>),
     PathPrompt(Option<(u64, PathPromptResult)>),
     Timer,
@@ -228,17 +259,19 @@ enum Wake {
 
 impl RunningApp {
     /// Runs the window methods the app called before its window opened,
-    /// then delivers events, runs timers and reloads until the window
-    /// closes.
+    /// then delivers window and tray events, runs timers and reloads until
+    /// the application quits.
     async fn run(
         mut self,
         pending: Vec<WindowCall>,
         mut events: UnboundedReceiver<EventPayload>,
         mut prompts: UnboundedReceiver<(u64, PathPromptResult)>,
         mut reloads: Option<UnboundedReceiver<Vec<PathBuf>>>,
+        mut tray_events: UnboundedReceiver<u64>,
         cx: &mut gpui::AsyncApp,
     ) {
         self.replay(pending);
+        self.apply_tray_commands(cx);
         loop {
             let timer = match self.js.next_timer() {
                 // GPUI's timer is ready at once for no delay, and an app that
@@ -265,6 +298,7 @@ impl RunningApp {
                     }
                 };
                 futures::select_biased! {
+                    action = tray_events.next() => Wake::Tray(action),
                     event = events.next() => Wake::Event(event.map(Box::new)),
                     prompt = prompts.next() => Wake::PathPrompt(prompt),
                     _ = timer.fuse() => Wake::Timer,
@@ -272,7 +306,13 @@ impl RunningApp {
                 }
             };
             match wake {
-                // The window closed, which dropped the view and its sender.
+                Wake::Tray(Some(action)) => {
+                    if let Err(error) = self.js.dispatch_tray_action(action) {
+                        eprintln!("gpx: {error}");
+                    }
+                }
+                Wake::Tray(None) => return,
+                // The application's event channel was disposed.
                 Wake::Event(None) => return,
                 Wake::Event(Some(event)) => self.dispatch(&event),
                 Wake::PathPrompt(Some((id, result))) => {
@@ -284,7 +324,7 @@ impl RunningApp {
                 Wake::PathPrompt(None) => {}
                 Wake::Timer => self.run_timers(),
                 Wake::SourceChange(Some(changed)) => {
-                    if self.hot_update(&changed) {
+                    if !self.tray_ids.is_empty() || self.hot_update(&changed) {
                         if let Some((reloaded_events, reloaded_prompts)) = self.reload(cx) {
                             events = reloaded_events;
                             prompts = reloaded_prompts;
@@ -294,12 +334,97 @@ impl RunningApp {
                 // The watcher stopped; it said why.
                 Wake::SourceChange(None) => reloads = None,
             }
+            self.apply_tray_commands(cx);
             if self.js.take_tree_changed() {
                 self.window
                     .update(cx, |_view, _window, cx| cx.notify())
                     .ok();
             }
         }
+    }
+
+    fn apply_tray_commands(&mut self, cx: &mut gpui::AsyncApp) {
+        use crate::script::tray_api::{self, TrayCommand};
+        for command in self.js.take_tray_commands() {
+            let result = match command {
+                TrayCommand::ShowWindow => self.show_window(cx),
+                TrayCommand::HideWindow => {
+                    if self.window.read_with(cx, |_, _| ()).is_ok() {
+                        self.window
+                            .update(cx, |_view, window, _cx| window.remove_window())
+                            .map_err(|error| error.to_string())
+                    } else {
+                        Ok(())
+                    }
+                }
+                command => {
+                    let change = match &command {
+                        TrayCommand::Set { spec } => Some((spec.id, true)),
+                        TrayCommand::Remove { id } => Some((*id, false)),
+                        _ => None,
+                    };
+                    let result = cx.update(|cx| tray_api::apply(command, cx));
+                    if result.is_ok() {
+                        if let Some((id, add)) = change {
+                            if add {
+                                self.tray_ids.insert(id);
+                                if self.callback.is_none() {
+                                    self.callback = self
+                                        .window
+                                        .read_with(cx, |view, _| view.event_callback.clone())
+                                        .ok()
+                                        .flatten();
+                                }
+                            } else {
+                                self.tray_ids.remove(&id);
+                            }
+                        }
+                    }
+                    result
+                }
+            };
+            if let Err(error) = result {
+                eprintln!("gpx: tray command failed: {error}");
+            }
+        }
+        if self.tray_ids.is_empty() {
+            self.callback = None;
+        }
+        cx.update(tray_api::finish);
+    }
+
+    fn show_window(&mut self, cx: &mut gpui::AsyncApp) -> Result<(), String> {
+        if self.window.read_with(cx, |_, _| ()).is_err() {
+            let window = cx.update(|cx| {
+                open_main_window(
+                    &self.options,
+                    self.tree.clone(),
+                    self.callback.clone(),
+                    self.selection.clone(),
+                    cx,
+                )
+            })?;
+            self.window = window;
+            let previous = self.js.set_host(Box::new(
+                WindowHost::new(
+                    self.tree.clone(),
+                    window,
+                    self.selection.clone(),
+                    self.prompt_results.clone(),
+                    cx.clone(),
+                )
+                .with_subscriptions(self.subscriptions.clone()),
+            ));
+            self.replay(previous.into_pending());
+            let calls = self.subscriptions.borrow().calls();
+            self.replay(calls);
+        }
+        self.window
+            .update(cx, |_view, window, cx| {
+                cx.activate(true);
+                window.activate_window();
+            })
+            .map_err(|error| error.to_string())
     }
 
     fn dispatch(&mut self, event: &EventPayload) {
@@ -391,25 +516,47 @@ impl RunningApp {
         let (callback, events) = event_channel();
         let (view_tree, view_selection, title) =
             (tree.clone(), selection.clone(), self.title.clone());
-        let swapped = gpui::AnyWindowHandle::from(self.window).update(cx, |_view, window, cx| {
-            window.replace_root(cx, |_window, _cx| {
-                GpuixView::new(view_tree, Some(callback), title, view_selection)
-            });
-        });
+        let swapped = if self.window.read_with(cx, |_, _| ()).is_ok() {
+            gpui::AnyWindowHandle::from(self.window).update(cx, |_view, window, cx| {
+                window.replace_root(cx, |_window, _cx| {
+                    GpuixView::new(view_tree, Some(callback.clone()), title, view_selection)
+                });
+            })
+        } else {
+            Ok(())
+        };
         if let Err(error) = swapped {
             eprintln!("gpx: reload failed: {error}");
             return None;
         }
         let (prompt_results, prompts) = futures::channel::mpsc::unbounded();
-        let startup = js.set_host(Box::new(WindowHost::new(
-            tree,
-            self.window,
-            selection,
-            prompt_results,
-            cx.clone(),
-        )));
+        let subscriptions = Rc::new(RefCell::new(WindowSubscriptions::default()));
+        let startup = js.set_host(Box::new(
+            WindowHost::new(
+                tree.clone(),
+                self.window,
+                selection.clone(),
+                prompt_results.clone(),
+                cx.clone(),
+            )
+            .with_subscriptions(subscriptions.clone()),
+        ));
         // The new view draws the tree as it starts.
         js.take_tree_changed();
+        for id in self.tray_ids.drain() {
+            cx.update(|cx| {
+                crate::script::tray_api::apply(
+                    crate::script::tray_api::TrayCommand::Remove { id },
+                    cx,
+                )
+            })
+            .ok();
+        }
+        self.tree = tree;
+        self.selection = selection;
+        self.callback = Some(callback);
+        self.prompt_results = prompt_results;
+        self.subscriptions = subscriptions;
         self.js = js;
         self.replay(startup.into_pending());
         eprintln!("gpx: reloaded (state reset)");

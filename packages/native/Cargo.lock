@@ -2453,6 +2453,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-tray"
+version = "0.1.4"
+dependencies = [
+ "async-channel",
+ "gpui",
+ "image",
+ "log",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "thiserror 2.0.18",
+ "windows 0.62.2",
+ "zbus",
+]
+
+[[package]]
 name = "gpui_apple"
 version = "0.1.0"
 dependencies = [
@@ -2696,12 +2712,14 @@ dependencies = [
  "flate2",
  "futures",
  "gpui",
+ "gpui-tray",
  "gpui_macos",
  "gpui_platform",
  "http_client",
  "image",
  "js-sys",
  "log",
+ "mahina",
  "memchr",
  "minisign-verify",
  "mlua",
@@ -3755,6 +3773,19 @@ checksum = "6a1b95cd5421ec55b445b5ae102f5ea0e768de1f82bd3001e11f426c269c3aea"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "mahina"
+version = "0.1.2"
+source = "git+https://github.com/serialexp/lune?rev=1b60a01f3af4013256d0b505ed8d281f80242fb5#1b60a01f3af4013256d0b505ed8d281f80242fb5"
+dependencies = [
+ "mahina-sys",
+]
+
+[[package]]
+name = "mahina-sys"
+version = "0.1.2"
+source = "git+https://github.com/serialexp/lune?rev=1b60a01f3af4013256d0b505ed8d281f80242fb5#1b60a01f3af4013256d0b505ed8d281f80242fb5"
 
 [[package]]
 name = "malloc_buf"

@@ -1,5 +1,18 @@
 # Vendored crates
 
+## gpui-tray 0.1.4
+
+The crates.io release of [gpui-tray](https://github.com/domenkozar/gpui-tray),
+with `gpui-tray-0.1.4-menu-state.diff` applied. GPUIX enables its `menu-state`
+feature and uses the same patched GPUI dependency as the renderer.
+
+AppKit menus auto-enable their actions by default, overriding explicitly
+disabled items when a menu opens. The macOS backend now disables automatic
+validation on each menu, including submenus, so the script's enabled state
+remains authoritative. This is a tray backend fix, not a GPUIX/AppKit workaround.
+Native verification calls `NSMenu.update` and checks that disabled items remain
+disabled afterward. Remove the patch when an upstream release includes it.
+
 ## rquickjs-sys 0.14.0
 
 The crates.io package of `rquickjs-sys` 0.14.0 with

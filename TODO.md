@@ -1,5 +1,23 @@
 # TODO
 
+- Extend desktop distribution checks beyond isolated `--check` startup: launch
+  packaged apps on each OS, verify painted content and interaction, and capture
+  screenshots. Linux needs an X11/Wayland session plus a Vulkan-capable GPU or
+  software driver; Windows needs a functioning desktop/graphics session. Also
+  audit Linux shared-library and Windows runtime prerequisites on clean machines,
+  then add Flatpak, Windows installers/icons and signing beyond macOS. Debian
+  packaging now installs a Linux launcher and icon; validate the real application
+  installation in the desktop distribution workflow.
+- After manifest-driven application packaging works, add enforced runtime
+  permissions. Until then, applications are trusted, not sandboxed; manifest
+  permission declarations must not imply enforcement. Cover Lua's `io`, `os`,
+  `dofile`, `loadfile`, module searchers and native/FFI loading; audit Mahina
+  separately when it becomes an application runtime. Gate QuickJS host APIs,
+  module loading and native asset reads with the same policy, including path
+  traversal and symlink escapes. Define the Node/Bun story explicitly rather
+  than claiming the adapter restricts their normal filesystem, network or
+  subprocess privileges. Keep OS entitlements distinct from runtime permissions
+  and add denial/bypass regression tests before advertising a sandbox.
 - Upstream code warns on a macOS native build: `browser_platform_is_macos`
   (`custom_elements/input.rs`), `BlockTree::is_empty` (`markdown/parser.rs`)
   and `Metrics::hash_into` (`theme.rs`) are unused outside the browser or test

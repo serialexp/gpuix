@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "name": "GPUIX Tray",
+  "identifier": "dev.gpuix.tray",
+  "version": "0.1.0",
+  "entry": "main.lua",
+  "files": ["main.lua", "icon.svg"],
+  "icon": "../../scripts/assets/AppIcon.icns"
+}

@@ -8,6 +8,8 @@
 //! answer straight away. The tree is locked only while a batch applies, so
 //! the view methods that read it don't wait on JS.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use futures::channel::mpsc::UnboundedSender;
@@ -29,6 +31,60 @@ pub(crate) struct WindowHost {
     /// Where path prompts send their results, for the app's task to settle.
     prompts: UnboundedSender<(u64, PathPromptResult)>,
     cx: gpui::AsyncApp,
+    subscriptions: Rc<RefCell<WindowSubscriptions>>,
+}
+
+#[derive(Default)]
+pub(crate) struct WindowSubscriptions {
+    keys: Option<WindowCall>,
+    selection: Option<WindowCall>,
+}
+
+impl WindowSubscriptions {
+    fn remember(&mut self, call: &WindowCall) -> bool {
+        match call {
+            WindowCall::SetWindowKeyEvents { .. } => self.keys = Some(call.clone()),
+            WindowCall::SetWindowSelectionChange { .. } => self.selection = Some(call.clone()),
+            _ => return false,
+        }
+        true
+    }
+
+    pub(crate) fn calls(&self) -> Vec<WindowCall> {
+        self.keys
+            .iter()
+            .chain(self.selection.iter())
+            .cloned()
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_window_subscriptions_keep_the_latest_registration() {
+        let mut subscriptions = WindowSubscriptions::default();
+        assert!(subscriptions.remember(&WindowCall::SetWindowKeyEvents {
+            key_down: true,
+            key_up: false,
+            event_id: 1
+        }));
+        let keys = WindowCall::SetWindowKeyEvents {
+            key_down: false,
+            key_up: true,
+            event_id: 2,
+        };
+        let selection = WindowCall::SetWindowSelectionChange {
+            enabled: true,
+            event_id: 3,
+        };
+        assert!(subscriptions.remember(&keys));
+        assert!(subscriptions.remember(&selection));
+        assert!(!subscriptions.remember(&WindowCall::FocusNext));
+        assert_eq!(subscriptions.calls(), vec![keys, selection]);
+    }
 }
 
 impl WindowHost {
@@ -47,7 +103,16 @@ impl WindowHost {
             selection,
             prompts,
             cx,
+            subscriptions: Rc::default(),
         }
+    }
+
+    pub(crate) fn with_subscriptions(
+        mut self,
+        subscriptions: Rc<RefCell<WindowSubscriptions>>,
+    ) -> Self {
+        self.subscriptions = subscriptions;
+        self
     }
 }
 
@@ -57,6 +122,10 @@ impl Host for WindowHost {
     }
 
     fn window(&mut self, call: WindowCall) -> Result<Json, String> {
+        let remembered = self.subscriptions.borrow_mut().remember(&call);
+        if remembered && self.window.read_with(&self.cx, |_, _| ()).is_err() {
+            return Ok(Json::Null);
+        }
         let (tree, selection) = (self.tree.clone(), self.selection.clone());
         self.window
             .update(&mut self.cx, move |view, window, cx| {

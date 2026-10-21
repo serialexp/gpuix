@@ -11,6 +11,58 @@ use super::{
 use crate::element_tree::{EventModifiers, EventPayload};
 use crate::retained_tree::RetainedTree;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn application_trays_load_the_shared_api_and_route_callbacks() {
+    use crate::script::tray_api::{TrayCommand, TrayItem};
+    let directory = tempfile::tempdir().unwrap();
+    let icon = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/tray/icon.svg");
+    std::fs::copy(icon, directory.path().join("icon.svg")).unwrap();
+    let entry = directory.path().join("main.mjs");
+    std::fs::write(
+        &entry,
+        r#"
+        import { createTray, updateTray, removeTray, quit } from '@gpuix/native/app';
+        const tray = createTray({ icon: 'icon.svg', menu: [{ label: 'Click', onClick() {
+            updateTray(tray, { icon: 'icon.svg', tooltip: 'Updated', menu: [{
+                label: 'Remove', onClick() { removeTray(tray); quit(); }
+            }] });
+        } }] });
+    "#,
+    )
+    .unwrap();
+    let js = QuickJsRuntime::load_module(&entry, QuickJsOptions::default()).unwrap();
+    let commands = js.take_tray_commands();
+    let TrayCommand::Set { spec } = &commands[0] else {
+        panic!("expected tray")
+    };
+    assert_eq!(
+        spec.icon.canonicalize().unwrap(),
+        directory.path().join("icon.svg").canonicalize().unwrap()
+    );
+    let TrayItem::Action { action, .. } = spec.menu[0] else {
+        panic!("expected action")
+    };
+    js.dispatch_tray_action(action).unwrap();
+    let updated = js.take_tray_commands();
+    let TrayCommand::Set { spec: updated } = &updated[0] else {
+        panic!("expected update")
+    };
+    assert_eq!(updated.id, spec.id);
+    js.dispatch_tray_action(action).unwrap();
+    assert!(js.take_tray_commands().is_empty());
+    let TrayItem::Action { action, .. } = updated.menu[0] else {
+        panic!("expected action")
+    };
+    js.dispatch_tray_action(action).unwrap();
+    assert_eq!(
+        js.take_tray_commands(),
+        vec![TrayCommand::Remove { id: spec.id }, TrayCommand::Quit]
+    );
+    js.dispatch_tray_action(action).unwrap();
+    assert!(js.take_tray_commands().is_empty());
+}
+
 /// Sends `ops` as one batch, the way `createMutationQueue` does.
 const BATCH: &str = "const batch = (...ops) => __gpuix.renderer.applyBatch(JSON.stringify(ops));\n";
 

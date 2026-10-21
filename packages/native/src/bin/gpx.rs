@@ -4,6 +4,11 @@
 
 use std::path::{Path, PathBuf};
 
+#[path = "gpx/package.rs"]
+mod package;
+#[path = "gpx/packager.rs"]
+mod packager;
+
 use gpuix_native::{
     check_js_file, check_lua_file, is_js_source, is_lua_source, run_js_file, run_lua_file,
     AppOptions, JS_EXTENSIONS, LUA_EXTENSIONS,
@@ -32,7 +37,7 @@ struct Arguments {
     check: bool,
 }
 
-fn main() {
+pub(crate) fn main() {
     if let Err(error) = run() {
         eprintln!("gpx: {error}");
         std::process::exit(1);
@@ -41,6 +46,9 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let raw_arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if raw_arguments.first().map(String::as_str) == Some("package") {
+        return packager::run(&raw_arguments[1..]);
+    }
     if raw_arguments
         .iter()
         .any(|argument| argument == "-h" || argument == "--help")
@@ -48,10 +56,50 @@ fn run() -> Result<(), String> {
         println!("{}", usage());
         return Ok(());
     }
-    let bundled_source = std::env::current_exe()
-        .ok()
-        .and_then(|path| bundled_source_path(&path));
-    let arguments = parse_arguments_with_default(raw_arguments, bundled_source)?;
+    let mut raw_arguments = raw_arguments;
+    let manifest_position = raw_arguments
+        .iter()
+        .position(|argument| argument == "--manifest");
+    let manifest_path = if let Some(position) = manifest_position {
+        if position + 1 >= raw_arguments.len() {
+            return Err("--manifest requires a path".into());
+        }
+        let path = PathBuf::from(raw_arguments.remove(position + 1));
+        raw_arguments.remove(position);
+        Some(std::fs::canonicalize(path).map_err(|error| error.to_string())?)
+    } else {
+        None
+    };
+    let embedded = if manifest_path.is_none() {
+        package::EmbeddedApp::load()?
+    } else {
+        None
+    };
+    let manifest = manifest_path
+        .as_ref()
+        .map(|path| package::Manifest::read(path))
+        .transpose()?;
+    let active_manifest = manifest
+        .as_ref()
+        .or_else(|| embedded.as_ref().map(|app| &app.manifest));
+    let root = manifest_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .or_else(|| embedded.as_ref().map(|app| app.root()));
+    let configured_source = active_manifest
+        .zip(root)
+        .map(|(manifest, root)| root.join(&manifest.entry));
+    let bundled_source = configured_source.or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| bundled_source_path(&path))
+    });
+    let mut arguments = parse_arguments_with_default(raw_arguments, bundled_source)?;
+    if embedded.is_some() && arguments.options.watch {
+        return Err("embedded applications cannot use --watch or --dev-server; use --manifest for development".into());
+    }
+    arguments.path = std::path::absolute(&arguments.path).map_err(|error| error.to_string())?;
+    let _working_directory = root.map(package::WorkingDirectory::enter).transpose()?;
     match (arguments.engine, arguments.check) {
         (Engine::Lua, true) => check_lua_file(&arguments.path)?,
         (Engine::QuickJs, true) => check_js_file(&arguments.path)?,
@@ -192,10 +240,11 @@ fn dimension(value: String, name: &str) -> Result<f32, String> {
 
 fn usage() -> String {
     format!(
-        "Usage: gpx [--check] [--watch] [--dev-server PORT] [--title TITLE] [--width PX] [--height PX] [app]\n\
+        "Usage: gpx package gpuix.json [--format app|binary|deb] [--output PATH]\n\
+         Usage: gpx [--manifest gpuix.json] [--check] [--watch] [--dev-server PORT] [--title TITLE] [--width PX] [--height PX] [app]\n\
          The app is a {} file, run in the embedded Lua runtime, or a {} file,\n\
          run in the embedded QuickJS runtime. It is required unless gpx is launched from an app\n\
-         bundle with Resources/app/{}.\n\
+         bundle with Resources/app/{}, or has an embedded payload or --manifest.\n\
          --check loads the app without opening a window. --watch reloads it when its files\n\
          change. --dev-server enables watching and an authenticated loopback testing API\n\
          (requires GPUIX_DEV_TOKEN). --title, --width and --height beat the app's own window options.",
@@ -299,6 +348,11 @@ mod tests {
     fn parses_watch_mode() {
         let arguments = parse_arguments(["--watch".to_string(), "app.tsx".to_string()]).unwrap();
         assert!(arguments.options.watch);
+    }
+
+    #[test]
+    fn trays_are_defined_by_the_application_not_a_launcher_flag() {
+        assert!(parse_arguments(["--tray", "icon.svg", "app.lua"].map(String::from)).is_err());
     }
 
     #[test]

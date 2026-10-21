@@ -16,33 +16,14 @@ if [[ "${MACOS_NOTARIZE:-0}" == "1" ]]; then
     : "${APPLE_APP_SPECIFIC_PASSWORD:?Set APPLE_APP_SPECIFIC_PASSWORD}"
 fi
 export MACOSX_DEPLOYMENT_TARGET=14.0
-(cd packages/native && bun run build:embedded)
-cargo build --release --manifest-path packages/native/Cargo.toml --no-default-features --features lua54,quickjs --bin gpx
 
 mkdir -p dist
 stage="$(mktemp -d "$root/dist/.solid-package.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
 app="$stage/GPUIX Solid.app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/app"
-cp packages/native/target/release/gpx "$app/Contents/MacOS/GPUIX Solid"
-cp -R examples/solid-workspace/. "$app/Contents/Resources/app/"
-
-cat > "$app/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-    <key>CFBundleExecutable</key><string>GPUIX Solid</string>
-    <key>CFBundleIdentifier</key><string>dev.gpuix.solid-workspace</string>
-    <key>CFBundleName</key><string>GPUIX Solid</string>
-    <key>CFBundleDisplayName</key><string>GPUIX Solid</string>
-    <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
-    <key>LSMinimumSystemVersion</key><string>14.0</string>
-    <key>NSHighResolutionCapable</key><true/>
-    <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
-</dict></plist>
-PLIST
+(cd packages/native && bun run build:embedded)
+cargo build --release --manifest-path packages/native/Cargo.toml --no-default-features --features lua54,quickjs --bin gpx
+packages/native/target/release/gpx package examples/solid-workspace/gpuix.json --output "$app"
 
 plutil -lint "$app/Contents/Info.plist"
 if [[ "$identity" == "-" ]]; then

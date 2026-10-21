@@ -23,6 +23,107 @@ painting. The browser build uses wasm-bindgen instead of napi. See the
 [embedded JavaScript](#experimental-embedded-javascript-runtime) and
 [LuaX](#experimental-luax-runtime) sections for their current limitations.
 
+### macOS tray / menu-bar icons (`gpx`)
+
+Embedded Lua/LuaX and JavaScript applications own their native trays, using
+[gpui-tray](https://github.com/domenkozar/gpui-tray). No launcher flag is needed:
+`just start-tray` runs the Lua demo; `just start-tray-js` runs the React demo.
+The same JavaScript API works with Solid; it is independent of rendering.
+Both recipes build the embedded bundles and enable the launcher's required
+`quickjs` feature, including when running the Lua demo.
+On macOS, these recipes and `just start` / `just start-solid` launch a development
+`.app` under `dist/dev` with a GPUIX Dock icon and application name. Terminal
+logging, command-line arguments and watching still work; other platforms run
+`gpx` directly. The Dock icon is separate from the application-controlled tray.
+Running a bare `gpx` binary directly does not install a Dock icon.
+
+These are **two independent icons**, not one setting mirrored to two places:
+
+| Icon | Configuration | Demo asset |
+| --- | --- | --- |
+| Dock / Finder / app switcher | `CFBundleIconFile` in the app bundle, set at build time | `scripts/assets/AppIcon.icns` |
+| Tray / menu bar | `icon` passed to `create_tray` / `createTray` | `examples/tray/icon.svg` |
+
+The demos currently use matching artwork for convenience. Replacing either
+asset does not affect the other. Typically the app icon is full-colour artwork,
+while the tray uses a simpler small symbol; tray updates never change the app icon.
+
+```lua
+local app = gpuix.create_app()
+gpuix.define_window(app, { id = "main", render = function() return gpuix.text("Hello") end })
+local tray = gpuix.create_tray(app, {
+    icon = "icon.svg",
+    tooltip = "My application",
+    menu = {
+        { label = "Open", onClick = function() gpuix.open_window(app, "main") end },
+        { separator = true },
+        { label = "Quit", onClick = function() gpuix.quit(app) end },
+    },
+})
+```
+
+```ts
+import { createTray, updateTray, removeTray, showWindow, hideWindow, quit }
+  from "@gpuix/native/app"
+
+const tray = createTray({
+  icon: "icon.svg",
+  tooltip: "My application",
+  menu: [
+    { label: "Open", onClick: showWindow },
+    { label: "Hide", onClick: hideWindow },
+    { separator: true },
+    { label: "Quit", onClick: quit },
+  ],
+})
+```
+
+- `gpuix.create_tray(app, options)` / `createTray(options)` returns an opaque
+  application-owned handle. Multiple trays are allowed. Dropping the handle does
+  not remove its tray; call `gpuix.remove_tray(tray)` / `removeTray(tray)` explicitly.
+- `gpuix.update_tray(tray, options)` / `updateTray(tray, options)` replaces the
+  complete icon, tooltip and menu, releasing the old callbacks. Updates to removed
+  handles fail; removal is idempotent. Queued clicks for replaced callbacks are ignored.
+- Options require `icon` (a PNG or SVG path) and `menu` (an array, possibly empty).
+  `tooltip` defaults to an empty string. Relative paths resolve from the entry
+  script's directory, not the caller's working directory. Invalid icons fail at
+  the script API call, including under `gpx --check`.
+- A menu entry is `{ label, onClick, checked?, enabled? }` or
+  `{ separator: true }`. Labels must be nonempty, callbacks are required, `checked`
+  defaults to false and `enabled` to true. Clicking a checked item does not toggle
+  it automatically: update application state and call the update API. Menus are
+  flat; submenus are not exposed yet. Open/Quit are application choices, not
+  built-in entries. Callbacks run on the script event loop, outside GPUI updates,
+  and can update UI state, windows and trays. Native application errors are logged.
+- Lua uses existing `open_window` / `close_window` with a named application
+  window; `gpuix.quit(app)` quits the whole application. JavaScript's `showWindow()`
+  activates or reopens its single window, `hideWindow()` closes it, and `quit()`
+  quits the application. `@gpuix/native/app` exports `TrayOptions`, `TrayItem` and
+  `TrayHandle` types, does not load the napi addon and currently requires `gpx`;
+  calling these APIs under Bun/Node or in a browser throws a descriptive error.
+
+As long as at least one tray exists, closing the last window keeps the script
+runtime and its shared state alive. Lua remounts a reopened window's local
+component state; JavaScript retains its framework tree and component state.
+JavaScript window-key and selection-change subscriptions are restored on reopen.
+Removing the last tray restores quit-on-last-window-close, quitting immediately
+if no windows remain. Quit removes all icons. A successful full reload replaces
+the old runtime's trays; a failed entry reload retains the existing trays. Lua
+application reload recreates tray handles and callbacks alongside its definitions.
+JavaScript apps with active trays use a full runtime reload (state reset) on
+source edits rather than Fast Refresh, so re-evaluating application setup cannot
+leave duplicate trays or stale callbacks behind. Apps without trays keep their
+existing hot-update behaviour.
+Define trays at application scope, not inside rendering functions. An initial
+window is still required, and this API is currently macOS-only. Icons retain
+their colours; automatic template tinting is not provided.
+
+macOS controls menu-bar placement. On a crowded menu bar, an icon can be hidden
+behind the camera notch even when AppKit reports it as visible. Hide some other
+menu-bar extras or use a display without a notch to make room; the launcher does
+not override system placement.
+
+
 ![A glass dashboard over a painted sky](./docs/images/mail-app.jpg)
 
 Everything above is GPUIX: the glass window, the cards, the schedule,
@@ -4159,6 +4260,61 @@ and a press on the background moves focus back to the window. React and Solid
 controls such as `Button` and `Combobox` handle activation and focus in
 JavaScript instead, so their windows get none of this.
 
+### Mahina (formerly Lune) embedding experiment
+
+[`serialexp/lune`](https://github.com/serialexp/lune) now calls its language
+Mahina. It is Lua-shaped, not an interchangeable Lua C API implementation.
+GPUIX's normal `gpx` Lua runner still uses `mlua` with Lua 5.4 or LuaJIT;
+it does **not** accept a Mahina engine flag.
+
+An opt-in, **headless** integration probe runs the shared
+`packages/lua/gpuix/solid.lua` with Mahina's safe Rust embedding API and writes
+directly to the real `RetainedTree`. There is no JavaScript, JSON transport,
+or subprocess IPC in that path. Numeric host IDs stay in the guest. Child
+arrays are read into Rust and passed to `replace_children`; strings are copied
+into retained text, so this is not a zero-copy bridge.
+
+The probe mounts nested keyed rows, updates a selection through signals, and
+reverses the list. It checks identity preservation, two-label updates,
+removed-row cleanup, and unmount cleanup. It reports VM/library setup,
+first mount, warmed update median/max, and list-reversal median separately.
+Updates use 200 warmup calls by default (`WARMUP` overrides this), followed
+by 30 measured calls; reversals use ten measured calls after the correctness
+checks.
+The `lua` engine runs the **same probe adapter and workload**, not GPUIX's full
+production arena/hook host. These are integration comparisons, not GUI frame
+times or a performance comparison against the complete `gpx` runtime.
+
+Download and verify the `mahina-bundle-v0.1.2.tar.gz` asset from
+[Mahina v0.1.2](https://github.com/serialexp/lune/releases/tag/v0.1.2), then
+extract it outside the repository. Set `MAHINA_PREBUILT_ROOT` to its `lib`
+directory (containing Rust target-triple subdirectories):
+
+```sh
+cd packages/native
+export MAHINA_PREBUILT_ROOT=/absolute/path/mahina-bundle-v0.1.2/lib
+cargo run --release --features mahina-experiment --example bench_mahina -- mahina 1000
+cargo run --release --features mahina-experiment --example bench_mahina -- mahina-no-jit 1000
+cargo run --release --features mahina-experiment --example bench_mahina -- lua 1000
+cargo test --release --features mahina-experiment --example bench_mahina
+# Same Lua workload with LuaJIT instead of Lua 5.4:
+cargo run --release --no-default-features --features test-support,luajit,mahina-experiment \
+  --example bench_mahina -- lua 1000
+```
+
+The dependency is pinned to the bundle's source commit. Without a prebuilt
+library its build script requires that commit's exact Zig toolchain. Mahina's
+native tracing JIT currently targets Linux x86-64 only; on macOS ARM64 the
+default engine uses tracing/IR interpretation, while `mahina-no-jit` disables
+tracing. Do not interpret Mac results as native-JIT results.
+
+This is not yet a general Mahina application runner: the probe exposes only
+node creation, text, child replacement, root assignment and destruction.
+Mahina does not yet parse Lua's `f { ... }` shorthand; use `f({ ... })`.
+Styles, event payloads, React-like hooks, LuaX loading, bundled widgets,
+windows, reload, and application services still need a Mahina host adapter.
+See [the integration notes](docs/design/mahina-integration.md).
+
 ### Experimental Lua signal core
 
 `solid.use_store(store, selector?, equality?)` connects an existing
@@ -4498,12 +4654,149 @@ such as `<text>{state().size}</text>` stay reactive. Call state actions explicit
 (`state().setSize(300)`, not colon syntax), and retain them only within their
 owner's lifetime.
 
+#### Application manifests and standalone packaging
+
+Define an application's development and packaging settings in `gpuix.json`:
+
+```json
+{
+  "schemaVersion": 1,
+  "name": "My App",
+  "identifier": "com.example.my-app",
+  "version": "0.1.0",
+  "entry": "main.luax",
+  "files": ["main.luax", "components", "assets"],
+  "icon": "AppIcon.icns",
+  "linux": {
+    "packageName": "my-app",
+    "maintainer": "Your Name <you@example.com>",
+    "description": "My desktop application",
+    "icon": "assets/app.svg",
+    "categories": ["Utility"]
+  },
+  "macos": {
+    "minimumSystemVersion": "14.0",
+    "category": "public.app-category.utilities"
+  }
+}
+```
+
+- `schemaVersion` must be `1`. `name`, reverse-domain `identifier`, numeric
+  `major.minor.patch` `version`, `entry` and a nonempty `files` list are required.
+  The entry can be Lua, LuaX, JavaScript, TypeScript or JSX, as supported by `gpx`.
+- Entry and file paths are relative to the manifest directory. `files` explicitly
+  lists files or recursively included directories; `"."` includes the whole
+  directory. There are no globs, automatic import discovery or ignore patterns.
+  Include every imported module, asset and relevant `tsconfig.json` within that
+  root. Dependencies outside the root must be moved or bundled into it first.
+  Absolute paths, parent traversal, symlinks and special files are rejected in
+  the payload. Do not include secrets, output folders or `node_modules` casually.
+- Optional `icon` names a macOS `.icns` file, relative to the manifest (it may
+  reside outside the payload root). It defaults to the GPUIX app icon and is
+  independent of the code-controlled tray icon. It is copied into macOS bundles,
+  not installed on bare executables.
+- Optional `macos.minimumSystemVersion` defaults to `14.0` and cannot be lower
+  than 14. `macos.category` defaults to `public.app-category.developer-tools`.
+  These configure bundle metadata; this does not cross-compile or build a
+  universal binary. Unknown manifest fields are rejected. Permissions are not
+  implemented: applications remain trusted and unsandboxed.
+
+```sh
+bun scripts/app.ts dev path/to/gpuix.json -- --watch
+just package examples/solid-workspace/gpuix.json
+gpx package path/to/gpuix.json --format binary --output dist/my-app
+gpx package path/to/gpuix.json --format deb
+```
+
+The development command builds release `gpx`, reads source files directly, and
+on macOS wraps it in `dist/dev/<name>.app` with the manifest's name and icon,
+and its identifier suffixed with `.development`.
+Launcher arguments follow `--`; terminal logs and watching work normally. The
+runner also accepts `gpx --manifest path/to/gpuix.json [launcher options]` without
+building a development bundle. Application window titles remain controlled by
+the application or `--title`. Changing the manifest or app icon requires restart.
+
+`gpx package gpuix.json [--format app|binary|deb] [--output PATH]` is the packaging
+CLI; `gpx package --help` shows its options. `just package MANIFEST` builds and
+invokes that command from a checkout. Packaging currently delegates to the
+repository's Bun build helpers and requires Bun, Rust, a GPUIX source checkout,
+and the normal native build prerequisites. It searches the working directory's
+ancestors, then its original build checkout; set `GPUIX_SOURCE_DIR` to select a
+checkout explicitly if needed. A copied `gpx` executable alone is not yet a
+self-contained packaging SDK. Manifest and explicit output paths resolve from
+the caller's working directory, with default outputs under that directory's
+`dist`. Packaged applications themselves do not need this build toolchain.
+The internal `gpx-app` Cargo target builds application runners separately so
+packaging never overwrites the running `gpx` tool, including on Windows. It
+builds the embedded framework bundles and compiles the manifest, application
+sources and assets into the release executable. No source sidecars or installed
+Lua/Node/Bun runtime are needed on the user's machine. The first format is
+uncompressed and contains source, not obfuscated code. Each launch extracts its
+payload to a private temporary directory kept for the application lifetime and
+removed on normal shutdown. Imports, native asset paths and ordinary file APIs
+therefore work without a separate virtual filesystem. Development and packaged
+manifest launches use the application root as their working directory; do not
+store persistent user data there. Abnormal termination may leave temporary files.
+
+Default output is `dist/<name>.app` on macOS and a standalone executable in
+`dist` on other hosts. `--format binary` explicitly emits just the executable;
+`--format app` requires macOS. `--format deb` requires Debian/Ubuntu Linux and
+produces an installable package (details below). `--output PATH` overrides the destination and
+replaces an existing output bundle. macOS outputs are ad-hoc signed, not
+notarized. The command validates the result with `--check` before reporting
+success; this catches missing startup imports/assets, not every lazy code path.
+Embedded applications reject `--watch` and `--dev-server`; use the manifest's
+development command instead. `--check` works without source files. The older
+`Contents/Resources/app` layout is still supported by unembedded runners.
+The Desktop distribution workflow builds on native macOS, Linux and Windows
+runners; it does not cross-compile. Linux/Windows validation runs in CI, not on
+the macOS development host.
+
+#### Debian / Ubuntu packages
+
+On a native Debian/Ubuntu build host, install `dpkg-dev` and `desktop-file-utils`
+in addition to the usual GPUIX build dependencies, then run:
+
+```sh
+gpx package path/to/gpuix.json --format deb
+sudo apt install ./dist/my-app_0.1.0_amd64.deb
+```
+
+The manifest's optional `linux` object supports:
+
+- `packageName`: Debian package and executable name; defaults to the lowercase
+  application identifier. Names must use Debian's lowercase package-name syntax.
+- `maintainer`: required for `.deb`, in `Name <email>` form. The Solid demo uses
+  placeholder contact metadata; replace it before publishing your own package.
+- `description`: optional single-line summary, defaulting to the app name.
+- `icon`: optional SVG path relative to the manifest, independent of macOS and
+  tray icons; defaults to the GPUIX SVG. It may live outside the payload root.
+- `categories`: optional desktop-menu category array, defaulting to `["Utility"]`.
+
+Output defaults to `dist/<packageName>_<version>_<architecture>.deb`;
+`--output path.deb` overrides it. Native `amd64` and `arm64` ELF executables are
+supported; CI currently builds `amd64` on Ubuntu 24.04. The package installs
+the embedded executable under `/usr/bin`, a `.desktop` launcher under
+`/usr/share/applications`, and a scalable icon under the hicolor icon hierarchy.
+No application sources, Bun or Lua installation are required on the user's machine.
+
+Linked-library dependencies are derived with
+[`dpkg-shlibdeps`](https://manpages.debian.org/bookworm/dpkg-dev/dpkg-shlibdeps.1.en.html);
+GPUI's runtime-loaded Vulkan, windowing and font libraries are declared as well.
+Package ownership is set to root without requiring root to build. The launcher
+is checked with `desktop-file-validate`. Use `apt install ./file.deb` to resolve
+dependencies, and `sudo apt remove <packageName>` to uninstall it. A working
+graphics session and compatible Vulkan driver are still required for the GUI.
+These are unsigned local-install packages, not a signed apt repository or
+Flatpak. A build on Ubuntu 24.04 does not guarantee older-distribution support.
+
 #### Package the Solid workspace (macOS)
 
 Run `just package-solid` on macOS with Rust and Xcode command-line tools
 installed, plus Bun for building embedded framework bundles. It builds the
 release `gpx` runner with vendored Lua 5.4 and QuickJS, copies the example's
-Lua/LuaX modules and assets into `Contents/Resources/app`, and produces:
+Lua/LuaX modules and assets into the executable using
+`examples/solid-workspace/gpuix.json`, and produces:
 
 - `dist/GPUIX Solid.app`
 - `dist/GPUIX-Solid-macos-arm64.zip` (or `x86_64` on an Intel build host)
@@ -4512,16 +4805,20 @@ Drag the app to Applications and launch it normally. Users do not need Rust,
 Node, Bun or Lua installed; the bundle is independent of the repository and
 working directory. It targets macOS 14 or newer and the build host's architecture
 (not a universal binary). Framework Lua modules are embedded in the runner.
-The packaged runner defaults to `Contents/Resources/app/main.luax` when no
-source argument is supplied; an explicit source path overrides it.
+The packaged runner defaults to its embedded manifest entry when no source
+argument is supplied; an explicit source path overrides it.
 `"dist/GPUIX Solid.app/Contents/MacOS/GPUIX Solid" --check` validates the bundled
 application without opening windows.
 
-By default the package is ad-hoc signed, **not notarized**, and has no custom
-app icon. Downloaded test builds may be blocked by Gatekeeper. Packaging does
+The package uses the manifest's Dock/Finder icon, also used in development.
+The example points to `scripts/assets/AppIcon.icns`
+(source: `scripts/assets/app-icon.svg`); choose your own `icon` path to brand
+an application. No runtime API is needed.
+By default the package is ad-hoc signed and **not notarized**.
+Downloaded test builds may be blocked by Gatekeeper. Packaging does
 not include updater or installer infrastructure.
 
-The **macOS distribution** GitHub Actions workflow builds an Apple Silicon ZIP
+The **Desktop distribution** GitHub Actions workflow builds an Apple Silicon ZIP
 on relevant pushes to `main`, or manually from the Actions tab. Download it
 from the run's artifacts. Automatic builds are ad-hoc signed. For a public
 distribution, manually run the workflow with **sign** enabled: it imports a
@@ -4529,6 +4826,23 @@ Developer ID Application certificate into a temporary keychain, signs with
 the hardened runtime and secure timestamp, submits to Apple's notary service,
 staples and validates the ticket, and then creates the final ZIP. Signing
 credentials are removed even on failure. This does not publish a GitHub release.
+
+The same workflow also packages the Solid workspace on Ubuntu 24.04 x64 and
+Windows x64, producing `GPUIX-Solid-linux-x64.tar.gz` and
+`GPUIX-Solid-windows-x64.zip`, plus an installable
+`gpuix-solid_<version>_amd64.deb` as the primary Linux package. The tarball remains
+a portable/debug artifact. Linux/Windows artifacts are unsigned;
+the optional **sign** input applies only to macOS. Each platform copies its
+packaged executable into an isolated temporary directory and runs `--check`
+without source sidecars or inherited Lua/Node module paths. This checks loading
+and mounting the embedded application; it does **not** open a window or prove
+GPU rendering, input handling or compatibility with every target machine.
+Linux still needs GPUI's system libraries (including Vulkan and the windowing
+and font libraries); building on Ubuntu 24.04 does not establish support for
+older distributions. CI also installs the `.deb` with apt, verifies its launcher
+and icon, checks its installed executable, and uninstalls it. Windows executables are built with MSVC and do not yet
+include installer/runtime prerequisite handling. Flatpak,
+Windows application icons/signing, and real GUI smoke tests remain follow-ups.
 
 Configure these repository secrets (or organization secrets granting this
 repository access) before enabling signing:

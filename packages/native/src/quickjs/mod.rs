@@ -130,6 +130,7 @@ impl Default for QuickJsOptions {
 
 /// What the native functions JS calls share with the runtime.
 struct Shared {
+    tray_commands: RefCell<Vec<crate::script::tray_api::TrayCommand>>,
     host: RefCell<Box<dyn Host>>,
     /// What failed during the current call, in order.
     errors: RefCell<Vec<String>>,
@@ -164,6 +165,7 @@ type PromptSettlers = (Persistent<Function<'static>>, Persistent<Function<'stati
 /// The prelude's hooks, saved before app code runs, so an app that writes to
 /// `__gpuix` doesn't replace them.
 struct Hooks {
+    dispatch_tray: Persistent<Function<'static>>,
     dispatch_event: Persistent<Function<'static>>,
     due_timers: Persistent<Function<'static>>,
     run_timer: Persistent<Function<'static>>,
@@ -180,6 +182,7 @@ impl Hooks {
             Ok(Persistent::save(ctx, host.get::<_, Function>(name)?))
         };
         Ok(Self {
+            dispatch_tray: hook("dispatchTrayEvent")?,
             dispatch_event: hook("dispatchEvent")?,
             due_timers: hook("dueTimers")?,
             run_timer: hook("runTimer")?,
@@ -267,6 +270,7 @@ impl QuickJsRuntime {
         let context =
             Context::full(&runtime).map_err(|error| format!("cannot start QuickJS: {error}"))?;
         let shared = Rc::new(Shared {
+            tray_commands: RefCell::new(Vec::new()),
             host: RefCell::new(options.host),
             errors: RefCell::new(Vec::new()),
             rejections: RefCell::new(Vec::new()),
@@ -351,6 +355,14 @@ impl QuickJsRuntime {
         let json = serde_json::to_string(payload)
             .map_err(|error| format!("cannot encode a {} event: {error}", payload.event_type))?;
         self.call(|ctx, hooks| hooks.dispatch_event.clone().restore(ctx)?.call((json,)))
+    }
+
+    pub(crate) fn take_tray_commands(&self) -> Vec<crate::script::tray_api::TrayCommand> {
+        std::mem::take(&mut *self.shared.tray_commands.borrow_mut())
+    }
+
+    pub(crate) fn dispatch_tray_action(&self, action: u64) -> Result<(), String> {
+        self.call(|ctx, hooks| hooks.dispatch_tray.clone().restore(ctx)?.call((action,)))
     }
 
     /// The framework builds the app runs with.
@@ -637,6 +649,37 @@ fn install_host<'js>(
     )?;
 
     host.set("proxyTarget", Function::new(ctx.clone(), proxy_target)?)?;
+
+    host.set(
+        "allocateTrayId",
+        Function::new(ctx.clone(), || {
+            static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        })?,
+    )?;
+    let trays = shared.clone();
+    host.set(
+        "trayCommand",
+        Function::new(ctx.clone(), move |ctx: Ctx<'js>, json: String| {
+            let mut command: crate::script::tray_api::TrayCommand = serde_json::from_str(&json)
+                .map_err(|error| Exception::throw_type(&ctx, &error.to_string()))?;
+            if let crate::script::tray_api::TrayCommand::Set { spec } = &mut command {
+                if spec.icon.is_relative() {
+                    let root = trays
+                        .entry
+                        .as_deref()
+                        .and_then(|entry| Path::new(entry).parent())
+                        .unwrap_or_else(|| Path::new("."));
+                    spec.icon = root.join(&spec.icon);
+                }
+            }
+            command
+                .validate()
+                .map_err(|error| Exception::throw_type(&ctx, &error))?;
+            trays.tray_commands.borrow_mut().push(command);
+            Ok::<(), rquickjs::Error>(())
+        })?,
+    )?;
 
     let window = shared.clone();
     host.set(

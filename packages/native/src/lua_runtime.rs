@@ -1361,6 +1361,7 @@ impl LuaNode {
 
 pub(crate) struct LuaRuntime {
     lua: Lua,
+    trays: Arc<Mutex<crate::lua_tray::LuaTrays>>,
     roots: HashMap<LuaRootId, LuaRoot>,
     hooks: Arc<Mutex<HookStore>>,
     stores: Arc<Mutex<StoreRegistry>>,
@@ -1505,6 +1506,16 @@ impl LuaRuntime {
             styles,
         )
         .map_err(lua_error)?;
+        let trays = Arc::new(Mutex::new(crate::lua_tray::LuaTrays::default()));
+        crate::lua_tray::install(
+            &lua,
+            &lua.globals().get::<Table>("gpuix").map_err(lua_error)?,
+            &trays,
+            path.and_then(Path::parent)
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+        )
+        .map_err(lua_error)?;
         install_builtin_modules(&lua).map_err(lua_error)?;
         if let Some(root) = path.and_then(Path::parent) {
             install_module_searcher(&lua, root, loaded_modules.clone()).map_err(lua_error)?;
@@ -1522,6 +1533,7 @@ impl LuaRuntime {
         );
         Ok(Self {
             lua,
+            trays,
             roots,
             hooks,
             stores,
@@ -1627,6 +1639,20 @@ impl LuaRuntime {
         self.application.lock().unwrap().take_commands()
     }
 
+    pub(crate) fn take_tray_commands(&self) -> Vec<crate::script::tray_api::TrayCommand> {
+        self.trays.lock().unwrap().take_commands()
+    }
+
+    pub(crate) fn dispatch_tray_action(&mut self, action: u64) -> Result<Vec<String>, String> {
+        let handler = self.trays.lock().unwrap().handler(action);
+        if let Some(handler) = handler {
+            self.drop_unmounted_updates();
+            self.begin_arena_generation();
+            handler.call::<()>(()).map_err(lua_error)?;
+        }
+        Ok(self.dirty_window_ids())
+    }
+
     pub(crate) fn reload_file(
         &mut self,
         path: &Path,
@@ -1711,14 +1737,17 @@ impl LuaRuntime {
         let entry = compile_entry(&self.lua, &source, Some(path), luax)?;
         let store_snapshot = self.stores.lock().unwrap().snapshot();
         let application_snapshot = self.application.lock().unwrap().clone();
+        let tray_snapshot = self.trays.lock().unwrap().clone();
         let module_snapshot = self.unload_modules().map_err(lua_error)?;
         self.stores.lock().unwrap().begin_reload();
         self.application.lock().unwrap().begin_entry();
+        self.trays.lock().unwrap().begin_reload();
         let value = match entry.call::<Value>(()) {
             Ok(value) => value,
             Err(error) => {
                 self.stores.lock().unwrap().restore(store_snapshot);
                 *self.application.lock().unwrap() = application_snapshot;
+                *self.trays.lock().unwrap() = tray_snapshot;
                 self.restore_modules(module_snapshot).map_err(lua_error)?;
                 return Err(lua_error(error));
             }
@@ -1728,6 +1757,7 @@ impl LuaRuntime {
             Err(error) => {
                 self.stores.lock().unwrap().restore(store_snapshot);
                 *self.application.lock().unwrap() = application_snapshot;
+                *self.trays.lock().unwrap() = tray_snapshot;
                 self.restore_modules(module_snapshot).map_err(lua_error)?;
                 return Err(error);
             }
@@ -1735,6 +1765,7 @@ impl LuaRuntime {
         if !application_entry {
             self.stores.lock().unwrap().restore(store_snapshot);
             *self.application.lock().unwrap() = application_snapshot;
+            *self.trays.lock().unwrap() = tray_snapshot;
             self.restore_modules(module_snapshot).map_err(lua_error)?;
             return Err(
                 "A multiwindow application cannot reload as a single render function".to_string(),
@@ -2984,7 +3015,7 @@ fn create_store_table(
     Ok(store)
 }
 
-fn validate_app_handle(handle: &AnyUserData) -> mlua::Result<()> {
+pub(crate) fn validate_app_handle(handle: &AnyUserData) -> mlua::Result<()> {
     handle.borrow::<LuaAppHandle>().map(|_| ()).map_err(|_| {
         mlua::Error::runtime("gpuix application function expects a value from gpuix.create_app")
     })

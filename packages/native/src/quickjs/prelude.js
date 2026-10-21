@@ -109,6 +109,12 @@
   // passes to `new GpuixRenderer(...)`. Its return value says whether a
   // handler took the event.
   let eventHandler;
+  let trayHandler;
+  host.setTrayHandler = (handler) => {
+    if (typeof handler !== "function") throw new TypeError("Tray handler must be a function");
+    trayHandler = handler;
+  };
+  host.dispatchTrayEvent = (action) => trayHandler?.(action);
   host.setEventHandler = (handler) => {
     if (handler !== undefined && typeof handler !== "function") {
       throw new TypeError("The event handler must be a function");

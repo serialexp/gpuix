@@ -66,6 +66,7 @@ url = { version = "2", features = ["serde"] }
 napi = { version = "3.12.7", features = ["napi8", "serde-json"] }
 napi-derive = "3.6.8"
 mlua = { version = "0.11", default-features = false, features = ["serialize", "send"] }
+mahina = { git = "https://github.com/serialexp/lune", rev = "1b60a01f3af4013256d0b505ed8d281f80242fb5", optional = true }
 # The embedded JavaScript engine, behind the `quickjs` feature. rquickjs-sys is
 # patched below.
 rquickjs = { version = "0.14", optional = true }
@@ -99,6 +100,7 @@ web-sys = { version = "0.3", features = ["Navigator", "Window"] }
 # macOS text/graphics deps - pinned to avoid core-graphics version conflicts
 # core-text 21.1.0 uses core-graphics 0.25 which conflicts with font-kit's core-graphics 0.24
 [target.'cfg(target_os = "macos")'.dependencies]
+gpui-tray = { version = "=0.1.4", features = ["menu-state"] }
 core-text = "=21.0.0"
 core-graphics = "=0.24.0"
 tar = "0.4"
@@ -116,6 +118,11 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_HiDpi"] 
 name = "gpx"
 required-features = ["quickjs"]
 
+[[bin]]
+name = "gpx-app"
+path = "src/bin/gpx_app.rs"
+required-features = ["quickjs"]
+
 [features]
 # test-support is default so published binaries include TestGpuixRenderer,
 # letting users write GPU-backed tests for their apps.
@@ -123,6 +130,7 @@ default = ["test-support", "lua54"]
 test-support = ["gpui/test-support", "gpui_platform/test-support", "gpui_macos/test-support", "gpui_macos/font-kit"]
 lua54 = ["mlua/lua54", "mlua/vendored"]
 luajit = ["mlua/luajit", "mlua/vendored"]
+mahina-experiment = ["dep:mahina"]
 # The QuickJS engine (quickjs-ng through rquickjs). Not in wasm builds.
 # - map-hash-mix: quickjs-ng takes Map and Set buckets from the low bits of a
 #   hash whose low bits are constant for small integers and object pointers,
@@ -138,6 +146,8 @@ quickjs = ["dep:rquickjs", "rquickjs/disable-assertions", "rquickjs/loader", "de
 # vendor/rquickjs-sys-0.14.0-source-position.diff applied, behind its
 # `map-hash-mix` and `source-position` features. See vendor/README.md.
 [patch.crates-io]
+gpui = { path = "../../zed/crates/gpui" }
+gpui-tray = { path = "vendor/gpui-tray" }
 rquickjs-sys = { path = "vendor/rquickjs-sys" }
 
 [build-dependencies]
@@ -155,6 +165,10 @@ path = "examples/hello.rs"
 [[example]]
 name = "bench_serde"
 path = "examples/bench_serde.rs"
+
+[[example]]
+name = "bench_mahina"
+required-features = ["mahina-experiment"]
 
 [profile.release]
 lto = true

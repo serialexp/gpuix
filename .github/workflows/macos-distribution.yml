@@ -1,4 +1,4 @@
-name: macOS distribution
+name: Desktop distribution
 
 on:
   push:
@@ -8,6 +8,14 @@ on:
       - 'packages/lua/**'
       - 'examples/solid-workspace/**'
       - 'scripts/package-solid.sh'
+      - 'scripts/macos-app.sh'
+      - 'scripts/app.ts'
+      - 'scripts/app-manifest.ts'
+      - 'scripts/app-manifest.test.ts'
+      - 'scripts/check-packaged.ts'
+      - 'scripts/deb.ts'
+      - 'scripts/deb.test.ts'
+      - 'scripts/assets/**'
       - '.github/workflows/macos-distribution.yml'
       - 'bun.lock'
       - 'rust-toolchain.toml'
@@ -23,11 +31,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: macos-distribution-${{ github.ref }}
+  group: desktop-distribution-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  package:
+  package-macos:
     runs-on: macos-14
     timeout-minutes: 60
     steps:
@@ -95,8 +103,103 @@ jobs:
             security delete-keychain "$RUNNER_TEMP/gpuix-signing.keychain-db"
           fi
 
+      - name: Verify the embedded executable without bundle resources
+        run: bun scripts/check-packaged.ts "dist/GPUIX Solid.app/Contents/MacOS/GPUIX Solid"
+
       - uses: actions/upload-artifact@v4
         with:
           name: GPUIX-Solid-macos-${{ runner.arch }}-${{ inputs.sign && 'notarized' || 'adhoc' }}
           path: dist/GPUIX-Solid-macos-*.zip
+          if-no-files-found: error
+
+  package-desktop:
+    name: Package - ${{ matrix.platform }} x64
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: ubuntu-24.04
+            platform: linux
+            executable: GPUIX Solid
+            launcher: gpx
+          - host: windows-latest
+            platform: windows
+            executable: GPUIX Solid.exe
+            launcher: gpx.exe
+    runs-on: ${{ matrix.host }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/native/target
+          key: desktop-distribution-${{ matrix.platform }}-${{ runner.arch }}-${{ hashFiles('packages/native/Cargo.lock') }}
+
+      - name: Install Linux build and runtime dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc g++ clang pkg-config cmake dpkg-dev desktop-file-utils \
+            libfontconfig-dev libwayland-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libssl-dev libzstd-dev \
+            libvulkan1 vulkan-validationlayers
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test manifest and payload collection
+        run: bunx vitest run scripts/app-manifest.test.ts scripts/deb.test.ts
+
+      - name: Package the Solid workspace
+        run: |
+          bun run --cwd packages/native build:embedded
+          cargo build --release --manifest-path packages/native/Cargo.toml --no-default-features --features lua54,quickjs --bin gpx
+          ./packages/native/target/release/${{ matrix.launcher }} package examples/solid-workspace/gpuix.json --format binary
+
+      - name: Verify the embedded executable without source sidecars
+        run: bun scripts/check-packaged.ts "dist/${{ matrix.executable }}"
+
+      - name: Archive Linux executable
+        if: runner.os == 'Linux'
+        run: tar -czf dist/GPUIX-Solid-linux-x64.tar.gz -C dist 'GPUIX Solid'
+
+      - name: Build Debian installer
+        if: runner.os == 'Linux'
+        run: ./packages/native/target/release/gpx package examples/solid-workspace/gpuix.json --format deb
+
+      - name: Install, verify and uninstall Debian package
+        if: runner.os == 'Linux'
+        run: |
+          dpkg-deb --info dist/gpuix-solid_*_amd64.deb
+          sudo apt-get install -y ./dist/gpuix-solid_*_amd64.deb
+          desktop-file-validate /usr/share/applications/gpuix-solid.desktop
+          test -f /usr/share/icons/hicolor/scalable/apps/gpuix-solid.svg
+          bun scripts/check-packaged.ts /usr/bin/gpuix-solid
+          sudo apt-get remove -y gpuix-solid
+          test ! -e /usr/bin/gpuix-solid
+          test ! -e /usr/share/applications/gpuix-solid.desktop
+
+      - name: Archive Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -LiteralPath 'dist/GPUIX Solid.exe' -DestinationPath 'dist/GPUIX-Solid-windows-x64.zip' -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GPUIX-Solid-${{ matrix.platform }}-x64-unsigned
+          path: |
+            dist/GPUIX-Solid-${{ matrix.platform }}-x64.zip
+            dist/GPUIX-Solid-${{ matrix.platform }}-x64.tar.gz
+            dist/gpuix-solid_*_amd64.deb
           if-no-files-found: error

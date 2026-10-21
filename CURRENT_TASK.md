@@ -1,5 +1,113 @@
 # Current task
 
+## 2026-10-21: Packaging belongs to the gpx CLI
+
+- Added `gpx package gpuix.json --format app|binary|deb --output PATH`.
+  Packaging recipes and distribution CI now invoke it, rather than exposing
+  `scripts/app.ts` as the user-facing package command.
+- The CLI currently orchestrates the existing Bun helpers and Cargo builds;
+  it still requires a source checkout and build toolchain. Checkout discovery
+  supports `GPUIX_SOURCE_DIR`; output defaults to the caller's `dist` directory.
+- Added an internal `gpx-app` runner target so Cargo does not overwrite the
+  executing `gpx` tool (notably a locked executable on Windows).
+- Validation: both launcher targets' tests pass, as do the seven TypeScript
+  packaging tests, TypeScript checking and actionlint. A real `gpx package`
+  invocation from outside the checkout built a standalone Solid app into that
+  caller's `dist`, and the output passed `--check` without source sidecars.
+
+## 2026-10-21: Debian application packages
+
+- Added `--format deb` on native Debian/Ubuntu hosts and optional `linux`
+  manifest metadata for package name, maintainer, description, SVG icon and
+  desktop categories. Package payloads remain embedded in a native executable.
+- Packages install `/usr/bin/<packageName>`, a desktop launcher and a hicolor
+  SVG icon. `dpkg-shlibdeps` derives linked dependencies; GPUI runtime-loaded
+  libraries are added explicitly. No root is required to build the package.
+- Distribution CI keeps the portable tarball and adds a primary `.deb`; it
+  installs through apt, validates launcher/icon/installed startup, then removes
+  the package. Actual Linux application validation awaits the runner.
+- Local validation includes metadata/manifest unit tests, TypeScript checks and
+  actionlint. A native Debian arm64 Docker container built a package around a
+  `/bin/true` fixture, installed it with apt (resolving dependencies), validated
+  its desktop entry/icon and binary contents, and uninstalled it successfully.
+  This exercises real Debian tooling, not GPUI rendering or the Linux app build.
+
+## 2026-10-21: Native desktop distribution CI
+
+- Expanded `macos-distribution.yml` (display name: Desktop distribution) with
+  native Ubuntu 24.04 x64 and Windows x64 packaging jobs. Existing Apple Silicon
+  packaging, optional Developer ID signing/notarization and ZIP output remain.
+- Linux/Windows package the Solid workspace as an embedded executable, run
+  manifest collection tests and isolated startup validation, then upload unsigned
+  tar.gz/ZIP artifacts. No cross-compilation or external app source is required.
+- `scripts/check-packaged.ts` copies only the executable into a temporary working
+  directory, clears inherited Lua/Node module paths and runs `--check` with a
+  timeout. All three platform jobs use it. It does not test real GUI painting.
+- Local validation: actionlint, TypeScript checking, manifest tests and isolated
+  macOS packaged startup pass. Linux/Windows success is pending the first remote
+  workflow run; this machine cannot verify those native builds.
+
+## 2026-10-21: Manifest-driven standalone packaging
+
+- `gpuix.json` defines application identity, entry, explicit payload files,
+  an independent app icon and macOS bundle metadata. `scripts/app.ts` provides
+  `dev` and `package`; workspace/tray start recipes use the manifests.
+- Packaging builds an optimized runner with a compile-time embedded payload.
+  `gpx` extracts to an owned temporary directory for existing module and asset
+  loaders, keeping it alive through the application loop. Normal exit cleans up.
+  macOS bundles contain the executable, plist and app icon, not source sidecars.
+- `just package MANIFEST` is generic; `just package-solid` retains its existing
+  signing/notarization/ZIP flow using the generic packager underneath.
+- Runtime permissions remain deferred in TODO.md. Unknown manifest fields,
+  including permission declarations, fail rather than implying a sandbox.
+- Validation: 10 optimized launcher/extraction tests and 3 manifest/collection
+  tests pass; TypeScript checks pass. Lua standalone and JavaScript app-bundle
+  outputs validate from `/` without source sidecars. The signed Solid app and
+  ZIP distribution build successfully; manifest-based development bundle checks
+  and all four example manifest entry checks pass without opening GUI windows.
+- Follow-ups: direct archive-backed loading/compression, Windows/Linux packaging
+  validation, resource limits and crash cleanup, and concurrent package-build
+  isolation (commands currently share Cargo's runner output).
+
+## 2026-10-20: Application-owned macOS trays
+
+- Removed the experimental launcher `--tray` flag. Lua applications own trays
+  through `create_tray(app, options)`, `update_tray`, `remove_tray`, and `quit(app)`.
+  Embedded React/Solid apps use framework-neutral `@gpuix/native/app` exports.
+- Both paths share native tray management, checked/disabled menu items, explicit
+  disposal, stale-callback rejection and last-window lifetime policy. JavaScript
+  retains its runtime/framework tree while windows close and reopen.
+- `just start-tray` and `just start-tray-js` run application-controlled demos.
+  The API remains macOS/gpx-only, with flat menus and an initial window required.
+  JS apps with active trays use full reloads rather than Fast Refresh to avoid
+  duplicating app-scope resources. Lua failed entry reloads roll back tray state.
+- Vendored gpui-tray 0.1.4 with a one-line macOS menu validation fix: AppKit
+  otherwise auto-enables disabled entries when opening a menu. See vendor README.
+- Native menu callbacks were exercised through AppKit under LLDB: Lua reopen,
+  JS reopen with React count preserved, checked-state updates, disabled-state
+  validation and Quit. The notch can hide icons on crowded menu bars.
+- Follow-ups: Bun/Node host support, tray-only startup, nested menus, JS
+  resource-aware Fast Refresh, and preserving GPUI image scale in tray icons.
+
+## 2026-10-20: Mahina/Lune embedding probe
+
+- Added the opt-in `mahina-experiment` feature and `bench_mahina` Rust example.
+  Uses the release v0.1.2 embedding API and real retained-tree operations;
+  the normal `gpx` runner is unchanged. This is headless, not a general
+  Mahina window/LuaX/widget host yet.
+- The existing Lua signal core runs under Mahina. Two table-call shorthand
+  expressions now use explicit parentheses, also valid in Lua 5.4/LuaJIT.
+- Three lifecycle tests passed with each Lua backend build, covering Mahina
+  tracing on/off and Lua 5.4 or LuaJIT. Timed runs at 1k/10k nested keyed
+  rows also passed identity, two-label update and disposal assertions.
+- `WARMUP` defaults to 200; selection and full-list reversal are distinct
+  measurements. Native Mahina JIT is Linux x86-64 only, not this Mac.
+  Local measurements were noisy/contended and do not establish a speed win.
+- Full integration direction, reproducible commands and measurement details:
+  `docs/design/mahina-integration.md`. Next slice is a Mahina signal-host
+  adapter with validated handles, styles/props, guest events and native
+  window integration, not a rewrite of the Lua reactive algorithms.
+
 This is a working handoff, not a repository overview or public API contract.
 Implementation and verification notes below are dated snapshots; use
 `git status` and `git log` for current local changes and push state. See

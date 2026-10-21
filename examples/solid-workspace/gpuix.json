@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "name": "GPUIX Solid",
+  "identifier": "dev.gpuix.solid-workspace",
+  "version": "0.1.0",
+  "entry": "main.luax",
+  "files": ["main.luax", "store.lua"],
+  "icon": "../../scripts/assets/AppIcon.icns",
+  "macos": { "minimumSystemVersion": "14.0" },
+  "linux": {
+    "packageName": "gpuix-solid",
+    "maintainer": "GPUIX contributors <noreply@github.com>",
+    "description": "GPUIX Solid workspace demonstration",
+    "categories": ["Development"]
+  }
+}
