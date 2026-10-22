@@ -203,6 +203,9 @@ pub(crate) fn start(
 /// The app's window options, with the command line's on top, and the entry
 /// file's name as the title when neither sets one.
 fn window_options(mut options: WindowOptions, entry: &Path, app: &AppOptions) -> WindowOptions {
+    if app.background {
+        options.focus = Some(false);
+    }
     if let Some(title) = &app.title {
         options.title = Some(title.clone());
     }
@@ -841,12 +844,14 @@ mod tests {
             &AppOptions {
                 title: Some("Command line".into()),
                 width: Some(640.0),
+                background: true,
                 ..AppOptions::default()
             },
         );
         assert_eq!(options.title.as_deref(), Some("Command line"));
         assert_eq!(options.width, Some(640.0));
         assert_eq!(options.height, Some(200.0));
+        assert_eq!(options.focus, Some(false));
         let options = window_options(app.clone(), entry, &AppOptions::default());
         assert_eq!(options.title.as_deref(), Some("App"));
         let untitled = WindowOptions { title: None, ..app };

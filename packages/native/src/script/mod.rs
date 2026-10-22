@@ -19,6 +19,7 @@ pub struct AppOptions {
     pub height: Option<f32>,
     /// Reload the app when a source file under its directory changes.
     pub watch: bool,
+    pub background: bool,
     pub dev_server: Option<u16>,
 }
 

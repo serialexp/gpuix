@@ -32,6 +32,11 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
     let runtime = LuaRuntime::load_application_file(&path)?;
     let application_entry = runtime.is_application_entry();
     let mut window_options = runtime.window_options();
+    if options.background {
+        for window in &mut window_options {
+            window.focus = false;
+        }
+    }
     if !application_entry {
         let main = window_options
             .iter_mut()

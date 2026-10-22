@@ -180,6 +180,7 @@ fn parse_arguments_with_default(
         match argument.as_str() {
             "--check" => check = true,
             "--watch" => options.watch = true,
+            "--background" => options.background = true,
             "--dev-server" => {
                 options.dev_server = Some(
                     next_value(&mut arguments, "--dev-server")?
@@ -243,13 +244,14 @@ fn dimension(value: String, name: &str) -> Result<f32, String> {
 fn usage() -> String {
     format!(
         "Usage: gpx package gpuix.json [--format app|binary|deb] [--output PATH]\n\
-         Usage: gpx [--manifest gpuix.json] [--check] [--watch] [--dev-server PORT] [--title TITLE] [--width PX] [--height PX] [app]\n\
+         Usage: gpx [--manifest gpuix.json] [--check] [--watch] [--background] [--dev-server PORT] [--title TITLE] [--width PX] [--height PX] [app]\n\
          The app is a {} file, run in the embedded Lua runtime, or a {} file,\n\
          run in the embedded QuickJS runtime. It is required unless gpx is launched from an app\n\
          bundle with Resources/app/{}, or has an embedded payload or --manifest.\n\
          --check loads the app without opening a window. --watch reloads it when its files\n\
          change. --dev-server enables watching and an authenticated loopback testing API\n\
-         (requires GPUIX_DEV_TOKEN). --title, --width and --height beat the app's own window options.",
+         (requires GPUIX_DEV_TOKEN). --background opens windows without taking focus.\n\
+         --title, --width and --height beat the app's own window options.",
         either(LUA_EXTENSIONS.into_iter()),
         either(JS_EXTENSIONS.into_iter()),
         BUNDLED_ENTRIES.join(", ")
@@ -259,6 +261,18 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_launch_is_opt_in_for_both_engines() {
+        for entry in ["app.luax", "app.tsx"] {
+            let args =
+                parse_arguments(["--background", "--dev-server", "0", entry].map(String::from))
+                    .unwrap();
+            assert!(args.options.background);
+            let args = parse_arguments([entry].map(String::from)).unwrap();
+            assert!(!args.options.background);
+        }
+    }
 
     #[test]
     fn dev_server_enables_watching_and_validates_port() {

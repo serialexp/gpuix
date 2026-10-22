@@ -1275,6 +1275,9 @@ Mark targets with `testId`. Then either:
   on stdin only when stdin is a **pipe**
 
 **Always pass `focus: false` when you start a window to check your own work.**
+For embedded Lua/LuaX and QuickJS checks, pass `gpx --background` instead;
+it overrides window-creation focus without modifying the app. Prefer the
+windowless test renderer when a separate application process is unnecessary.
 The user is doing something else. A window that activates on launch takes the
 keyboard mid-sentence, once per iteration, and there is no reason for it:
 `click()` and `screenshot()` never need focus. Wire the entry file so the flag

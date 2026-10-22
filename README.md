@@ -916,6 +916,20 @@ mounted root. Call `unmount()` on the first root before you create another;
 
 ### Background launch
 
+For embedded Lua/LuaX and QuickJS apps, use `gpx --background` to override
+window creation with `focus: false`, without editing the application:
+
+```bash
+gpx --background --dev-server 0 examples/solid-workspace/main.luax
+```
+
+The dev server still requires `GPUIX_DEV_TOKEN`. This is a non-activating
+launch, not headless rendering: windows still exist, and screenshots and
+synthetic automation input remain available. Lua window definitions also use
+this policy when opened later. Explicit application requests to activate or
+focus a window can still bring it forward. Platform support is the same as
+`focus: false` below; Linux currently ignores that option.
+
 `focus: false` opens the window **without taking focus**. The app you were
 typing in keeps the caret and the active titlebar. `show: false` goes further
 and opens no window at all, so the process runs with a live React tree and

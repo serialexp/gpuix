@@ -1,5 +1,17 @@
 # Current task
 
+## 2026-10-22: Non-activating embedded app checks
+
+- Added `gpx --background` for Lua/LuaX and QuickJS window creation. Live
+  automation and screenshots keep working without activating the application.
+  Explicit application activation requests remain allowed; Linux currently
+  ignores GPUI's focus option. This is not a headless launcher.
+- Agent-run live checks must use this flag; windowless component tests remain
+  preferred when they cover the behavior under test.
+- Validation: 535 Rust library tests and 21 launcher tests pass. Release gpx
+  rebuilt. Live Lua and QuickJS startup, click/state updates and GPU screenshots
+  each preserved the desktop foreground application's PID.
+
 ## 2026-10-22: Native in-app inspector (supersedes browser-first UX)
 
 - Bart clarified the intended UI: right-click Inspect element and a native
