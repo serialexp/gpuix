@@ -3438,6 +3438,7 @@ impl Drop for GpuixRenderer {
 // ── GPUI View ────────────────────────────────────────────────────────
 
 pub(crate) struct GpuixView {
+    pub(crate) inspector: crate::inspector::InspectorState,
     pub(crate) tree: Arc<Mutex<RetainedTree>>,
     pub(crate) event_callback: Option<EventCallback>,
     pub(crate) window_title: String,
@@ -3753,6 +3754,14 @@ fn resolve_highlight(
     Some((context, Some(total)))
 }
 
+impl Drop for GpuixView {
+    fn drop(&mut self) {
+        if let Some(id) = self.native_window_id {
+            crate::automation::remove_window_bounds(id);
+        }
+    }
+}
+
 impl GpuixView {
     pub(crate) fn new(
         tree: Arc<Mutex<RetainedTree>>,
@@ -3761,6 +3770,7 @@ impl GpuixView {
         selection: SharedSelection,
     ) -> Self {
         Self {
+            inspector: crate::inspector::InspectorState::default(),
             tree,
             event_callback,
             window_title,
@@ -5085,10 +5095,43 @@ impl gpui::Render for GpuixView {
                     },
                 ))
                 .child(crate::automation::bounds_frame_reset())
+                .when(crate::automation::inspector_enabled(), |root| {
+                    root.child(crate::inspector::events(&self.inspector, cx))
+                })
                 .when_some(native_tab_root_focus, |root, handle| {
                     root.child(pointer_focus_boundary(handle))
                 })
-                .child(result)
+                .child({
+                    if crate::automation::inspector_enabled() {
+                        gpui::div()
+                            .size_full()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                gpui::div()
+                                    .relative()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_hidden()
+                                    .child(result),
+                            )
+                            .child(crate::inspector::build(
+                                &mut self.inspector,
+                                &tree,
+                                &theme,
+                                window,
+                                cx,
+                            ))
+                            .into_any_element()
+                    } else {
+                        result
+                    }
+                })
+                .when(crate::automation::inspector_enabled(), |root| {
+                    root.child(
+                        gpui::deferred(crate::automation::inspector_overlay()).priority(usize::MAX),
+                    )
+                })
                 .into_any_element()
         };
 

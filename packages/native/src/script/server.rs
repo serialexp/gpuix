@@ -39,10 +39,25 @@ enum Command {
     Screenshot {
         window: u64,
     },
+    Geometry {
+        window: u64,
+    },
+    Pick {
+        window: u64,
+        x: f64,
+        y: f64,
+    },
+    Highlight {
+        window: u64,
+        #[serde(rename = "nodeId")]
+        node_id: Option<u64>,
+    },
     Click {
         window: u64,
         x: f64,
         y: f64,
+        #[serde(default)]
+        button: u32,
     },
     Press {
         window: u64,
@@ -54,6 +69,11 @@ struct Request {
     command: Command,
     response: std::sync::mpsc::SyncSender<Value>,
     deadline: Instant,
+}
+
+enum HttpRequest {
+    Inspector,
+    Rpc(Command),
 }
 
 pub(crate) struct Server {
@@ -85,6 +105,11 @@ impl Server {
         listener
             .set_nonblocking(true)
             .map_err(|error| error.to_string())?;
+        let origin = format!(
+            "http://{}",
+            listener.local_addr().map_err(|error| error.to_string())?
+        );
+        eprintln!("gpx: inspector {origin}/inspector");
         eprintln!(
             "gpx: dev API http://{}/rpc",
             listener.local_addr().map_err(|error| error.to_string())?
@@ -96,9 +121,21 @@ impl Server {
             while !stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        if stream.set_nonblocking(false).is_err() {
+                            continue;
+                        }
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                         let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-                        let result = read_request(&mut stream, &token).and_then(|command| {
+                        let incoming = read_http_request(&mut stream, &token, Some(&origin));
+                        if matches!(incoming, Ok(HttpRequest::Inspector)) {
+                            let body = include_str!("inspector.html");
+                            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+                            continue;
+                        }
+                        let result = incoming.and_then(|incoming| {
+                            let HttpRequest::Rpc(command) = incoming else {
+                                unreachable!()
+                            };
                             let (response, receiver) = std::sync::mpsc::sync_channel(1);
                             sender
                                 .unbounded_send(Request {
@@ -129,6 +166,7 @@ impl Server {
     }
 
     pub(crate) fn attach(mut self, cx: &mut gpui::App) {
+        crate::automation::enable_inspector();
         cx.spawn(async move |cx| {
             while let Some(request) = self.requests.next().await {
                 if Instant::now() >= request.deadline {
@@ -202,17 +240,32 @@ fn encode_screenshot(image: image::RgbaImage, scale_factor: f32) -> Result<Value
     )
 }
 
+#[cfg(test)]
 fn read_request(stream: &mut impl Read, token: &str) -> Result<Command, String> {
+    match read_http_request(stream, token, None)? {
+        HttpRequest::Rpc(command) => Ok(command),
+        HttpRequest::Inspector => Err("expected RPC".into()),
+    }
+}
+
+fn read_http_request(
+    stream: &mut impl Read,
+    token: &str,
+    origin: Option<&str>,
+) -> Result<HttpRequest, String> {
     let mut reader = BufReader::new(stream.take(16384));
     let mut line = String::new();
     reader
         .read_line(&mut line)
         .map_err(|error| error.to_string())?;
-    if line != "POST /rpc HTTP/1.1\r\n" {
-        return Err("use POST /rpc HTTP/1.1".into());
+    let inspector = line == "GET /inspector HTTP/1.1\r\n";
+    if !inspector && line != "POST /rpc HTTP/1.1\r\n" {
+        return Err("use POST /rpc or GET /inspector HTTP/1.1".into());
     }
     let mut authorized = false;
     let mut length = None;
+    let mut host_seen = false;
+    let mut origin_seen = false;
     loop {
         line.clear();
         if reader
@@ -227,8 +280,22 @@ fn read_request(stream: &mut impl Read, token: &str) -> Result<Command, String> 
         }
         let (name, value) = line.split_once(':').ok_or("invalid header")?;
         let value = value.trim();
-        if name.eq_ignore_ascii_case("origin") || name.eq_ignore_ascii_case("transfer-encoding") {
-            return Err("browser origins and transfer encoding are not allowed".into());
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            return Err("transfer encoding is not allowed".into());
+        }
+        if name.eq_ignore_ascii_case("host") {
+            if host_seen
+                || origin.is_some_and(|origin| origin.strip_prefix("http://") != Some(value))
+            {
+                return Err("invalid host; use the printed 127.0.0.1 address".into());
+            }
+            host_seen = true;
+        }
+        if name.eq_ignore_ascii_case("origin") {
+            if origin_seen || origin != Some(value) {
+                return Err("foreign browser origins are not allowed".into());
+            }
+            origin_seen = true;
         }
         if name.eq_ignore_ascii_case("authorization") {
             authorized = value == format!("Bearer {token}");
@@ -244,6 +311,12 @@ fn read_request(stream: &mut impl Read, token: &str) -> Result<Command, String> 
             );
         }
     }
+    if origin.is_some() && !host_seen {
+        return Err("host required".into());
+    }
+    if inspector {
+        return Ok(HttpRequest::Inspector);
+    }
     if !authorized {
         return Err("invalid bearer token".into());
     }
@@ -254,7 +327,9 @@ fn read_request(stream: &mut impl Read, token: &str) -> Result<Command, String> 
     reader
         .read_exact(&mut body)
         .map_err(|error| error.to_string())?;
-    serde_json::from_slice(&body).map_err(|error| error.to_string())
+    serde_json::from_slice(&body)
+        .map(HttpRequest::Rpc)
+        .map_err(|error| error.to_string())
 }
 
 fn execute(command: Command, cx: &mut gpui::App) -> Result<Value, String> {
@@ -276,6 +351,9 @@ fn execute(command: Command, cx: &mut gpui::App) -> Result<Value, String> {
         Command::Tree { window, .. }
         | Command::Subtree { window, .. }
         | Command::Screenshot { window }
+        | Command::Geometry { window }
+        | Command::Pick { window, .. }
+        | Command::Highlight { window, .. }
         | Command::Click { window, .. }
         | Command::Press { window, .. } => *window,
     };
@@ -283,6 +361,51 @@ fn execute(command: Command, cx: &mut gpui::App) -> Result<Value, String> {
         .into_iter()
         .find(|window| window.window_id().as_u64() == target)
         .ok_or("window not found")?;
+    if let Command::Geometry { .. } = command {
+        let bounds = crate::automation::window_bounds(handle.window_id());
+        return Ok(json!(bounds
+            .into_iter()
+            .map(|(id, rect)| (
+                id.to_string(),
+                json!({"x":rect.x,"y":rect.y,"width":rect.width,"height":rect.height})
+            ))
+            .collect::<serde_json::Map<_, _>>()));
+    }
+    if let Command::Pick { x, y, .. } = command {
+        if !x.is_finite() || !y.is_finite() {
+            return Err("coordinates must be finite".into());
+        }
+        let candidates = crate::automation::painted_candidates(handle.window_id(), x, y);
+        return handle
+            .read_with(cx, |view, _| {
+                let tree = view.tree.lock().unwrap();
+                let node = candidates.into_iter().find(|id| mounted_node(&tree, *id));
+                json!({"nodeId": node})
+            })
+            .map_err(|error| error.to_string());
+    }
+    if let Command::Highlight { node_id, .. } = command {
+        if let Some(id) = node_id {
+            let mounted = handle
+                .read_with(cx, |view, _| mounted_node(&view.tree.lock().unwrap(), id))
+                .map_err(|error| error.to_string())?;
+            if !mounted {
+                return Err("node not found in the mounted tree".into());
+            }
+        }
+        crate::automation::highlight(handle.window_id(), node_id);
+        handle
+            .update(cx, |_, window, _| window.refresh())
+            .map_err(|error| error.to_string())?;
+        cx.spawn(async move |cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(2050))
+                .await;
+            let _ = handle.update(cx, |_, window, _| window.refresh());
+        })
+        .detach();
+        return Ok(json!({"highlighted": node_id}));
+    }
     if let Command::Subtree {
         node_id,
         test_id,
@@ -318,16 +441,19 @@ fn execute(command: Command, cx: &mut gpui::App) -> Result<Value, String> {
     gpui::AnyWindowHandle::from(handle)
         .update(cx, |_, window, cx| {
             match command {
-                Command::Click { x, y, .. } => {
+                Command::Click { x, y, button, .. } => {
                     if !x.is_finite() || !y.is_finite() {
                         return Err("coordinates must be finite".into());
+                    }
+                    if button > 2 {
+                        return Err("button must be 0 (left), 1 (middle), or 2 (right)".into());
                     }
                     crate::automation::dispatch_click(
                         window,
                         cx,
                         x,
                         y,
-                        0,
+                        button,
                         gpui::Modifiers::default(),
                     );
                 }
@@ -339,6 +465,23 @@ fn execute(command: Command, cx: &mut gpui::App) -> Result<Value, String> {
             Ok(json!({"dispatched": true}))
         })
         .map_err(|error| error.to_string())?
+}
+
+fn mounted_node(tree: &crate::retained_tree::RetainedTree, id: u64) -> bool {
+    let Some(root) = tree.root_id else {
+        return false;
+    };
+    let mut current = Some(id);
+    while let Some(id) = current {
+        let Some(node) = tree.elements.get(&id) else {
+            return false;
+        };
+        if id == root {
+            return true;
+        }
+        current = node.parent;
+    }
+    false
 }
 
 fn subtree(
@@ -353,14 +496,10 @@ fn subtree(
     }
     let root = tree.root_id.ok_or("window has no mounted tree")?;
     let id = if let Some(id) = node_id {
-        let mut current = Some(id);
-        loop {
-            match current {
-                Some(parent) if parent == root => break id,
-                Some(parent) => current = tree.elements.get(&parent).and_then(|node| node.parent),
-                None => return Err("node not found in the mounted tree".into()),
-            }
+        if !mounted_node(tree, id) {
+            return Err("node not found in the mounted tree".into());
         }
+        id
     } else if let Some(test_id) = test_id {
         let mut pending = vec![root];
         let mut found = None;
@@ -555,14 +694,26 @@ mod tests {
             stream
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
-            stream
-                .write_all(request("", r#"{"method":"health"}"#).as_bytes())
-                .unwrap();
+            let message = request(&format!("Host: {address}\r\n"), r#"{"method":"health"}"#);
+            let (headers, body) = message.split_once("\r\n\r\n").unwrap();
+            write!(stream, "{headers}\r\n\r\n").unwrap();
+            std::thread::sleep(Duration::from_millis(30));
+            stream.write_all(body.as_bytes()).unwrap();
             let mut response = String::new();
             stream.read_to_string(&mut response).unwrap();
             response
         });
-        let request = futures::executor::block_on(server.requests.next()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let request = loop {
+            if let Ok(request) = server.requests.try_recv() {
+                break request;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server did not accept the split request"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
         assert!(matches!(request.command, Command::Health {}));
         request
             .response
@@ -602,6 +753,45 @@ mod tests {
                 .unwrap();
                 let id = window.window_id().as_u64();
                 ids.push(id);
+                crate::automation::enable_inspector();
+                gpui::AnyWindowHandle::from(window)
+                    .update(cx, |_, window, cx| {
+                        let arena = window.draw(cx);
+                        arena.clear(cx);
+                    })
+                    .unwrap();
+                let geometry = execute(Command::Geometry { window: id }, cx).unwrap();
+                assert!(geometry["1"]["width"].as_f64().unwrap() > 0.0);
+                let x = geometry["1"]["x"].as_f64().unwrap() + 1.0;
+                let y = geometry["1"]["y"].as_f64().unwrap() + 1.0;
+                assert_eq!(
+                    execute(Command::Pick { window: id, x, y }, cx).unwrap()["nodeId"],
+                    1
+                );
+                assert!(execute(
+                    Command::Highlight {
+                        window: id,
+                        node_id: Some(1)
+                    },
+                    cx
+                )
+                .is_ok());
+                assert!(execute(
+                    Command::Highlight {
+                        window: id,
+                        node_id: Some(999)
+                    },
+                    cx
+                )
+                .is_err());
+                assert!(execute(
+                    Command::Highlight {
+                        window: id,
+                        node_id: None
+                    },
+                    cx
+                )
+                .is_ok());
                 assert_eq!(
                     execute(
                         Command::Tree {
@@ -629,6 +819,12 @@ mod tests {
             let result = execute(Command::Windows {}, cx).unwrap();
             for id in ids {
                 assert!(result.as_array().unwrap().contains(&json!(id)));
+                assert!(
+                    execute(Command::Geometry { window: id }, cx).unwrap()["1"]["width"]
+                        .as_f64()
+                        .unwrap()
+                        > 0.0
+                );
             }
             assert!(execute(
                 Command::Tree {
@@ -643,6 +839,75 @@ mod tests {
 
     fn request(headers: &str, body: &str) -> String {
         format!("POST /rpc HTTP/1.1\r\nAuthorization: Bearer secret\r\nContent-Length: {}\r\n{headers}\r\n{body}", body.len())
+    }
+
+    #[test]
+    fn inspector_allows_only_its_exact_origin_and_host_without_exposing_token() {
+        let origin = "http://127.0.0.1:4318";
+        let headers = "Host: 127.0.0.1:4318\r\nOrigin: http://127.0.0.1:4318\r\n";
+        assert!(matches!(
+            read_http_request(
+                &mut request(headers, r#"{"method":"geometry","window":1}"#).as_bytes(),
+                "secret",
+                Some(origin)
+            )
+            .unwrap(),
+            HttpRequest::Rpc(Command::Geometry { window: 1 })
+        ));
+        let page = "GET /inspector HTTP/1.1\r\nHost: 127.0.0.1:4318\r\n\r\n";
+        assert!(matches!(
+            read_http_request(&mut page.as_bytes(), "secret", Some(origin)).unwrap(),
+            HttpRequest::Inspector
+        ));
+        for bad in [
+            "Host: evil.example\r\n",
+            "Host: 127.0.0.1:4318\r\nOrigin: http://evil.example\r\n",
+            "Host: 127.0.0.1:4318\r\nOrigin: null\r\n",
+            "Host: 127.0.0.1:4318\r\nHost: 127.0.0.1:4318\r\n",
+            "",
+        ] {
+            assert!(read_http_request(
+                &mut request(bad, r#"{"method":"windows"}"#).as_bytes(),
+                "secret",
+                Some(origin)
+            )
+            .is_err());
+        }
+        assert!(read_http_request(
+            &mut request(headers, r#"{"method":"windows"}"#).as_bytes(),
+            "wrong",
+            Some(origin)
+        )
+        .is_err());
+        assert!(read_request(
+            &mut request("", r#"{"method":"pick","window":1,"x":20,"y":30}"#).as_bytes(),
+            "secret"
+        )
+        .is_ok());
+        assert!(read_request(
+            &mut request("", r#"{"method":"highlight","window":1,"nodeId":null}"#).as_bytes(),
+            "secret"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn serves_inspector_html_without_app_data_or_credentials() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = Server::listen(listener, "private-test-token".into()).unwrap();
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        write!(stream, "GET /inspector HTTP/1.1\r\nHost: {address}\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("frame-ancestors 'none'"));
+        assert!(response.contains("GPUIX Inspector"));
+        assert!(!response.contains("private-test-token"));
+        drop(server);
     }
 
     #[test]

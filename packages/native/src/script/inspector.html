@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPUIX Inspector</title>
+<style>
+:root { color-scheme: dark; font: 13px system-ui, sans-serif; background: #15181e; color: #e5e7eb; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+header { display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #202630; border-bottom: 1px solid #384151; flex-wrap: wrap; }
+h1 { font-size: 16px; margin: 0 auto 0 0; }
+input, button, select { font: inherit; color: inherit; background: #2c3441; border: 1px solid #526077; border-radius: 5px; padding: 7px 10px; }
+button { cursor: pointer; }
+button:hover { background: #3b495e; }
+button:disabled, input:disabled { opacity: .55; cursor: default; }
+button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
+button[aria-pressed="true"] { border-color: #38bdf8; color: #7dd3fc; }
+input { width: 270px; }
+#status { padding: 10px 18px; color: #a9b8ce; min-height: 36px; }
+main { display: grid; grid-template-columns: minmax(230px, 1fr) minmax(300px, 1.5fr) minmax(250px, 1fr); height: calc(100vh - 115px); }
+section { min-width: 0; overflow: auto; padding: 14px; border-right: 1px solid #384151; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #a9b8ce; margin: 0 0 12px; }
+.hint { color: #a9b8ce; line-height: 1.6; }
+details { margin-left: 12px; }
+#tree > details { margin-left: 0; }
+.leaf > summary { list-style: none; padding-left: 12px; }
+.leaf > summary::-webkit-details-marker { display: none; }
+summary { white-space: nowrap; padding: 3px 0; }
+summary button { font-family: ui-monospace, monospace; padding: 3px 5px; border: 0; background: transparent; text-align: left; }
+summary button[aria-pressed="true"] { background: #164e63; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 ui-monospace, monospace; }
+.toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+#preview { position: relative; line-height: 0; width: fit-content; max-width: 100%; }
+#frame { display: block; max-width: 100%; height: auto; }
+#frame[hidden] { display: none; }
+#box { position: absolute; border: 2px solid #38bdf8; background: #38bdf822; pointer-events: none; }
+#preview.picking { cursor: crosshair; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; height: auto; } section { min-height: 180px; max-height: 65vh; border-bottom: 1px solid #384151; } }
+</style>
+<header>
+  <h1>GPUIX Inspector</h1>
+  <form id="connection"><label>Dev token <input id="token" type="password" autocomplete="off" required aria-label="GPUIX_DEV_TOKEN"></label> <button>Connect</button></form>
+  <label>Window <select id="windows" aria-label="Window"></select></label>
+  <button id="disconnect" type="button">Disconnect</button>
+</header>
+<div id="status" role="status">Enter GPUIX_DEV_TOKEN. The token stays in memory, not browser storage or the URL.</div>
+<main>
+  <section><h2>Host elements</h2><p class="hint">Retained nodes, not framework components. Select a row to highlight it in the app for two seconds.</p><div id="tree"></div></section>
+  <section><h2>Window preview</h2><div class="toolbar"><button id="capture">Refresh screenshot</button><button id="pick" aria-pressed="false">Pick from preview</button></div><p class="hint">Preview is a snapshot. Refresh after scrolling or changing the app. Picking inspects current painted geometry without clicking the app.</p><div id="preview"><img id="frame" alt="" hidden><div id="box" hidden></div></div></section>
+  <section><h2>Properties</h2><pre id="properties">Select an element.</pre></section>
+</main>
+<script>
+"use strict";
+const element = id => document.getElementById(id);
+let token = "", connected = false, generation = 0, session = 0, timer, windowId = null;
+let root = null, revision = null, selected = null, geometry = {}, frameGeometry = {}, frameScale = 1;
+let picking = false, capturing = false;
+const expanded = new Set();
+const nodes = new Map();
+function status(message) { if (element("status").textContent !== message) element("status").textContent = message; }
+async function rpc(method, args = {}) {
+  const response = await fetch("/rpc", {
+    method: "POST", headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ method, ...args }), signal: AbortSignal.timeout(7000),
+  });
+  const body = await response.json();
+  if (!response.ok || body.error) throw new Error(body.error || `HTTP ${response.status}`);
+  return body.result;
+}
+function target(method, args = {}) {
+  if (windowId === null) throw new Error("No application window is open.");
+  return rpc(method, { window: windowId, ...args });
+}
+function showProperties() {
+  const node = nodes.get(selected);
+  showBox();
+  if (!node) { element("properties").textContent = "Select an element."; return; }
+  const { children, ...props } = node;
+  element("properties").textContent = JSON.stringify({ ...props, paintedBounds: geometry[selected] || null }, null, 2);
+}
+function showBox() {
+  const bounds = frameGeometry[selected], image = element("frame"), box = element("box");
+  box.hidden = !bounds || !image.naturalWidth;
+  if (box.hidden) return;
+  const scale = image.clientWidth / image.naturalWidth * frameScale;
+  Object.assign(box.style, { left: `${bounds.x * scale}px`, top: `${bounds.y * scale}px`, width: `${bounds.width * scale}px`, height: `${bounds.height * scale}px` });
+}
+async function selectNode(id) {
+  const current = generation;
+  selected = id;
+  renderTree();
+  showProperties();
+  try { await target("highlight", { nodeId: id }); }
+  catch (error) { if (current === generation) status(error.message); }
+}
+function renderTree() {
+  const focused = document.activeElement?.dataset?.nodeId;
+  nodes.clear();
+  function build(node, ancestors) {
+    nodes.set(node.id, node);
+    const details = document.createElement("details");
+    details.open = expanded.has(node.id) || node.id === root.id;
+    if (!node.children?.length) details.className = "leaf";
+    const summary = document.createElement("summary"), button = document.createElement("button");
+    button.type = "button";
+    button.textContent = `<${node.type}> #${node.id}${node.testId ? ` [${node.testId}]` : ""}${node.text ? ` ${node.text.slice(0, 80)}` : ""}`;
+    button.dataset.nodeId = node.id;
+    button.setAttribute("aria-pressed", String(node.id === selected));
+    button.onclick = event => { event.preventDefault(); selectNode(node.id); };
+    summary.append(button); details.append(summary);
+    details.addEventListener("toggle", () => { if (!details.isConnected) return; if (details.open) expanded.add(node.id); else expanded.delete(node.id); });
+    for (const child of node.children || []) details.append(build(child, [...ancestors, node.id]));
+    return details;
+  }
+  element("tree").replaceChildren(...(root ? [build(root, [])] : []));
+  for (const id of expanded) if (!nodes.has(id)) expanded.delete(id);
+  if (selected !== null) {
+    const row = element("tree").querySelector(`[data-node-id="${selected}"]`);
+    for (let parent = row?.parentElement?.parentElement; parent && parent !== element("tree"); parent = parent.parentElement) {
+      if (parent.tagName === "DETAILS") parent.open = true;
+    }
+  }
+  if (focused) element("tree").querySelector(`[data-node-id="${focused}"]`)?.focus({ preventScroll: true });
+}
+function resetWindow(id) {
+  generation++;
+  windowId = id; root = null; revision = null; selected = null; geometry = {}; frameGeometry = {};
+  expanded.clear(); nodes.clear();
+  element("tree").replaceChildren(); element("frame").hidden = true; element("frame").removeAttribute("src"); element("box").hidden = true;
+  showProperties();
+}
+async function poll() {
+  if (!connected) return;
+  const activeSession = session;
+  let current = generation;
+  try {
+    const windows = await rpc("windows");
+    if (current !== generation) return;
+    if (!windows.includes(windowId)) { resetWindow(windows[0] ?? null); current = generation; }
+    const chooser = element("windows");
+    if (chooser.dataset.ids !== windows.join(",")) {
+      chooser.replaceChildren(...windows.map(id => { const option = document.createElement("option"); option.value = id; option.textContent = `Window ${id}`; return option; }));
+      chooser.dataset.ids = windows.join(",");
+    }
+    chooser.value = windowId ?? "";
+    if (windowId !== null) {
+      const result = await target("subtree", { details: true, ...(revision ? { ifRevision: revision } : {}) });
+      if (current !== generation) return;
+      if (!result.unchanged) { root = result.tree; revision = result.revision; renderTree(); if (!nodes.has(selected)) selected = null; }
+      const bounds = await target("geometry");
+      if (current !== generation) return;
+      geometry = bounds; showProperties();
+    }
+    status(windowId === null ? "Connected. Waiting for an application window." : "Connected · host tree refreshes every 750 ms · read-only inspector");
+  } catch (error) { if (current === generation) status(error.message); }
+  finally { if (connected && activeSession === session) timer = setTimeout(poll, 750); }
+}
+element("connection").onsubmit = event => {
+  event.preventDefault();
+  if (connected) return;
+  token = element("token").value; element("token").value = "";
+  element("token").disabled = true; element("connection").querySelector("button").disabled = true;
+  connected = true; generation++; session++; poll();
+};
+element("disconnect").onclick = () => {
+  connected = false; generation++; session++; clearTimeout(timer);
+  if (windowId !== null) target("highlight", { nodeId: null }).catch(() => {});
+  token = ""; resetWindow(null); status("Disconnected.");
+  element("token").disabled = false; element("connection").querySelector("button").disabled = false;
+};
+element("windows").onchange = () => { resetWindow(Number(element("windows").value)); };
+element("capture").onclick = async () => {
+  if (!connected || capturing) return;
+  capturing = true; const current = generation;
+  try {
+    const screenshot = await target("screenshot");
+    if (current !== generation) return;
+    const bounds = await target("geometry");
+    if (current !== generation) return;
+    frameGeometry = bounds; frameScale = screenshot.scaleFactor;
+    element("frame").hidden = false;
+    element("frame").src = `data:image/png;base64,${screenshot.data}`;
+    element("frame").alt = `Window ${windowId} snapshot`;
+  } catch (error) { if (current === generation) status(error.message); }
+  finally { capturing = false; }
+};
+element("pick").onclick = () => {
+  picking = !picking;
+  element("pick").setAttribute("aria-pressed", String(picking));
+  element("preview").classList.toggle("picking", picking);
+};
+element("frame").onclick = async event => {
+  if (!connected || !picking) return;
+  const current = generation, image = element("frame"), rect = image.getBoundingClientRect();
+  try {
+    const result = await target("pick", { x: (event.clientX - rect.left) * image.naturalWidth / rect.width / frameScale, y: (event.clientY - rect.top) * image.naturalHeight / rect.height / frameScale });
+    if (current !== generation) return;
+    if (result.nodeId !== null) { await selectNode(result.nodeId); }
+    else status("No painted host element at this point.");
+  } catch (error) { if (current === generation) status(error.message); }
+};
+element("frame").onload = showBox;
+window.addEventListener("resize", showBox);
+</script>
+</html>

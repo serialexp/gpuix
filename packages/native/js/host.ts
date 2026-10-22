@@ -299,6 +299,11 @@ export interface SyntaxTheme {
  * heading scale is a framework render and needs no native rebuild.
  */
 export interface GpuixMetrics {
+  inspectorHeight?: number
+  inspectorRowHeight?: number
+  inspectorTextSize?: number
+  inspectorPadding?: number
+  inspectorIndent?: number
   // Code blocks. Shared by <code> and the markdown fenced block.
   codeTextSize?: number
   codeLineHeight?: number

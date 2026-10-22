@@ -61,6 +61,9 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
         .run(move |cx| {
             crate::renderer::init_lua_focus_key_bindings(cx);
             crate::renderer::init_app(&app_name, cx);
+            if options.watch {
+                crate::automation::enable_inspector();
+            }
             if let Some(server) = dev_server {
                 server.attach(cx);
             }

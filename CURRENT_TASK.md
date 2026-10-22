@@ -1,5 +1,50 @@
 # Current task
 
+## 2026-10-22: Native in-app inspector (supersedes browser-first UX)
+
+- Bart clarified the intended UI: right-click Inspect element and a native
+  bottom dock inside the app. The browser page remains an optional external
+  companion, not the primary inspector.
+- Watch-mode Lua/LuaX and QuickJS apps enable the native inspector without an
+  HTTP server/token. Existing `just start` / `just start-solid` use watch mode.
+- Dock selection/expansion belongs to each GpuixView. GPUI's anchored/deferred
+  popup, uniform_list and scroll handle provide the menu and virtualized tree.
+  Native picking consumes the press/release rather than triggering the app.
+- Direct retained-node property export skips descendants. Inspector geometry
+  reads one window-scoped box; native selection pins the existing paint overlay.
+- Layout metrics are public theme overrides, not fixed native layout constants.
+- Release Rust suite: 527 passed, including native dock layout, view-lease-safe
+  context-menu dispatch and selection/ancestor tests. Release launcher and addon
+  rebuilt. React: 540 passed, 6 QuickJS-addon tests skipped; TypeScript built;
+  all 55 example tests passed.
+- Live Lua checks passed for right-click Inspect, native bottom layout, picking
+  without activating controls, keyboard close, unchanged app state and normal
+  input afterward. The optional external inspector smoke also still passes.
+- Prior external-inspector evidence follows below.
+
+## 2026-10-22: Read-only embedded inspector
+
+- `gpx --dev-server PORT` now prints a bundled `/inspector` URL. Enter the
+  existing dev token in the browser; it is not embedded in HTML or persisted.
+- The inspector reuses revision-polled detailed host trees, and adds separate
+  window-scoped `geometry`, `pick` and temporary `highlight` commands. Paint
+  order and GPUI content masks drive picking; native outlines are deferred
+  above popups without adding hitboxes or changing layout.
+- Accepted HTTP connections now use timed blocking reads. A split-packet test
+  covers the intermittent macOS `WouldBlock` errors exposed by browser polling.
+- Window discovery, expandable trees, declared props/styles/events, painted
+  bounds, manual screenshot previews and preview picking are implemented.
+  Framework component ownership, source mapping and live editing remain future
+  work. Standalone Bun/Node apps do not expose this embedded server.
+- Native server/bounds tests: 14 passed. Browser smoke and a live Lua counter
+  check passed, including native outline pixels, screenshot picking, app-input
+  updates, highlight expiry and foreign-origin rejection. The release addon and
+  launcher were rebuilt. React's final run had 538 passes, 6 QuickJS-addon skips
+  (standard addon features) and 2 subprocess timeouts under machine load; both
+  failures passed in a serial 87-test events/render rerun. React build passed;
+  all 55 example tests passed against the rebuilt addon. Logs/screenshots are under
+  `/tmp/gpuix-inspector-*`.
+
 ## 2026-10-21: Self-contained native packaging (supersedes source-build prototype)
 
 - Replaced the `gpx package` Bun/checkout wrapper with native Rust packaging.

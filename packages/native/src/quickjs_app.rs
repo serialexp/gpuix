@@ -84,6 +84,9 @@ pub fn run_js_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), St
                 .clone()
                 .unwrap_or_else(|| native_options.title_or_default());
             init_app(&app_name, cx);
+            if options.watch {
+                crate::automation::enable_inspector();
+            }
             if let Some(server) = dev_server {
                 server.attach(cx);
             }

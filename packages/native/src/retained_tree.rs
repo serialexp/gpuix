@@ -767,6 +767,10 @@ impl RetainedTree {
         element_to_json(id, self, &HashMap::new(), details)
     }
 
+    pub(crate) fn node_to_json(&self, id: u64) -> serde_json::Value {
+        element_to_json_inner(id, self, &HashMap::new(), true, false)
+    }
+
     /// The elements whose painted box holds the point, topmost first: the DOM's
     /// `elementsFromPoint`.
     ///
@@ -893,6 +897,16 @@ fn element_to_json(
     bounds: &std::collections::HashMap<u64, crate::automation::ElementBounds>,
     include_details: bool,
 ) -> serde_json::Value {
+    element_to_json_inner(id, tree, bounds, include_details, true)
+}
+
+fn element_to_json_inner(
+    id: u64,
+    tree: &RetainedTree,
+    bounds: &std::collections::HashMap<u64, crate::automation::ElementBounds>,
+    include_details: bool,
+    include_children: bool,
+) -> serde_json::Value {
     let Some(element) = tree.elements.get(&id) else {
         return serde_json::Value::Null;
     };
@@ -965,7 +979,7 @@ fn element_to_json(
         }
     }
 
-    if !element.children.is_empty() {
+    if include_children && !element.children.is_empty() {
         let children: Vec<serde_json::Value> = element
             .children
             .iter()

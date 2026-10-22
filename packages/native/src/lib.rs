@@ -16,6 +16,7 @@ mod color;
 mod custom_elements;
 mod diff;
 mod element_tree;
+mod inspector;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod lua_app;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]

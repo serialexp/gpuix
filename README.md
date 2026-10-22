@@ -3672,7 +3672,11 @@ Send JSON with `POST /rpc`. Responses contain either `{"result": ...}` or
 | `{"method":"tree","window":ID,"details":true}` | Host tree with styles, event names and custom props |
 | `{"method":"subtree","window":ID,"nodeId":NODE}` | Selected subtree as `{nodeId, revision, unchanged, tree}` |
 | `{"method":"screenshot","window":ID}` | PNG as `{mimeType, encoding: "base64", data, width, height, scaleFactor}` |
+| `{"method":"geometry","window":ID}` | Last painted host border boxes, keyed by node ID, in window-local logical pixels |
+| `{"method":"pick","window":ID,"x":40,"y":80}` | `{nodeId: NODE_OR_NULL}`; last-painted mounted host at that point |
+| `{"method":"highlight","window":ID,"nodeId":NODE}` | Draw a temporary native outline; `nodeId: null` clears it |
 | `{"method":"click","window":ID,"x":40,"y":80}` | Dispatch a left click in window-local logical pixels |
+| `{"method":"click","window":ID,"x":40,"y":80,"button":2}` | Right click; `button` is 0 = left (default), 1 = middle, 2 = right |
 | `{"method":"press","window":ID,"keys":"tab space"}` | Dispatch space-separated GPUI keystrokes, e.g. `cmd-a` |
 
 After the initial `tree` call, pass any returned node's `id` as `nodeId` to
@@ -3697,8 +3701,17 @@ Input uses GPUI's native dispatch, not direct script callbacks. Input responses
 acknowledge dispatch, **not** completed script work or paint; poll `tree` for the
 expected state. Window IDs remain valid only while that native window is open.
 The exported tree is the **retained host-element tree**, not React/Lua component
-functions or Solid owners. Trees intentionally omit painted bounds: the existing
-bounds registry is not window-scoped. Screenshots target that native window and
+functions or Solid owners. Tree responses omit painted bounds because geometry
+changes independently of retained-tree revisions. `geometry` reads a separate,
+window-scoped paint registry; unpainted, hidden and virtualized-offscreen nodes
+have no entry. Boxes describe the most recent paint, not a layout/paint barrier.
+`pick` considers painted boxes clipped by GPUI's current content mask, in reverse
+paint order, and ignores detached nodes. It is an inspection aid, not GPUI's
+interactive hit-test: non-interactive text and images can be picked, and native
+widget internals remain one host node. Highlights use the visible clipped box,
+do not change layout or intercept input, and expire after two seconds even if
+the inspector disconnects. Closing a view releases its bounds.
+Screenshots target that native window and
 capture its GPUI content from a freshly drawn frame, without desktop capture,
 window activation, or server-side file writes. Decode `result.data` as base64 to
 save a PNG on the client; dimensions are physical pixels, with `scaleFactor`
@@ -3712,10 +3725,80 @@ the full JS automation protocol below.
 Source edits use the normal watcher/hot-refresh behavior. `--check` cannot be
 combined with `--dev-server`. Closing the app ends the server.
 
-Browser-origin requests and transfer-encoded bodies are rejected. Requests are
+Foreign browser-origin requests and transfer-encoded bodies are rejected. The
+exact server origin is accepted for the bundled inspector; all RPCs still need
+the bearer token. Host headers must match the printed `127.0.0.1:PORT` address
+(use that address, not `localhost`), preventing DNS-rebinding access. Requests are
 handled serially, with an 8 KiB JSON limit, a 16 KiB total read limit, socket
-timeouts, and a five-second app-response timeout. Keep the token private; this
+timeouts, and a five-second app-response timeout. Accepted connections use
+blocking reads with timeouts, so headers and JSON may arrive in separate packets.
+Keep the token private; this
 is an opt-in local development interface, not a public application service.
+
+#### In-app inspector
+
+Run an embedded Lua/LuaX or QuickJS app with `--watch` (`just start` and
+`just start-solid` already do this). **Right-click an application element →
+Inspect element** opens a native inspector dock at the bottom of that window,
+selects the clicked host node, and expands its ancestors. No browser, HTTP
+server, token or JavaScript launcher is required. `--dev-server` also enables it.
+Normal launches without either development option do not install these controls.
+Development-mode right clicks over application elements are reserved for this
+inspection menu. Click outside the menu or press Escape to dismiss it.
+
+The dock reads the same Rust-owned retained tree directly. It shows a
+virtualized expandable host tree and the selected node's declared styles,
+custom props, event names and last-painted border box. The application lays out
+above the dock; opening or closing it does not remount components or change
+their state. Each native window has its own inspector selection and expansion
+state, even when the application shares a store across windows.
+
+**Pick element** lets you click the running application to inspect another node
+without activating it; click **Cancel picking** or press Escape to cancel.
+The selected painted element has a non-interactive outline while the dock is
+open. **Close inspector** restores the application area. Toggle the dock with
+`cmd-alt-i` on macOS or `ctrl-shift-i` on Windows/Linux. Selecting a node reveals
+and scrolls to its tree row. Removed selections are cleared; host IDs and
+expansion state are not guaranteed to survive hot reload.
+
+Inspector layout follows `theme.metrics`, using these optional overrides:
+
+| Metric | Default | Meaning |
+| --- | --- | --- |
+| `inspectorHeight` | 280 | Dock height in logical pixels, capped at half the window height |
+| `inspectorRowHeight` | 24 | Tree row height |
+| `inspectorTextSize` | 12 | Inspector text size |
+| `inspectorPadding` | 8 | Panel/header/menu padding |
+| `inspectorIndent` | 14 | Tree indentation per depth |
+
+This is a read-only **host-element** inspector, not a framework component/hook
+debugger. Native widget internals remain one host node. It does not edit
+styles/state, resolve source locations, or profile rendering. Inspector chrome
+is outside the application's retained tree and cannot inspect itself.
+Standalone Bun/Node applications do not yet have a development-inspector option.
+
+#### Optional external inspector
+
+Open the printed `http://127.0.0.1:PORT/inspector` URL in a browser and enter
+`GPUIX_DEV_TOKEN`. The inspector is bundled into `gpx`: no separate frontend
+build or server is needed. The token stays in page memory, not local storage or
+the URL; Disconnect clears it. The unauthenticated HTML page contains no app
+data or credentials.
+
+Select a native window to browse its expandable host-element tree and inspect
+declared styles, custom props, event names and last-painted border-box geometry.
+The tree uses revision-checked polling every 750 ms; geometry is fetched
+independently so scrolling need not invalidate the tree. Selecting an element
+temporarily outlines it in the running app. **Refresh screenshot** captures a
+preview; enable **Pick from preview** and click it to select an element without
+sending an application click. The preview is manual, not a live video stream;
+refresh after app changes, because picking uses the current native paint state.
+Window discovery follows opened and closed windows. Removed selections are
+cleared; IDs and expansion state are not guaranteed to survive hot reload.
+
+The external companion has the same read-only host-tree limitations. It works
+with embedded Lua/LuaX and QuickJS apps using `--dev-server`, not standalone
+Bun/Node apps. The native dock above is the primary in-app debugging UI.
 
 ### JavaScript automation client
 

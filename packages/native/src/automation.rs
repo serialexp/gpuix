@@ -7,7 +7,7 @@
 //! TestGpuixRenderer and GpuixRenderer both use this so locators, screenshots,
 //! and clock control do not fork between headless tests and a live window.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -38,8 +38,32 @@ impl ElementBounds {
     }
 }
 
+#[derive(Default)]
+struct WindowBounds {
+    bounds: HashMap<u64, ElementBounds>,
+    visible: HashMap<u64, ElementBounds>,
+    order: Vec<u64>,
+    highlight: Option<(u64, Option<Instant>)>,
+}
+
 thread_local! {
-    static BOUNDS: RefCell<HashMap<u64, ElementBounds>> = RefCell::new(HashMap::new());
+    static BOUNDS: RefCell<HashMap<gpui::WindowId, WindowBounds>> = RefCell::new(HashMap::new());
+    static LAST_WINDOW: RefCell<Option<gpui::WindowId>> = const { RefCell::new(None) };
+    static INSPECTOR_ENABLED: Cell<bool> = const { Cell::new(false) };
+}
+
+pub fn enable_inspector() {
+    INSPECTOR_ENABLED.with(|enabled| enabled.set(true));
+}
+
+pub fn inspector_enabled() -> bool {
+    INSPECTOR_ENABLED.with(Cell::get)
+}
+
+pub fn remove_window_bounds(id: gpui::WindowId) {
+    BOUNDS.with(|cell| {
+        cell.borrow_mut().remove(&id);
+    });
 }
 
 /// Zero-size canvas. Keep it ahead of the app subtree under the root.
@@ -51,8 +75,16 @@ thread_local! {
 pub fn bounds_frame_reset() -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        move |_, _, _, _| {
-            BOUNDS.with(|cell| cell.borrow_mut().clear());
+        move |_, _, window, _| {
+            let id = window.window_handle().window_id();
+            LAST_WINDOW.with(|cell| *cell.borrow_mut() = Some(id));
+            BOUNDS.with(|cell| {
+                let mut windows = cell.borrow_mut();
+                let entry = windows.entry(id).or_default();
+                entry.bounds.clear();
+                entry.visible.clear();
+                entry.order.clear();
+            });
         },
     )
     .absolute()
@@ -67,7 +99,7 @@ pub fn bounds_frame_reset() -> impl IntoElement {
 /// move the layout box: the wrapper would become the flex item and the image
 /// would lose intrinsic sizing and corner clipping.
 pub fn track_own_bounds<E: gpui::InteractiveElement>(el: E, id: u64) -> E {
-    el.on_painted(move |bounds, _, _| record_bounds(id, bounds))
+    el.on_painted(move |bounds, window, _| record_bounds(id, bounds, window))
 }
 
 /// Record a host element's painted box, and its selection-start region, for
@@ -97,7 +129,7 @@ where
     E: gpui::InteractiveElement,
 {
     el.on_painted(move |bounds, window, cx| {
-        record_bounds(id, bounds);
+        record_bounds(id, bounds, window);
         if let Some(selectable) = selection_start {
             crate::text::record_start_region(
                 window.window_handle().window_id(),
@@ -115,26 +147,132 @@ where
 /// is how `onLayout` and `onScrollChange` see what the frame produced.
 pub type PaintReporter = Rc<dyn Fn(Bounds<Pixels>, &mut App)>;
 
-pub fn record_bounds(id: u64, bounds: Bounds<Pixels>) {
+pub fn record_bounds(id: u64, bounds: Bounds<Pixels>, window: &Window) {
     BOUNDS.with(|cell| {
-        cell.borrow_mut()
-            .insert(id, ElementBounds::from_gpui(bounds));
+        let mut windows = cell.borrow_mut();
+        let entry = windows
+            .entry(window.window_handle().window_id())
+            .or_default();
+        entry.bounds.insert(id, ElementBounds::from_gpui(bounds));
+        if inspector_enabled() {
+            entry.visible.insert(
+                id,
+                ElementBounds::from_gpui(bounds.intersect(&window.content_mask().bounds)),
+            );
+            entry.order.push(id);
+        }
     });
 }
 
 pub fn get_bounds(id: u64) -> Option<ElementBounds> {
-    BOUNDS.with(|cell| cell.borrow().get(&id).copied())
+    LAST_WINDOW.with(|cell| {
+        cell.borrow().and_then(|window| {
+            BOUNDS.with(|bounds| {
+                bounds
+                    .borrow()
+                    .get(&window)
+                    .and_then(|entry| entry.bounds.get(&id).copied())
+            })
+        })
+    })
 }
 
 pub fn all_bounds() -> HashMap<u64, ElementBounds> {
-    BOUNDS.with(|cell| cell.borrow().clone())
+    LAST_WINDOW.with(|cell| cell.borrow().map(window_bounds).unwrap_or_default())
+}
+
+pub fn window_bounds(window: gpui::WindowId) -> HashMap<u64, ElementBounds> {
+    BOUNDS.with(|cell| {
+        cell.borrow()
+            .get(&window)
+            .map(|entry| entry.bounds.clone())
+            .unwrap_or_default()
+    })
+}
+
+pub fn painted_candidates(window: gpui::WindowId, x: f64, y: f64) -> Vec<u64> {
+    BOUNDS.with(|cell| {
+        let windows = cell.borrow();
+        let Some(entry) = windows.get(&window) else {
+            return Vec::new();
+        };
+        entry
+            .order
+            .iter()
+            .rev()
+            .copied()
+            .filter(|id| {
+                entry.visible.get(id).is_some_and(|bounds| {
+                    bounds.width > 0.0
+                        && bounds.height > 0.0
+                        && x >= bounds.x
+                        && y >= bounds.y
+                        && x < bounds.x + bounds.width
+                        && y < bounds.y + bounds.height
+                })
+            })
+            .collect()
+    })
+}
+
+pub fn window_element_bounds(window: gpui::WindowId, id: u64) -> Option<ElementBounds> {
+    BOUNDS.with(|cell| {
+        cell.borrow()
+            .get(&window)
+            .and_then(|entry| entry.bounds.get(&id).copied())
+    })
+}
+
+pub fn highlight(window: gpui::WindowId, node: Option<u64>) {
+    BOUNDS.with(|cell| {
+        cell.borrow_mut().entry(window).or_default().highlight =
+            node.map(|id| (id, Some(Instant::now())));
+    });
+}
+
+pub fn inspector_overlay() -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        |_, _, window, _| {
+            let bounds = BOUNDS.with(|cell| {
+                let windows = cell.borrow();
+                let entry = windows.get(&window.window_handle().window_id())?;
+                let (id, time) = entry.highlight?;
+                if time.is_some_and(|time| time.elapsed() > Duration::from_secs(2)) {
+                    return None;
+                }
+                entry.visible.get(&id).copied()
+            });
+            if let Some(bounds) = bounds {
+                if bounds.width > 0.0 && bounds.height > 0.0 {
+                    window.paint_quad(gpui::outline(
+                        Bounds::new(
+                            point(px(bounds.x as f32), px(bounds.y as f32)),
+                            gpui::size(px(bounds.width as f32), px(bounds.height as f32)),
+                        ),
+                        gpui::rgb(0x38bdf8),
+                        gpui::BorderStyle::default(),
+                    ));
+                }
+            }
+        },
+    )
+    .absolute()
+    .w(px(0.0))
+    .h(px(0.0))
+}
+
+pub fn pin_highlight(window: gpui::WindowId, node: Option<u64>) {
+    BOUNDS.with(|cell| {
+        cell.borrow_mut().entry(window).or_default().highlight = node.map(|id| (id, None));
+    });
 }
 
 pub fn bounds_tracker(id: u64, selection_start: Option<bool>) -> impl IntoElement {
     canvas(
         |bounds, _, _| bounds,
         move |bounds, _, window, _| {
-            record_bounds(id, bounds);
+            record_bounds(id, bounds, window);
             if let Some(selectable) = selection_start {
                 crate::text::record_start_region(
                     window.window_handle().window_id(),
@@ -437,6 +575,52 @@ pub fn dispatch_scroll_wheel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounds_and_picking_are_isolated_by_window_and_clipped() {
+        let first = gpui::WindowId::from(0x100000001);
+        let second = gpui::WindowId::from(0x100000002);
+        let full = ElementBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        let clipped = ElementBounds {
+            width: 20.0,
+            ..full
+        };
+        BOUNDS.with(|cell| {
+            let mut windows = cell.borrow_mut();
+            windows.insert(
+                first,
+                WindowBounds {
+                    bounds: HashMap::from([(7, full)]),
+                    visible: HashMap::from([(7, clipped)]),
+                    order: vec![7],
+                    ..Default::default()
+                },
+            );
+            windows.insert(
+                second,
+                WindowBounds {
+                    bounds: HashMap::from([(7, clipped)]),
+                    ..Default::default()
+                },
+            );
+        });
+        assert_eq!(window_bounds(first)[&7].width, 100.0);
+        assert_eq!(window_bounds(second)[&7].width, 20.0);
+        assert_eq!(painted_candidates(first, 10.0, 10.0), vec![7]);
+        assert!(painted_candidates(first, 30.0, 10.0).is_empty());
+        assert!(painted_candidates(first, 20.0, 10.0).is_empty());
+        assert!(painted_candidates(second, 10.0, 10.0).is_empty());
+        highlight(first, Some(7));
+        remove_window_bounds(first);
+        assert!(window_bounds(first).is_empty());
+        assert_eq!(window_bounds(second)[&7].width, 20.0);
+        remove_window_bounds(second);
+    }
 
     #[test]
     fn frozen_clock_holds_and_fast_forwards() {

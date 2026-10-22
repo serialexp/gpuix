@@ -204,6 +204,11 @@ impl SyntaxPalette {
 /// height up front.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Metrics {
+    pub inspector_height: f32,
+    pub inspector_row_height: f32,
+    pub inspector_text_size: f32,
+    pub inspector_padding: f32,
+    pub inspector_indent: f32,
     // Code blocks. Shared by `<code>` and the markdown fenced block.
     pub code_text_size: f32,
     pub code_line_height: f32,
@@ -272,6 +277,11 @@ impl Metrics {
             }
         };
         set(&mut self.code_text_size, o.code_text_size);
+        set(&mut self.inspector_height, o.inspector_height);
+        set(&mut self.inspector_row_height, o.inspector_row_height);
+        set(&mut self.inspector_text_size, o.inspector_text_size);
+        set(&mut self.inspector_padding, o.inspector_padding);
+        set(&mut self.inspector_indent, o.inspector_indent);
         set(&mut self.code_line_height, o.code_line_height);
         set(&mut self.md_code_padding_x, o.md_code_padding_x);
         set(&mut self.md_code_padding_y, o.md_code_padding_y);
@@ -353,6 +363,11 @@ impl Metrics {
         let mut feed = |value: f32| hasher.write_u32(value.to_bits());
         for value in [
             self.code_text_size,
+            self.inspector_height,
+            self.inspector_row_height,
+            self.inspector_text_size,
+            self.inspector_padding,
+            self.inspector_indent,
             self.code_line_height,
             self.md_code_padding_x,
             self.md_code_padding_y,
@@ -394,6 +409,11 @@ impl Metrics {
 impl Default for Metrics {
     fn default() -> Self {
         Self {
+            inspector_height: 280.0,
+            inspector_row_height: 24.0,
+            inspector_text_size: 12.0,
+            inspector_padding: 8.0,
+            inspector_indent: 14.0,
             code_text_size: 12.5,
             code_line_height: 18.0,
             code_gutter_digit_width: 7.0,
@@ -668,6 +688,11 @@ pub struct ThemeOverride {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MetricsOverride {
+    pub inspector_height: Option<f64>,
+    pub inspector_row_height: Option<f64>,
+    pub inspector_text_size: Option<f64>,
+    pub inspector_padding: Option<f64>,
+    pub inspector_indent: Option<f64>,
     pub code_text_size: Option<f64>,
     pub code_line_height: Option<f64>,
     pub code_gutter_digit_width: Option<f64>,
