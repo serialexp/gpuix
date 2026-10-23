@@ -4357,6 +4357,66 @@ and a press on the background moves focus back to the window. React and Solid
 controls such as `Button` and `Combobox` handle activation and focus in
 JavaScript instead, so their windows get none of this.
 
+### Lua HTTP requests
+
+Standalone `gpx` Lua/LuaX applications expose asynchronous HTTP through
+`gpuix.fetch(url, callback)` or `gpuix.fetch(url, options, callback)`. This works
+with both Lua rendering models and uses the app's existing Rust HTTP/TLS client,
+not a Lua networking dependency. Requests run off the UI thread; callbacks run
+on the Lua application event loop and can update hooks, signals or shared stores.
+Affected windows are reconciled after the callback returns.
+
+```lua
+local request = gpuix.fetch("https://example.com/api/items", {
+    method = "GET",
+    headers = { Accept = "application/json" },
+    timeoutMs = 10000,
+}, function(response, error)
+    if error ~= nil then
+        print("Request failed", error)
+        return
+    end
+    if not response.ok then
+        print("HTTP error", response.status)
+        return
+    end
+    local data = response.json(response)
+    print(data)
+end)
+```
+
+Options are `method` (default `GET`), `headers` (a string-to-string table),
+`body` (a binary-safe Lua string), and `timeoutMs` (default 30000, range
+1–300000, covering headers and body). Unknown options, invalid headers and
+invalid requests raise immediately, without retaining the callback. URLs must
+be absolute HTTP(S) URLs without embedded credentials. GET/HEAD bodies are not
+allowed. Redirects are returned as ordinary 3xx responses, not followed.
+
+Completion calls `callback(response, nil)` for every HTTP status, including
+4xx/5xx. The response has `status`, `ok` (status 200–299), `headers`
+(lowercase names, repeated values comma-joined), and `body` (a binary-safe Lua
+string). `response.json(response)` decodes that body using JSON and raises on
+invalid JSON; the receiver is explicit, with no Lua colon syntax. JSON nulls
+use mlua's null sentinel rather than removing table entries.
+Transport, timeout and response-size failures call `callback(nil, error)` with
+an error string. Callback errors are logged by the app event loop.
+
+Fetch returns an opaque request handle. `gpuix.cancel_fetch(request)` cancels
+pending work, releases its callback and suppresses completion, returning true
+only when a request was still pending. Repeated cancellation is safe. Ignoring
+or dropping the handle does not cancel a request. Requests are application-wide,
+not automatically owned by a window or component: cancel in a hook effect
+cleanup or `solid.on_cleanup` when the result should not outlive its owner.
+Start requests from effects or event handlers, not on every render.
+
+There are at most 64 pending requests per Lua runtime, with an 8 MiB limit on
+each request and response body. Responses are buffered; streaming, uploads from
+files, automatic cookies, retries and browser CORS enforcement are not provided.
+`--check` and the synchronous Lua test renderer do not execute queued network
+requests. Applications remain trusted rather than sandboxed; network permission
+enforcement is not implemented. This is the shared transport foundation for a
+future inspector Network tab; request recording is not exposed yet.
+
 ### Mahina (formerly Lune) embedding experiment
 
 [`serialexp/lune`](https://github.com/serialexp/lune) now calls its language

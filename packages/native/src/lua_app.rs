@@ -74,6 +74,25 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
             }
 
             let (event_sender, mut event_receiver) = futures::channel::mpsc::unbounded();
+            let fetch_sender = event_sender.clone();
+            let fetch_executor = cx.background_executor().clone();
+            let fetch_client = cx.http_client();
+            runtime
+                .lock()
+                .unwrap()
+                .set_fetch_dispatcher(move |request| {
+                    let sender = fetch_sender.clone();
+                    let client = fetch_client.clone();
+                    fetch_executor
+                        .spawn(async move {
+                            if let Some(completion) =
+                                crate::lua_fetch::execute(request, client).await
+                            {
+                                let _ = sender.unbounded_send(LuaEvent::Fetch(completion));
+                            }
+                        })
+                        .detach();
+                });
             let tray_sender = event_sender.clone();
             crate::script::tray_api::init(
                 move |action| {
@@ -149,6 +168,7 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
                                 runtime.dispatch_window_event(&source_id, *payload)
                             }
                             LuaEvent::Tray(action) => runtime.dispatch_tray_action(action),
+                            LuaEvent::Fetch(completion) => runtime.dispatch_fetch(completion),
                         };
                         match result {
                             Ok(dirty_roots) => {
@@ -380,6 +400,7 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
 enum LuaEvent {
     Window(String, Box<EventPayload>),
     Tray(u64),
+    Fetch(crate::lua_fetch::FetchCompletion),
 }
 type LuaEventSender = futures::channel::mpsc::UnboundedSender<LuaEvent>;
 

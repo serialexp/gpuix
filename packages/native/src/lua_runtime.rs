@@ -1362,6 +1362,7 @@ impl LuaNode {
 pub(crate) struct LuaRuntime {
     lua: Lua,
     trays: Arc<Mutex<crate::lua_tray::LuaTrays>>,
+    fetch: Arc<Mutex<crate::lua_fetch::LuaFetch>>,
     roots: HashMap<LuaRootId, LuaRoot>,
     hooks: Arc<Mutex<HookStore>>,
     stores: Arc<Mutex<StoreRegistry>>,
@@ -1516,6 +1517,13 @@ impl LuaRuntime {
                 .to_path_buf(),
         )
         .map_err(lua_error)?;
+        let fetch = Arc::new(Mutex::new(crate::lua_fetch::LuaFetch::default()));
+        crate::lua_fetch::install(
+            &lua,
+            &lua.globals().get::<Table>("gpuix").map_err(lua_error)?,
+            &fetch,
+        )
+        .map_err(lua_error)?;
         install_builtin_modules(&lua).map_err(lua_error)?;
         if let Some(root) = path.and_then(Path::parent) {
             install_module_searcher(&lua, root, loaded_modules.clone()).map_err(lua_error)?;
@@ -1534,6 +1542,7 @@ impl LuaRuntime {
         Ok(Self {
             lua,
             trays,
+            fetch,
             roots,
             hooks,
             stores,
@@ -1649,6 +1658,29 @@ impl LuaRuntime {
             self.drop_unmounted_updates();
             self.begin_arena_generation();
             handler.call::<()>(()).map_err(lua_error)?;
+        }
+        Ok(self.dirty_window_ids())
+    }
+
+    pub(crate) fn set_fetch_dispatcher(
+        &self,
+        dispatch: impl Fn(crate::lua_fetch::FetchRequest) + Send + 'static,
+    ) {
+        self.fetch.lock().unwrap().set_dispatcher(dispatch);
+    }
+
+    pub(crate) fn dispatch_fetch(
+        &mut self,
+        completion: crate::lua_fetch::FetchCompletion,
+    ) -> Result<Vec<String>, String> {
+        let callback = self.fetch
+            .lock()
+            .unwrap()
+            .take_callback(crate::lua_fetch::completion_id(&completion));
+        if let Some(callback) = callback {
+            self.drop_unmounted_updates();
+            self.begin_arena_generation();
+            crate::lua_fetch::deliver(&self.lua, callback, completion).map_err(lua_error)?;
         }
         Ok(self.dirty_window_ids())
     }
@@ -5200,6 +5232,39 @@ mod tests {
             runtime.lua.globals().get::<i64>("dock_cleanups").unwrap(),
             2
         );
+    }
+
+    #[test]
+    fn fetch_callbacks_update_component_state_on_the_application_event_loop() {
+        let mut tree = RetainedTree::new();
+        let mut runtime = LuaRuntime::load_luax(r#"
+            return function()
+                local message, set_message = gpuix.use_state("Waiting")
+                return <div>
+                    <div testId="load" onClick={function()
+                        gpuix.fetch("http://localhost/data", function(response, error)
+                            assert(error == nil)
+                            set_message(response.json(response).message)
+                        end)
+                    end}><text>Load</text></div>
+                    <text>{message}</text>
+                </div>
+            end
+        "#, &mut tree).unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let queued = requests.clone();
+        runtime.set_fetch_dispatcher(move |request| queued.lock().unwrap().push(request));
+        dispatch_by_test_id(&mut runtime, &mut tree, "load").unwrap();
+        assert!(has_text(&tree, "Waiting"));
+        let request = requests.lock().unwrap().pop().unwrap();
+        let client = gpui::http_client::FakeHttpClient::create(|_| async {
+            Ok(gpui::http_client::Response::builder()
+                .body(gpui::http_client::AsyncBody::from(r#"{"message":"Loaded"}"#)).unwrap())
+        });
+        let completion = futures::executor::block_on(crate::lua_fetch::execute(request, client)).unwrap();
+        assert!(runtime.dispatch_fetch(completion).unwrap().iter().any(|id| id == DEFAULT_ROOT_ID));
+        runtime.mount_window(DEFAULT_ROOT_ID, &mut tree).unwrap();
+        assert!(has_text(&tree, "Loaded"));
     }
 
     #[test]

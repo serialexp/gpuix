@@ -20,6 +20,8 @@ mod inspector;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod lua_app;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+mod lua_fetch;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod lua_runtime;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod lua_tray;

@@ -1,5 +1,9 @@
 # TODO
 
+- Add a bounded, credential-redacted network recorder and inspector Network tab
+  around the shared HTTP client, including Lua's built-in fetch. Extend tracing
+  to other runtime clients explicitly rather than implying all traffic is captured.
+
 - Extend desktop distribution checks beyond isolated `--check` startup: launch
   packaged apps on each OS, verify painted content and interaction, and capture
   screenshots. Linux needs an X11/Wayland session plus a Vulkan-capable GPU or
