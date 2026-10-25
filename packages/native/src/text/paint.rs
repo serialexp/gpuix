@@ -624,7 +624,7 @@ fn register_down_listener(window: &mut Window, selection: &SharedSelection) {
 
     let selection = selection.clone();
     let window_id = window.window_handle().window_id();
-    window.on_mouse_event(move |e: &MouseDownEvent, phase, window, _cx| {
+    window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
         if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
             return;
         }
@@ -653,12 +653,12 @@ fn register_down_listener(window: &mut Window, selection: &SharedSelection) {
         if let Some((key, text, ix)) = hit {
             match e.click_count {
                 2 => {
-                    window.blur();
+                    window.blur(cx);
                     let range = selection::word_range(&text, ix);
                     sel.begin_with_span(&key, &text, range);
                 }
                 n if n >= 3 => {
-                    window.blur();
+                    window.blur(cx);
                     sel.begin_with_span(&key, &text, 0..text.len());
                 }
                 // A tap must not select or blur. iOS uses that gesture to
@@ -701,7 +701,7 @@ fn register_drag_listeners(
             return;
         }
         if move_selection.lock().promote_pending() {
-            window.blur();
+            window.blur(cx);
         }
         if update_drag_at(window_id, &move_selection, event.position) {
             window.refresh();

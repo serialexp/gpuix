@@ -180,15 +180,27 @@ describeNative("render()", () => {
   })
 
   it("resolves null when a path prompt is cancelled", async () => {
-    await expect(
-      renderer.promptForPaths({
-        files: true,
-        directories: false,
-        multiple: true,
-        prompt: "Import",
-      })
-    ).resolves.toBeNull()
+    const result = renderer.promptForPaths({
+      files: true,
+      directories: false,
+      multiple: true,
+      prompt: "Import",
+    })
+    if (process.platform === "linux" || process.platform === "freebsd") {
+      renderer.respondToPathPrompt(null)
+    }
+    await expect(result).resolves.toBeNull()
   })
+
+  it.skipIf(process.platform !== "linux" && process.platform !== "freebsd")(
+    "returns selected paths from a simulated headless prompt", async () => {
+      const paths = ["/tmp/first.txt", "/tmp/second.txt"]
+      const result = renderer.promptForPaths({ files: true, multiple: true })
+      renderer.respondToPathPrompt(paths)
+      await expect(result).resolves.toEqual(paths)
+      expect(() => renderer.respondToPathPrompt(null)).toThrow("No path prompt is pending")
+    }
+  )
 
   it("rejects a path prompt that selects nothing", async () => {
     await expect(

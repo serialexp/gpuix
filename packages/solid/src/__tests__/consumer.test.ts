@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from "bun:test"
 import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import solidPlugin from "../bun-plugin.js"
 
 const fixture = join(import.meta.dir, "../../fixtures/consumer")
@@ -30,6 +30,22 @@ function nativeBindingPath(): string {
 }
 
 describe("Solid package consumer", () => {
+  it("builds from source without an existing dist preload", () => {
+    const clean = mkdtempSync(join(workspace, "packages/solid/.clean-build-"))
+    try {
+      for (const filename of ["src", "package.json", "tsconfig.json", "bunfig.toml"]) {
+        cpSync(join(workspace, "packages/solid", filename), join(clean, filename), { recursive: true })
+      }
+      const compiler = Bun.resolveSync("typescript/bin/tsc", workspace)
+      const result = run([process.execPath, "run", "build"], clean, {
+        PATH: `${dirname(compiler)}${process.platform === "win32" ? ";" : ":"}${process.env.PATH}`,
+      })
+      expect(result.exitCode, result.stderr.toString()).toBe(0)
+    } finally {
+      rmSync(clean, { recursive: true, force: true })
+    }
+  })
+
   it("runs imported TSX through the bunfig preload", () => {
     const result = Bun.spawnSync({
       cmd: ["bun", "main.tsx"],

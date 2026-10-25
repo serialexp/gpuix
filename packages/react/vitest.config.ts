@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url"
-import { defineConfig } from "vitest/config"
+import { defineConfig, mergeConfig } from "vitest/config"
+import shared from "../../vitest.shared"
 
-export default defineConfig({
+export default mergeConfig(shared, defineConfig({
   resolve: {
     // Source, as `gpx` embeds it (`packages/native/embedded/build.ts`), so
     // an app the parity tests run in both shares the tests' reconciler.
@@ -18,4 +19,4 @@ export default defineConfig({
     },
     fileParallelism: process.platform !== "linux",
   },
-})
+}))

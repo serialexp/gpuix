@@ -16,7 +16,7 @@ use gpui::{
     actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardEntry,
     ClipboardItem, Context, CursorStyle, DispatchPhase, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, GlobalElementId, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollEvent,
     SharedString, Style, Task, TextRun, TextStyle, UTF16Selection, UnderlineStyle, Window,
     WrappedLine,
 };
@@ -225,37 +225,27 @@ fn text_editor_bindings(
         ]);
     }
 
-    let word_prefix = if word_navigation_uses_alt {
-        "alt"
-    } else {
-        "ctrl"
-    };
     bindings.extend([
-        KeyBinding::new(&format!("{word_prefix}-backspace"), DeleteWordLeft, context),
-        KeyBinding::new(&format!("{word_prefix}-delete"), DeleteWordRight, context),
-        KeyBinding::new(&format!("{word_prefix}-left"), WordLeft, context),
-        KeyBinding::new(&format!("{word_prefix}-right"), WordRight, context),
-        KeyBinding::new(
-            &format!("shift-{word_prefix}-left"),
-            SelectWordLeft,
-            context,
-        ),
-        KeyBinding::new(
-            &format!("shift-{word_prefix}-right"),
-            SelectWordRight,
-            context,
-        ),
+        KeyBinding::new(if word_navigation_uses_alt { "alt-backspace" } else { "ctrl-backspace" }, DeleteWordLeft, context),
+        KeyBinding::new(if word_navigation_uses_alt { "alt-delete" } else { "ctrl-delete" }, DeleteWordRight, context),
+        KeyBinding::new(if word_navigation_uses_alt { "alt-left" } else { "ctrl-left" }, WordLeft, context),
+        KeyBinding::new(if word_navigation_uses_alt { "alt-right" } else { "ctrl-right" }, WordRight, context),
+        KeyBinding::new(if word_navigation_uses_alt { "shift-alt-left" } else { "shift-ctrl-left" }, SelectWordLeft, context),
+        KeyBinding::new(if word_navigation_uses_alt { "shift-alt-right" } else { "shift-ctrl-right" }, SelectWordRight, context),
     ]);
-    for prefix in ["cmd", "ctrl"] {
+    for (select, copy, cut, undo, redo, paste) in [
+        ("cmd-a", "cmd-c", "cmd-x", "cmd-z", "shift-cmd-z", "cmd-v"),
+        ("ctrl-a", "ctrl-c", "ctrl-x", "ctrl-z", "shift-ctrl-z", "ctrl-v"),
+    ] {
         bindings.extend([
-            KeyBinding::new(&format!("{prefix}-a"), SelectAll, context),
-            KeyBinding::new(&format!("{prefix}-c"), Copy, context),
-            KeyBinding::new(&format!("{prefix}-x"), Cut, context),
-            KeyBinding::new(&format!("{prefix}-z"), Undo, context),
-            KeyBinding::new(&format!("shift-{prefix}-z"), Redo, context),
+            KeyBinding::new(select, SelectAll, context),
+            KeyBinding::new(copy, Copy, context),
+            KeyBinding::new(cut, Cut, context),
+            KeyBinding::new(undo, Undo, context),
+            KeyBinding::new(redo, Redo, context),
         ]);
         if bind_paste_shortcut {
-            bindings.push(KeyBinding::new(&format!("{prefix}-v"), Paste, context));
+            bindings.push(KeyBinding::new(paste, Paste, context));
         }
     }
     bindings
@@ -1324,7 +1314,7 @@ impl TextEditorState {
 
     fn on_scroll_wheel(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1704,7 +1694,7 @@ impl gpui::Render for TextEditorState {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_scroll(cx.listener(Self::on_scroll_wheel))
             .when(self.emits_key_down, move |editor| {
                 editor.on_key_down(move |event, _window, _cx| {
                     emit_key_event(
@@ -1938,7 +1928,7 @@ mod tests {
     use super::*;
 
     fn has_binding(bindings: &[KeyBinding], keystroke: &str, action: &dyn gpui::Action) -> bool {
-        let keystroke = gpui::Keystroke::parse(keystroke).unwrap();
+        let keystroke = gpui::Keystroke::parse_with_os(keystroke, gpui::OperatingSystem::Linux).unwrap();
         bindings.iter().any(|binding| {
             binding.match_keystrokes(std::slice::from_ref(&keystroke)) == Some(false)
                 && binding.action().partial_eq(action)

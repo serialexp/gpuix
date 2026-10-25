@@ -34,6 +34,7 @@ export type { MacCpuThrottle } from "./cpu-throttle.js"
 
 interface NativeTestRendererApi extends NativeRenderer {
   promptForPaths(options?: PathPromptOptions): Promise<string[] | null>
+  respondToPathPrompt(paths?: string[] | null): void
   flush(): void
   drainEvents(): EventPayload[]
   simulateKeystrokes(keystrokes: string): void
@@ -187,6 +188,8 @@ export class TestRenderer implements NativeRenderer {
   readonly focusNext: () => void
   readonly focusPrevious: () => void
   readonly promptForPaths: NonNullable<NativeRenderer["promptForPaths"]>
+  /** Answers the pending headless Linux/FreeBSD file picker; null cancels it. */
+  readonly respondToPathPrompt: (paths?: string[] | null) => void
   readonly setWindowSelectionChange: NonNullable<
     NativeRenderer["setWindowSelectionChange"]
   >
@@ -204,6 +207,7 @@ export class TestRenderer implements NativeRenderer {
     this.focusNext = this.native.focusNext.bind(this.native)
     this.focusPrevious = this.native.focusPrevious.bind(this.native)
     this.promptForPaths = this.native.promptForPaths.bind(this.native)
+    this.respondToPathPrompt = this.native.respondToPathPrompt.bind(this.native)
     this.setWindowKeyEvents = this.native.setWindowKeyEvents.bind(this.native)
     this.setWindowSelectionChange = this.native.setWindowSelectionChange.bind(
       this.native

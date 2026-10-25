@@ -276,7 +276,7 @@ fn run(
             Ok(Json::Null)
         }
         WindowCall::Blur => {
-            window.blur();
+            window.blur(cx);
             Ok(Json::Null)
         }
         WindowCall::SetWindowSelectionChange { enabled, event_id } => {

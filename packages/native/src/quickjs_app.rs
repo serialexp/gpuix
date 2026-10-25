@@ -273,9 +273,10 @@ impl RunningApp {
         mut events: UnboundedReceiver<EventPayload>,
         mut prompts: UnboundedReceiver<(u64, PathPromptResult)>,
         mut reloads: Option<UnboundedReceiver<Vec<PathBuf>>>,
-        mut tray_events: UnboundedReceiver<u64>,
+        tray_events: UnboundedReceiver<u64>,
         cx: &mut gpui::AsyncApp,
     ) {
+        let mut tray_events = Some(tray_events);
         self.replay(pending);
         self.apply_tray_commands(cx);
         loop {
@@ -303,8 +304,14 @@ impl RunningApp {
                         None => futures::future::pending().await,
                     }
                 };
+                let tray_action = async {
+                    match &mut tray_events {
+                        Some(events) => events.next().await,
+                        None => futures::future::pending().await,
+                    }
+                };
                 futures::select_biased! {
-                    action = tray_events.next() => Wake::Tray(action),
+                    action = tray_action.fuse() => Wake::Tray(action),
                     event = events.next() => Wake::Event(event.map(Box::new)),
                     prompt = prompts.next() => Wake::PathPrompt(prompt),
                     _ = timer.fuse() => Wake::Timer,
@@ -317,7 +324,8 @@ impl RunningApp {
                         eprintln!("gpx: {error}");
                     }
                 }
-                Wake::Tray(None) => return,
+                // An unavailable or stopped tray backend does not end the app.
+                Wake::Tray(None) => tray_events = None,
                 // The application's event channel was disposed.
                 Wake::Event(None) => return,
                 Wake::Event(Some(event)) => self.dispatch(&event),
@@ -877,6 +885,21 @@ mod tests {
         launched.click("button");
         assert_eq!(launched.text("count"), "Count 1");
         assert_eq!(launched.text("later"), "timer ran");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn an_unavailable_tray_backend_keeps_events_and_reloads_running() {
+        let app = App::new("main.tsx", &counter("Count"));
+        let mut launched = Launched::new(&app);
+        // The unsupported tray backend drops its callback during launch.
+        launched.cx.run_until_parked();
+        launched.click("button");
+        assert_eq!(launched.text("count"), "Count 1");
+        app.write(&counter("Reloaded"));
+        launched.reload();
+        launched.click("button");
+        assert_eq!(launched.text("count"), "Reloaded 1");
     }
 
     #[test]
