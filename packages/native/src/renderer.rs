@@ -940,7 +940,7 @@ async fn run_ui_commands(
                 }
                 result
             }
-            UiCommand::Blur => window.update(cx, |_view, window, _cx| window.blur()),
+            UiCommand::Blur => window.update(cx, |_view, window, cx| window.blur(cx)),
         };
         if let Err(error) = result {
             if cx.update(|cx| cx.windows().is_empty()) {
@@ -2011,7 +2011,7 @@ impl GpuixRenderer {
     #[napi]
     pub fn blur(&self) -> Result<()> {
         #[cfg(target_os = "macos")]
-        return update_window(move |_view, window, _cx| window.blur());
+        return update_window(move |_view, window, cx| window.blur(cx));
 
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
         return self.send_ui_command(UiCommand::Blur);
@@ -3097,7 +3097,7 @@ impl WebGpuixRenderer {
     }
 
     pub fn blur(&self) -> Result<(), wasm_bindgen::JsValue> {
-        update_web_window(|_view, window, _cx| window.blur())
+        update_web_window(|_view, window, cx| window.blur(cx))
     }
 
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = setWindowSelectionChange)]
@@ -5827,7 +5827,7 @@ pub(crate) fn build_host_container(
 
             // ── Scroll wheel ─────────────────────────────────────
             "scroll" => {
-                el = el.on_scroll_wheel(move |scroll_event, _window, _cx| {
+                el = el.on_scroll(move |scroll_event, _window, _cx| {
                     emit_event_full(&callback, id, "scroll", |p| {
                         let (x, y) = point_to_xy(scroll_event.position);
                         p.x = Some(x);

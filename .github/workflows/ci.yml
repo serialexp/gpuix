@@ -32,11 +32,11 @@ jobs:
             bunTarget: bun-darwin-arm64
             build: bun run build
           # ── Linux (Vulkan/wgpu) ────────────────────────────────────
-          # build:release disables test-support until wgpu image readback lands.
+          # Headless WGPU provides GPU-backed tests without a desktop session.
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bunTarget: bun-linux-x64
-            build: bun run build:release
+            build: bun run build
           # ── Windows (Direct3D) ─────────────────────────────────────
           # Test support includes TestGpuixRenderer and render_to_image.
           - host: windows-latest
@@ -184,9 +184,17 @@ jobs:
           if-no-files-found: error
 
   test:
-    name: test
+    name: test - ${{ matrix.settings.host }}
     needs: build
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-latest
+            target: aarch64-apple-darwin
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.settings.host }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -198,10 +206,23 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Download macOS arm64 artifact
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Linux renderer dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y \
+            gcc g++ clang libfontconfig-dev libwayland-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev \
+            libvulkan1 mesa-vulkan-drivers vulkan-validationlayers
+
+      - name: Download native artifact
         uses: actions/download-artifact@v4
         with:
-          name: bindings-aarch64-apple-darwin
+          name: bindings-${{ matrix.settings.target }}
           path: packages/native/
 
       - name: Build native shared TypeScript

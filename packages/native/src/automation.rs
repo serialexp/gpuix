@@ -418,7 +418,7 @@ pub fn dispatch_keystrokes(
     keystrokes: &str,
 ) -> Result<(), String> {
     for keystroke in keystrokes.split(' ') {
-        window.dispatch_keystroke(parse_keystroke(keystroke)?, cx);
+        window.dispatch_keystroke(parse_keystroke(keystroke, cx.platform_info().os)?, cx);
     }
     Ok(())
 }
@@ -431,7 +431,7 @@ pub fn dispatch_key_down(
 ) -> Result<(), String> {
     window.dispatch_event(
         KeyDownEvent {
-            keystroke: parse_keystroke(keystroke)?,
+            keystroke: parse_keystroke(keystroke, cx.platform_info().os)?,
             is_held,
             prefer_character_input: false,
         }
@@ -444,7 +444,7 @@ pub fn dispatch_key_down(
 pub fn dispatch_key_up(window: &mut Window, cx: &mut App, keystroke: &str) -> Result<(), String> {
     window.dispatch_event(
         KeyUpEvent {
-            keystroke: parse_keystroke(keystroke)?,
+            keystroke: parse_keystroke(keystroke, cx.platform_info().os)?,
         }
         .to_platform_input(),
         cx,
@@ -452,8 +452,8 @@ pub fn dispatch_key_up(window: &mut Window, cx: &mut App, keystroke: &str) -> Re
     Ok(())
 }
 
-fn parse_keystroke(keystroke: &str) -> Result<Keystroke, String> {
-    Keystroke::parse(keystroke).map_err(|error| format!("Invalid keystroke '{keystroke}': {error}"))
+fn parse_keystroke(keystroke: &str, os: gpui::OperatingSystem) -> Result<Keystroke, String> {
+    Keystroke::parse_with_os(keystroke, os).map_err(|error| format!("Invalid keystroke '{keystroke}': {error}"))
 }
 
 /// Every automation mouse dispatcher takes modifiers, so a test can drive
@@ -561,11 +561,12 @@ pub fn dispatch_scroll_wheel(
     modifiers: Modifiers,
 ) {
     window.dispatch_event(
-        gpui::ScrollWheelEvent {
+        gpui::ScrollEvent {
             position: point(px(x as f32), px(y as f32)),
             delta: gpui::ScrollDelta::Pixels(point(px(delta_x as f32), px(delta_y as f32))),
             modifiers,
             touch_phase: gpui::TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
         }
         .to_platform_input(),
         cx,

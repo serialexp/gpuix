@@ -308,6 +308,7 @@ export declare class TestGpuixRenderer {
   focusNext(): void
   focusPrevious(): void
   promptForPaths(options?: PathPromptOptions | undefined | null): Promise<Array<string> | null>
+  respondToPathPrompt(paths?: Array<string> | undefined | null): void
   getFocusedElementId(): number | null
   focusNextWithin(elementId: number): void
   focusPreviousWithin(elementId: number): void

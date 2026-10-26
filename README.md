@@ -784,6 +784,40 @@ cd ../../examples
 bun --hot counter.tsx
 ```
 
+### Linux source builds and tests
+
+Install Bun, Node.js (including npm), the pinned Rust toolchain, and the
+GPUI system dependencies. On Debian/Ubuntu:
+
+```bash
+sudo apt-get install gcc g++ clang libfontconfig-dev libwayland-dev \
+  libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev \
+  libvulkan1 mesa-vulkan-drivers vulkan-validationlayers
+bun install --frozen-lockfile
+bun run build
+```
+
+The default native build includes the headless WGPU test renderer. React,
+Solid, Lua, and screenshot tests need no X11/Wayland session, but do need a
+Vulkan driver (Mesa software rendering also works). Run `bun run test` in
+`packages/react`, `packages/solid`, `packages/native`, `examples`, and
+`example-app`. Native package tests additionally require the generated browser
+assets: install `wasm-bindgen-cli` version `0.2.127`, the nightly Rust toolchain
+with `rust-src` and `wasm32-unknown-unknown`, then run `bun run build:web` in
+`packages/native`.
+
+To include embedded JavaScript parity tests, run `bun run build:quickjs` in
+`packages/native` before rerunning the React and Solid suites. Embedded apps
+continue processing events and hot reloads on Linux without a tray backend;
+native tray APIs remain macOS-only. A live desktop app still requires an
+X11/Wayland session, unlike the headless component tests.
+
+Linux/FreeBSD headless tests control file pickers explicitly. Call
+`const pending = renderer.promptForPaths(options)`, then
+`renderer.respondToPathPrompt(["/path/to/file"])` and await `pending`. Pass
+`null` to simulate cancellation. Answering when no prompt is pending throws;
+this simulation API is unavailable with the macOS/Windows visual test host.
+
 ### Windows ARM64 source builds
 
 **Windows builds cover x64 and ARM64.** CI builds ARM64 on GitHub's

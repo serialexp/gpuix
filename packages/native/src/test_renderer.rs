@@ -460,7 +460,12 @@ impl TestGpuixRenderer {
     #[napi]
     pub fn simulate_keystrokes(&self, keystrokes: String) -> Result<()> {
         with_test_state(|cx, window, _view| {
-            cx.simulate_keystrokes(window, &keystrokes);
+            cx.update_window(window, |_, window, app| {
+                crate::automation::dispatch_keystrokes(window, app, &keystrokes)
+            })
+            .map_err(|error| Error::from_reason(error.to_string()))?
+            .map_err(Error::from_reason)?;
+            cx.run_until_parked();
             Ok(())
         })
     }
@@ -473,7 +478,7 @@ impl TestGpuixRenderer {
     #[napi]
     pub fn simulate_key_down(&self, keystroke: String, is_held: Option<bool>) -> Result<()> {
         with_test_state(|cx, window, _view| {
-            let parsed = gpui::Keystroke::parse(&keystroke).map_err(|e| {
+            let parsed = gpui::Keystroke::parse_with_os(&keystroke, cx.update(|cx| cx.platform_info().os)).map_err(|e| {
                 Error::from_reason(format!("Invalid keystroke '{}': {}", keystroke, e))
             })?;
 
@@ -496,7 +501,7 @@ impl TestGpuixRenderer {
     #[napi]
     pub fn simulate_key_up(&self, keystroke: String) -> Result<()> {
         with_test_state(|cx, window, _view| {
-            let parsed = gpui::Keystroke::parse(&keystroke).map_err(|e| {
+            let parsed = gpui::Keystroke::parse_with_os(&keystroke, cx.update(|cx| cx.platform_info().os)).map_err(|e| {
                 Error::from_reason(format!("Invalid keystroke '{}': {}", keystroke, e))
             })?;
 
@@ -606,6 +611,28 @@ impl TestGpuixRenderer {
             with_test_state(|cx, _window, _view| Ok(cx.update(|cx| cx.prompt_for_paths(options))))
         });
         AsyncTask::new(PromptForPathsTask::new(receiver))
+    }
+
+    #[napi]
+    pub fn respond_to_path_prompt(&self, paths: Option<Vec<String>>) -> Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            with_test_state(|cx, _window, _view| {
+                if !cx.did_prompt_for_paths() {
+                    return Err(Error::from_reason("No path prompt is pending"));
+                }
+                cx.simulate_path_prompt_response(move |_options| {
+                    paths.map(|paths| paths.into_iter().map(std::path::PathBuf::from).collect())
+                });
+                cx.run_until_parked();
+                Ok(())
+            })
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        {
+            let _ = paths;
+            Err(Error::from_reason("Path prompt simulation requires the headless test renderer"))
+        }
     }
 
     #[napi]
@@ -763,7 +790,7 @@ impl TestGpuixRenderer {
         with_test_state(|cx, window, _view| {
             cx.simulate_event(
                 window,
-                gpui::ScrollWheelEvent {
+                gpui::ScrollEvent {
                     position: gpui::point(gpui::px(x as f32), gpui::px(y as f32)),
                     delta: gpui::ScrollDelta::Pixels(gpui::point(
                         gpui::px(delta_x as f32),
@@ -771,6 +798,7 @@ impl TestGpuixRenderer {
                     )),
                     modifiers,
                     touch_phase: gpui::TouchPhase::Moved,
+                    source: gpui::ScrollSource::Pointer,
                 },
             );
             Ok(())
