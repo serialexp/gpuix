@@ -5002,7 +5002,8 @@ impl gpui::Render for GpuixView {
         }
         // Build the element tree. custom_registry, focus_handles, and scroll_handles
         // are different fields of self, so Rust allows borrowing all simultaneously.
-        let theme = Theme::dark();
+        let theme = Theme::from_prop(tree.root_id.and_then(|id| tree.elements.get(&id))
+            .and_then(|node| node.custom_props().get("theme")));
         let now = self.clock.now();
         let (motion_active, motion_settled) =
             sync_motion_states(&tree, &mut self.motion_states, now);
@@ -5129,7 +5130,7 @@ impl gpui::Render for GpuixView {
                 })
                 .when(crate::automation::inspector_enabled(), |root| {
                     root.child(
-                        gpui::deferred(crate::automation::inspector_overlay()).priority(usize::MAX),
+                        gpui::deferred(crate::automation::inspector_overlay(theme.accent)).priority(usize::MAX),
                     )
                 })
                 .into_any_element()
@@ -7699,7 +7700,7 @@ pub(crate) fn open_main_window(
     Ok(window)
 }
 
-fn to_gpui_window_options(
+pub(crate) fn to_gpui_window_options(
     options: &WindowOptions,
     bounds: gpui::Bounds<gpui::Pixels>,
 ) -> gpui::WindowOptions {

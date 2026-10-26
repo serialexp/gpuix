@@ -1,26 +1,7 @@
 local util = require("gpuix._util")
 
-local root_style = {
-    display = "flex",
-    flexDirection = "row",
-    alignItems = "center",
-    gap = 8,
-    focus = util.focus_ring,
-}
-
-local indicator_style = {
-    width = 20,
-    height = 20,
-    display = "flex",
-    alignItems = "center",
-    justifyContent = "center",
-    borderRadius = 5,
-    borderWidth = 1,
-    borderColor = "#71717a",
-    background = "#18181b",
-}
-
 return function(props)
+    local palette = props.theme or util.palette
     local internal_checked, set_internal_checked = gpuix.use_state(props.defaultChecked == true)
     local controlled = props.checked ~= nil
     local checked = internal_checked
@@ -41,12 +22,12 @@ return function(props)
         testId={props.testId}
         tabIndex={state.disabled and -1 or (props.tabIndex or 0)}
         onClick={toggle}
-        style={util.resolve_style(props.style, state, root_style)}
+        style={util.resolve_style(props.style, state, util.row_style(palette, state))}
     >
         <div
             testId={util.test_id(props.testId, "-indicator")}
             onClick={toggle}
-            style={util.resolve_style(props.indicatorStyle, state, indicator_style)}
+            style={util.resolve_style(props.indicatorStyle, state, util.indicator_style(palette, state, false))}
         >
             {checked and <text style={{ pointerEvents = "none" }}>✓</text> or nil}
         </div>

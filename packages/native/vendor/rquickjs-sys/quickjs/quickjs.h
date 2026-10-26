@@ -513,7 +513,7 @@ JS_EXTERN void JS_SetRuntimeInfo(JSRuntime *rt, const char *info);
    from, for code compiled from another source. It runs while a trace is
    built, possibly with the stack nearly full, so it must not call into the
    runtime. It leaves positions it doesn't know unchanged. */
-typedef void JSSourcePositionFunc(void *opaque, const char *filename,
+typedef const char *JSSourcePositionFunc(void *opaque, const char *filename,
                                   int *line_num, int *col_num);
 JS_EXTERN void JS_SetSourcePositionFunc(JSRuntime *rt,
                                         JSSourcePositionFunc *func,

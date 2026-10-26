@@ -6,6 +6,8 @@ local For, Show = solid.For, solid.Show
 local read = shared.read
 
 return function(props)
+    local palette = props.theme or util.palette
+    local defaults = util.control_styles(palette)
     local options = solid.create_memo(function()
         local result = {}
         local seen = {}
@@ -94,7 +96,7 @@ return function(props)
         elseif event.key == "down" or (ctrl and event.key == "n") then set_open(true); move(1)
         elseif event.key == "up" or (ctrl and event.key == "p") then set_open(true); move(-1) end
     end
-    input = <input testId={props.testId} value={query() or ""} placeholder={read(props, "placeholder", "")}
+    input = <input theme={palette} testId={props.testId} value={query() or ""} placeholder={read(props, "placeholder", "")}
         tabIndex={state().disabled and -1 or read(props, "tabIndex", 0)}
         readOnly={state().disabled or read(props, "readOnly", false)}
         onClick={function() if not state().disabled then set_open(true) end end}
@@ -106,9 +108,7 @@ return function(props)
         end}
         onKeyDown={key}
         onSubmit={function() choose(highlighted()) end}
-        style={shared.style({ width = 220, height = 36, padding = 9, borderRadius = 7,
-            borderWidth = 1, borderColor = "#52525b", background = "#18181b", color = "#fafafa",
-            focus = util.focus_ring }, props.inputStyle, state())} />
+        style={shared.style(defaults.trigger, props.inputStyle, state())} />
     return <div style={shared.style({ display = "flex", position = "relative", alignItems = "start" }, props.style, state())}>
         {input}
         <Show when={function() return open() and not state().disabled end}
@@ -119,8 +119,7 @@ return function(props)
                     deferred priority={read(props, "priority", 1)}>
                     <div testId={util.test_id(props.testId, "-content")}
                         onMouseDownOutside={function() set_open(false) end}
-                        style={shared.style({ width = 220, padding = 5, borderRadius = 8,
-                            borderWidth = 1, borderColor = "#52525b", background = "#27272a" }, props.contentStyle, state())}>
+                        style={shared.style(defaults.menu, props.contentStyle, state())}>
                         <For each={filtered} key={function(option) return option.value end}
                             render={function(item)
                                 local function item_state()
@@ -135,8 +134,7 @@ return function(props)
                                 return <div testId={util.test_id(props.testId, "-option-" .. item().value)}
                                     onMouseEnter={function() if not util.is_disabled(item()) then set_active(item().value) end end}
                                     onClick={function() choose(item()) end}
-                                    style={shared.style({ padding = 9, borderRadius = 6,
-                                        background = item_state().highlighted and "#3f3f46" or "#27272a" }, props.itemStyle, item_state())}>
+                                    style={shared.style(util.menu_item_style(palette, item_state()), props.itemStyle, item_state())}>
                                     {body}
                                 </div>
                             end} />

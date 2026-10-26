@@ -299,6 +299,43 @@ export interface SyntaxTheme {
  * heading scale is a framework render and needs no native rebuild.
  */
 export interface GpuixMetrics {
+  testToolbarHeight?: number
+  testSectionHeight?: number
+  testRowHeight?: number
+  testStepHeight?: number
+  testFooterHeight?: number
+  testTestsWidth?: number
+  testStepsWidth?: number
+  testArgumentWidth?: number
+  testWindowWidth?: number
+  testWindowHeight?: number
+  testPadding?: number
+  testDurationWidth?: number
+  testDurationBarWidth?: number
+  testStatusDotSize?: number
+  testFilePadding?: number
+  testCaseIndent?: number
+  testStepPadding?: number
+  testStepNumberWidth?: number
+  inspectorNetworkColumns?: [number, number, number, number, number]
+  inspectorNetworkToolbarHeight?: number
+  inspectorNetworkFilterWidth?: number
+  inspectorNetworkDetailLabelWidth?: number
+  inspectorNetworkTextSize?: number
+  inspectorNetworkListFraction?: number
+  inspectorNetworkDetailRowHeight?: number
+  inspectorIconSize?: number
+  scrollbarWidth?: number
+  scrollbarMinThumb?: number
+  inputHeight?: number
+  inputRadius?: number
+  menuRadius?: number
+  menuItemHeight?: number
+  controlGap?: number
+  controlPadding?: number
+  controlIndicatorSize?: number
+  controlDotSize?: number
+  controlRingWidth?: number
   inspectorHeight?: number
   inspectorRowHeight?: number
   inspectorTextSize?: number
@@ -350,6 +387,24 @@ export interface GpuixMetrics {
  * layers on top of the built-in dark theme (or light, via `appearance`).
  */
 export interface GpuixTheme {
+  surface?: string
+  raised?: string
+  field?: string
+  borderStrong?: string
+  onAccent?: string
+  selection?: string
+  focusRing?: string
+  rowSelected?: string
+  rowHover?: string
+  rowPressed?: string
+  danger?: string
+  onDanger?: string
+  dangerWash?: string
+  backdrop?: string
+  shadow?: string
+  scrollbarThumb?: string
+  scrollbarThumbHover?: string
+  scrollbarThumbActive?: string
   appearance?: "dark" | "light"
   bg?: string
   border?: string

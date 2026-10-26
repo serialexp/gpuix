@@ -276,6 +276,95 @@ fn word_navigation_uses_alt() -> bool {
 
 pub struct InputFactory;
 
+pub(crate) struct ChromeInput {
+    label: String,
+    editor: TextEditorElement,
+    value: std::sync::Arc<std::sync::Mutex<String>>,
+    observation: Option<gpui::Subscription>,
+}
+
+impl Default for ChromeInput {
+    fn default() -> Self {
+        let mut editor = TextEditorElement::new(false);
+        editor.chrome = true;
+        editor.placeholder = "Filter".into();
+        Self {
+            label: "Filter network requests".into(),
+            editor,
+            value: Default::default(),
+            observation: None,
+        }
+    }
+}
+
+impl ChromeInput {
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        if let Some(state) = &self.editor.state {
+            let handle = state.read(cx).focus_handle.clone();
+            handle.focus(window, cx);
+        }
+    }
+    pub fn new(label: &str) -> Self {
+        let mut input = Self::default();
+        input.label = label.into();
+        input.editor.placeholder = label.into();
+        input
+    }
+    pub fn value(&self) -> String {
+        self.value.lock().unwrap().clone()
+    }
+
+    pub fn render<V: 'static>(
+        &mut self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<V>,
+    ) -> gpui::AnyElement {
+        self.editor.value = self.value();
+        self.editor.theme = theme.clone();
+        let value = self.value.clone();
+        let callback: Option<EventCallback> = Some(std::sync::Arc::new(move |event| {
+            if let Some(text) = event.value {
+                *value.lock().unwrap() = text.chars().take(256).collect();
+            }
+        }));
+        let props = std::collections::HashMap::from([(
+            "aria-label".to_string(),
+            serde_json::json!(self.label),
+        )]);
+        let focus = self
+            .editor
+            .state
+            .as_ref()
+            .map(|state| state.read(cx).focus_handle.clone());
+        let events = std::collections::HashSet::from(["change".to_string()]);
+        let result = self.editor.render_input(
+            CustomRenderContext {
+                id: 0,
+                events: &events,
+                event_callback: &callback,
+                focus_handle: focus.as_ref(),
+                keyboard_focus: None,
+                ancestor_focus_handle: None,
+                style: None,
+                children: Vec::new(),
+                selection: Default::default(),
+                selectable: false,
+                selection_wash: theme.selection,
+                highlight_set: None,
+                props: &props,
+            },
+            window,
+            cx,
+        );
+        if self.observation.is_none() {
+            self.observation =
+                Some(cx.observe(self.editor.state.as_ref().unwrap(), |_, _, cx| cx.notify()));
+        }
+        result
+    }
+}
+
 impl CustomElementFactory for InputFactory {
     fn element_type(&self) -> &str {
         "input"
@@ -299,6 +388,7 @@ impl CustomElementFactory for TextareaFactory {
 }
 
 struct TextEditorElement {
+    chrome: bool,
     multiline: bool,
     value: String,
     placeholder: String,
@@ -313,6 +403,7 @@ struct TextEditorElement {
 impl TextEditorElement {
     fn new(multiline: bool) -> Self {
         Self {
+            chrome: false,
             multiline,
             value: String::new(),
             placeholder: String::new(),
@@ -326,12 +417,12 @@ impl TextEditorElement {
     }
 }
 
-impl CustomElement for TextEditorElement {
-    fn render(
+impl TextEditorElement {
+    fn render_input<V: 'static>(
         &mut self,
         ctx: CustomRenderContext,
         _window: &mut Window,
-        cx: &mut Context<crate::renderer::GpuixView>,
+        cx: &mut Context<V>,
     ) -> gpui::AnyElement {
         let focus_handle = ctx
             .focus_handle
@@ -353,6 +444,7 @@ impl CustomElement for TextEditorElement {
                 let min_rows = self.min_rows;
                 let max_rows = self.max_rows;
                 let caret_color = self.theme.caret;
+                let selection_color = self.theme.selection;
                 let callback = callback.clone();
                 let id = ctx.id;
                 let cursor = value.len();
@@ -390,6 +482,7 @@ impl CustomElement for TextEditorElement {
                     content_width: 0.0,
                     display_is_placeholder: false,
                     caret_color,
+                    selection_color,
                     blink_anchor: cx.background_executor().now(),
                     blink_task: None,
                     pending_values: VecDeque::new(),
@@ -418,13 +511,21 @@ impl CustomElement for TextEditorElement {
                 state.caret_color = self.theme.caret;
                 cx.notify();
             }
+            if state.selection_color != self.theme.selection {
+                state.selection_color = self.theme.selection;
+                cx.notify();
+            }
             if prop_changed {
                 state.sync_prop_value(self.value.clone(), cx);
             }
         });
         self.last_prop_value = Some(self.value.clone());
 
-        let element_id = gpui::SharedString::from(format!("__gpuix_editor_{}", ctx.id));
+        let element_id = if self.chrome {
+            "__gpuix_network_filter".into()
+        } else {
+            gpui::SharedString::from(format!("__gpuix_editor_{}", ctx.id))
+        };
         let mut editor = div()
             .id(element_id)
             .flex()
@@ -476,7 +577,9 @@ impl CustomElement for TextEditorElement {
         // `Some(false)` also claims the same box as a non-selectable
         // selection-start region: a drag inside an editor must move the caret,
         // not start a document selection.
-        editor = editor.child(crate::automation::bounds_tracker(ctx.id, Some(false)));
+        if !self.chrome {
+            editor = editor.child(crate::automation::bounds_tracker(ctx.id, Some(false)));
+        }
         if ctx.events.contains("click") {
             let callback = ctx.event_callback.clone();
             let id = ctx.id;
@@ -504,6 +607,17 @@ impl CustomElement for TextEditorElement {
         editor =
             crate::accessibility::apply_a11y_click(editor, ctx.events, ctx.id, ctx.event_callback);
         editor.into_any_element()
+    }
+}
+
+impl CustomElement for TextEditorElement {
+    fn render(
+        &mut self,
+        ctx: CustomRenderContext,
+        window: &mut Window,
+        cx: &mut Context<crate::renderer::GpuixView>,
+    ) -> gpui::AnyElement {
+        self.render_input(ctx, window, cx)
     }
 
     fn set_prop(&mut self, key: &str, value: serde_json::Value) {
@@ -658,6 +772,7 @@ struct TextEditorState {
     content_width: f32,
     display_is_placeholder: bool,
     caret_color: gpui::Hsla,
+    selection_color: gpui::Hsla,
     blink_anchor: Instant,
     blink_task: Option<Task<()>>,
     pending_values: VecDeque<String>,
@@ -1708,7 +1823,13 @@ impl gpui::Render for TextEditorState {
             })
             .when(self.emits_key_up, move |editor| {
                 editor.on_key_up(move |event, _window, _cx| {
-                    emit_key_event(&key_up_callback, element_id, "keyUp", &event.keystroke, None);
+                    emit_key_event(
+                        &key_up_callback,
+                        element_id,
+                        "keyUp",
+                        &event.keystroke,
+                        None,
+                    );
                 })
             })
             .w_full()
@@ -1808,7 +1929,7 @@ impl gpui::Element for EditorTextElement {
             input.point_for_index(input.selected_range.start),
             input.point_for_index(input.selected_range.end),
         ) {
-            let color = gpui::rgba(0x7c86ff59);
+            let color = input.selection_color;
             if start.y == end.y {
                 selection.push(fill(
                     Bounds::from_corners(

@@ -1,43 +1,10 @@
 local util = require("gpuix._util")
 
-local root_style = { display = "flex", position = "relative", alignItems = "start" }
-local trigger_style = {
-    width = 200,
-    height = 36,
-    display = "flex",
-    flexDirection = "row",
-    alignItems = "center",
-    paddingLeft = 10,
-    paddingRight = 10,
-    borderRadius = 7,
-    borderWidth = 1,
-    borderColor = "#52525b",
-    background = "#18181b",
-    focus = util.focus_ring,
-}
-local content_style = {
-    width = 200,
-    display = "flex",
-    flexDirection = "column",
-    padding = 5,
-    gap = 2,
-    borderRadius = 8,
-    borderWidth = 1,
-    borderColor = "#52525b",
-    background = "#27272a",
-    focus = util.focus_ring,
-}
-local item_style = {
-    display = "flex",
-    flexDirection = "row",
-    alignItems = "center",
-    width = "100%",
-    padding = 9,
-    gap = 8,
-    borderRadius = 6,
-}
-
 return function(props)
+    local palette = props.theme or util.palette
+    local defaults = util.control_styles(palette)
+    local root_style = { display = "flex", position = "relative", alignItems = "start" }
+    local trigger_style, content_style = defaults.trigger, defaults.menu
     local options = props.options or {}
     local internal_value, set_internal_value = gpuix.use_state(props.defaultValue)
     local internal_open, set_internal_open = gpuix.use_state(props.defaultOpen == true)
@@ -140,7 +107,7 @@ return function(props)
                     if not state.disabled then set_active_index(option_index) end
                 end}
                 onClick={function() choose(option_index) end}
-                style={util.resolve_style(props.itemStyle, state, item_style)}
+                style={util.resolve_style(props.itemStyle, state, util.menu_item_style(palette, state))}
             >
                 {item_content}
             </div>

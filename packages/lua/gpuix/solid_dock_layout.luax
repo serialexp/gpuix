@@ -5,14 +5,15 @@ local util = require("gpuix._util")
 local Drawer = require("gpuix.solid.drawer")
 local For, Show = solid.For, solid.Show
 local read = shared.read
-local group_style = { display = "flex", flexDirection = "row", alignItems = "center", gap = 2 }
-local button_style = { minWidth = 24, height = 22, display = "flex", flexDirection = "row",
-    alignItems = "center", justifyContent = "center", paddingLeft = 6, paddingRight = 6,
-    borderRadius = 4, hover = { background = "#27272a" }, active = { background = "#52525b" }, focus = util.focus_ring }
 local positions = { "left", "right", "bottom" }
 local function valid(position) return position == "left" or position == "right" or position == "bottom" end
 
 return function(props)
+    local palette = props.theme or util.palette
+    local group_style = { display = "flex", flexDirection = "row", alignItems = "center", gap = 2 }
+    local button_style = { minWidth = 24, height = 22, display = "flex", flexDirection = "row",
+        alignItems = "center", justifyContent = "center", paddingLeft = 6, paddingRight = 6,
+        borderRadius = 4, hover = { background = palette.raised }, active = { background = palette.rowHover }, focus = util.focus_style(palette) }
     local overrides, set_overrides = solid.create_signal({})
     local sizes, set_sizes = solid.create_signal({})
     local menu, set_menu = solid.create_signal(nil)
@@ -168,14 +169,14 @@ return function(props)
             render={function(record)
                 if record().kind == "spacer" then return <div style={{ flexGrow = 1 }} /> end
                 if record().kind == "separator" then
-                    return <div style={{ width = 1, height = 16, marginLeft = 3, marginRight = 3, background = "#3f3f46" }} />
+                    return <div style={{ width = 1, height = 16, marginLeft = 3, marginRight = 3, background = palette.rowPressed }} />
                 end
                 local function item() return record().panel end
                 local function state()
                     return { id = item().id, active = panel_open(item()), position = position_of(item()) }
                 end
                 local body = item().renderButton and item().renderButton(state)
-                    or <text style={{ color = state().active and "#fafafa" or "#a1a1aa", fontSize = 11 }}>
+                    or <text style={{ color = state().active and palette.text or palette.textMuted, fontSize = 11 }}>
                         {item().buttonLabel or item().label or tostring(item().id)}
                     </text>
                 local button = <div testId={util.test_id(props.testId, "-button-" .. item().id)}
@@ -189,7 +190,7 @@ return function(props)
                             set_menu({ id = item().id, x = event.x, y = event.y, active = index })
                         end
                     end}
-                    style={shared.style(shared.merge(button_style, { background = state().active and "#3f3f46" or nil }),
+                    style={shared.style(shared.merge(button_style, { background = state().active and palette.rowPressed or nil }),
                         state().active and (item().activeButtonStyle or props.activeButtonStyle)
                             or (item().buttonStyle or props.buttonStyle), state().active
                                 and shared.merge(state(), { active = true }) or state())}>
@@ -208,9 +209,9 @@ return function(props)
         return panel and { panel } or {}
     end
     local function current_menu() return menu() or { x = 0, y = 0, active = 1 } end
-    return <div testId={props.testId} style={shared.style({
+    return <div theme={palette} testId={props.testId} style={shared.style({
         width = "100%", height = "100%", minWidth = 0, minHeight = 0, display = "flex",
-        flexDirection = "column", position = "relative", background = "#18181b" }, props.style, {})}>
+        flexDirection = "column", position = "relative", background = palette.surface, color = palette.text }, props.style, {})}>
         <div style={shared.style({ display = "flex", flexDirection = "row", position = "relative",
             flexGrow = 1, minWidth = 0, minHeight = 0 }, props.workspaceStyle, {})}>
             <div style={{ display = "flex", flexDirection = "column", flexGrow = 1,
@@ -236,7 +237,7 @@ return function(props)
                         else result.left, result.right, result.bottom = edges().left, edges().right, 0 end
                         return result
                     end
-                    return <Drawer testId={util.test_id(props.testId, "-panel-" .. item().id)}
+                    return <Drawer theme={palette} testId={util.test_id(props.testId, "-panel-" .. item().id)}
                         side={function() return position_of(item()) end}
                         open={function() return panel_open(item()) end}
                         size={function() return panel_size(item()) end}
@@ -264,7 +265,7 @@ return function(props)
         </div>
         <div style={shared.style({ width = "100%", height = 28, flexShrink = 0, display = "flex",
             flexDirection = "row", alignItems = "center", paddingLeft = 4, paddingRight = 4,
-            gap = 3, borderTopWidth = 1, borderColor = "#3f3f46", background = "#18181b" }, props.statusBarStyle, {})}>
+            gap = 3, borderTopWidth = 1, borderColor = palette.border, background = palette.surface }, props.statusBarStyle, {})}>
             {status}
         </div>
         <For each={menu_rows} key={function(panel) return panel.id end}
@@ -289,8 +290,8 @@ return function(props)
                     <div testId={util.test_id(props.testId, "-button-menu")} autoFocus tabIndex={0}
                         onMouseDownOutside={function() set_menu(nil) end} onKeyDown={handle_key}
                         style={shared.style({ width = 150, padding = 5, gap = 2, borderRadius = 7,
-                            borderWidth = 1, borderColor = "#52525b", background = "#27272a",
-                            focus = util.focus_ring }, props.menuStyle, menu_state())}>
+                            borderWidth = 1, borderColor = palette.borderStrong, background = palette.raised,
+                            focus = util.focus_style(palette) }, props.menuStyle, menu_state())}>
                         <For each={function() return positions end} key={function(position) return position end}
                             render={function(position, index)
                                 local function state()
@@ -302,8 +303,8 @@ return function(props)
                                     onMouseEnter={function() set_menu(shared.merge(menu(), { active = index() })) end}
                                     onClick={function() choose(index()) end}
                                     style={shared.style({ padding = 7, borderRadius = 4,
-                                        background = state().highlighted and "#3f3f46" or "#27272a",
-                                        hover = { background = "#3f3f46" }, focus = util.focus_ring }, props.menuItemStyle, state())}>
+                                        background = state().highlighted and palette.rowPressed or palette.raised,
+                                        hover = { background = palette.rowPressed }, focus = util.focus_style(palette) }, props.menuItemStyle, state())}>
                                     <text>{(state().selected and "✓  " or "   ") .. "Dock " .. position()}</text>
                                 </div>
                             end} />

@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css">
+  <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/fill/style.css">
+  <style>body{margin:0;background:#e9ebef} a{color:#2b7a5e} a:hover{color:#1d5a44}</style>
+</helmet>
+<div style="max-width:1240px;margin:0 auto;padding:40px 32px 64px;display:flex;flex-direction:column;gap:32px;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#24272e">
+  <div style="display:flex;flex-direction:column;gap:8px;max-width:820px">
+    <div style="font-family:Menlo,monospace;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#6b7080">gpuix · theme.rs · Comet, tidied</div>
+    <div style="font-size:28px;font-weight:600;letter-spacing:-0.015em">Native component default theme</div>
+    <div style="font-size:14px;line-height:21px;color:#5a5f6b;text-wrap:pretty">These are the defaults <span style="font-family:Menlo,monospace;font-size:12.5px">Theme::dark()</span> and <span style="font-family:Menlo,monospace;font-size:12.5px">Theme::light()</span> paint with when the app passes no <span style="font-family:Menlo,monospace;font-size:12.5px">theme</span> prop. The existing tokens keep their names. Rows marked <span style="font-family:Menlo,monospace;font-size:11px;padding:1px 5px;border-radius:4px;background:#d9f2e6;color:#1d5a44">new</span> are chrome tokens the inspector, input and scrollbars need, which theme.rs doesn't have yet.</div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(520px,1fr));gap:24px">
+    <sc-for list="{{ modes }}" as="m" hint-placeholder-count="2">
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:Menlo,monospace;font-size:10.5px;letter-spacing:0.08em;text-transform:uppercase;color:#6b7080">{{ m.name }}</div>
+        <div style="display:flex;flex-direction:column;border-radius:10px;overflow:hidden;border:1px solid {{ m.t.frame }};background:{{ m.t.bg }};color:{{ m.t.text }};font-size:12px">
+          <div style="height:132px;position:relative;padding:14px;box-sizing:border-box">
+            <div style="height:100%;border-radius:6px;background:{{ m.stripes }};display:flex;align-items:flex-end;padding:8px;box-sizing:border-box;font-family:Menlo,Consolas,monospace;font-size:10px;color:{{ m.t.faint }}">app content</div>
+            <div style="position:absolute;left:38px;top:40px;width:220px;height:40px;box-sizing:border-box;border:1px solid {{ m.t.accent }};background:{{ m.t.pickWash }};border-radius:2px"></div>
+            <div style="position:absolute;left:38px;top:18px;height:18px;display:flex;align-items:center;padding:0 6px;border-radius:3px;background:{{ m.t.accent }};color:{{ m.t.onAccent }};font-family:Menlo,Consolas,monospace;font-size:10px">div #14 · 220 × 40</div>
+            <div style="position:absolute;left:290px;top:58px;padding:4px;border-radius:6px;background:{{ m.t.raised }};border:1px solid {{ m.t.borderStrong }};box-shadow:0 6px 20px oklch(0 0 0 / 0.25);display:flex;flex-direction:column;min-width:150px">
+              <div style="height:24px;display:flex;align-items:center;gap:8px;padding:0 8px;border-radius:4px;background:{{ m.t.hover }}"><i class="ph ph-crosshair-simple" style="font-size:14px;color:{{ m.t.muted }}"></i>Inspect element</div>
+            </div>
+          </div>
+          <div style="height:250px;display:flex;flex-direction:column;background:{{ m.t.surface }};border-top:1px solid {{ m.t.border }}">
+            <div style="height:30px;flex-shrink:0;display:flex;align-items:center;gap:2px;padding:0 4px;border-bottom:1px solid {{ m.t.border }}">
+              <div style="width:24px;height:24px;display:flex;align-items:center;justify-content:center;border-radius:4px;background:{{ m.t.pickBg }};color:{{ m.t.accent }}"><i class="ph ph-cursor-click" style="font-size:15px"></i></div>
+              <div style="width:1px;height:14px;margin:0 4px;background:{{ m.t.borderStrong }}"></div>
+              <sc-for list="{{ m.tabs }}" as="tb" hint-placeholder-count="2">
+                <div onClick="{{ tb.onClick }}" style="height:22px;display:flex;align-items:center;gap:6px;padding:0 8px;border-radius:4px;cursor:pointer;background:{{ tb.bg }};color:{{ tb.color }}"><i class="{{ tb.icon }}" style="font-size:14px;color:{{ m.t.muted }}"></i>{{ tb.label }}</div>
+              </sc-for>
+              <div style="flex:1"></div>
+              <div style="width:24px;height:24px;display:flex;align-items:center;justify-content:center;border-radius:4px;color:{{ m.t.muted }}"><i class="ph ph-arrows-vertical" style="font-size:15px"></i></div>
+              <div style="width:24px;height:24px;display:flex;align-items:center;justify-content:center;border-radius:4px;color:{{ m.t.muted }}"><i class="ph ph-x" style="font-size:15px"></i></div>
+            </div>
+            <sc-if value="{{ m.isNetwork }}" hint-placeholder-val="{{ false }}">
+            <div style="flex:1;display:flex;min-height:0">
+              <div style="flex:1.7;min-width:0;display:flex;flex-direction:column;position:relative;overflow:hidden;font-size:11px">
+                <div style="height:28px;flex-shrink:0;display:flex;align-items:center;gap:4px;padding:0 6px;border-bottom:1px solid {{ m.t.border }}">
+                  <div style="width:20px;height:20px;display:flex;align-items:center;justify-content:center;border-radius:4px;color:{{ m.t.danger }}"><i class="ph-fill ph-record" style="font-size:13px"></i></div>
+                  <div style="width:20px;height:20px;display:flex;align-items:center;justify-content:center;border-radius:4px;color:{{ m.t.muted }}"><i class="ph ph-prohibit" style="font-size:13px"></i></div>
+                  <div style="height:20px;box-sizing:border-box;display:flex;align-items:center;gap:4px;width:96px;padding:0 6px;border-radius:5px;background:{{ m.t.field }};border:1px solid {{ m.t.borderStrong }};color:{{ m.t.faint }}"><i class="ph ph-funnel-simple" style="font-size:11px"></i>Filter</div>
+                  <sc-for list="{{ m.netFilters }}" as="nf" hint-placeholder-count="5">
+                    <div style="height:20px;display:flex;align-items:center;padding:0 6px;border-radius:4px;background:{{ nf.bg }};color:{{ nf.color }}">{{ nf.label }}</div>
+                  </sc-for>
+                </div>
+                <div style="height:22px;flex-shrink:0;display:grid;grid-template-columns:30px 36px minmax(0,1fr) 44px 44px 56px;gap:6px;align-items:center;padding:0 8px;border-bottom:1px solid {{ m.t.border }};color:{{ m.t.faint }};font-size:10.5px">
+                  <div>Status</div><div>Method</div><div>Name</div><div style="text-align:right">Size</div><div style="text-align:right">Time</div><div>Waterfall</div>
+                </div>
+                <sc-for list="{{ m.reqs }}" as="rq" hint-placeholder-count="8">
+                  <div onClick="{{ rq.onClick }}" style="height:22px;flex-shrink:0;display:grid;grid-template-columns:30px 36px minmax(0,1fr) 44px 44px 56px;gap:6px;align-items:center;padding:0 8px;cursor:pointer;background:{{ rq.bg }};font-family:Menlo,Consolas,monospace;white-space:nowrap">
+                    <div style="color:{{ rq.statusColor }}">{{ rq.status }}</div>
+                    <div style="color:{{ m.t.muted }}">{{ rq.method }}</div>
+                    <div style="display:flex;align-items:center;gap:5px;min-width:0"><i class="{{ rq.icon }}" style="font-size:12px;flex-shrink:0;color:{{ m.t.faint }}"></i><span style="overflow:hidden;text-overflow:ellipsis;color:{{ rq.nameColor }}">{{ rq.name }}</span></div>
+                    <div style="text-align:right;color:{{ m.t.muted }}">{{ rq.size }}</div>
+                    <div style="text-align:right;color:{{ m.t.muted }}">{{ rq.time }}</div>
+                    <div style="position:relative;height:6px"><div style="position:absolute;top:0;bottom:0;left:{{ rq.x }}%;width:{{ rq.w }}%;min-width:2px;border-radius:2px;background:{{ rq.bar }}"></div></div>
+                  </div>
+                </sc-for>
+                <div style="position:absolute;right:2px;top:54px;width:6px;height:70px;border-radius:3px;background:{{ m.t.thumb }}"></div>
+              </div>
+              <div style="flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden;border-left:1px solid {{ m.t.border }};font-size:11px">
+                <div style="height:28px;flex-shrink:0;display:flex;align-items:stretch;gap:12px;padding:0 10px;border-bottom:1px solid {{ m.t.border }}">
+                  <sc-for list="{{ m.detailTabs }}" as="dt" hint-placeholder-count="4">
+                    <div style="display:flex;align-items:center;box-sizing:border-box;border-bottom:2px solid {{ dt.line }};color:{{ dt.color }}">{{ dt.label }}</div>
+                  </sc-for>
+                </div>
+                <div style="display:flex;flex-direction:column;padding:8px 10px;font-family:Menlo,Consolas,monospace;font-size:11px">
+                  <sc-for list="{{ m.reqDetail }}" as="kv" hint-placeholder-count="8">
+                    <div style="min-height:19px;display:grid;grid-template-columns:84px minmax(0,1fr);gap:8px;align-items:baseline;padding-top:{{ kv.gap }}px">
+                      <div style="color:{{ m.t.faint }}">{{ kv.k }}</div>
+                      <div style="display:flex;align-items:center;gap:5px;min-width:0;color:{{ kv.c }};overflow-wrap:anywhere"><sc-if value="{{ kv.dot }}" hint-placeholder-val="{{ false }}"><span style="width:6px;height:6px;flex-shrink:0;border-radius:3px;background:{{ kv.c }}"></span></sc-if>{{ kv.v }}</div>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+            </div>
+            </sc-if>
+            <sc-if value="{{ m.isElements }}" hint-placeholder-val="{{ true }}">
+            <div style="flex:1;display:flex;min-height:0">
+              <div style="flex:1;min-width:0;position:relative;overflow:hidden;font-family:Menlo,Consolas,monospace;font-size:11.5px">
+                <sc-for list="{{ m.rows }}" as="row" hint-placeholder-count="10">
+                  <div style="height:22px;display:flex;align-items:center;padding-left:{{ row.pad }}px;padding-right:12px;background:{{ row.bg }};white-space:nowrap">
+                    <div style="width:14px;flex-shrink:0;display:flex;align-items:center;color:{{ row.discColor }}"><i class="{{ row.disc }}" style="font-size:10px"></i></div>
+                    <i class="{{ row.icon }}" style="font-size:13px;margin-right:5px;color:{{ m.t.faint }}"></i>
+                    <sc-for list="{{ row.parts }}" as="p" hint-placeholder-count="3"><span style="color:{{ p.c }};white-space:pre">{{ p.s }}</span></sc-for>
+                  </div>
+                </sc-for>
+                <div style="position:absolute;right:2px;top:26px;width:6px;height:90px;border-radius:3px;background:{{ m.t.thumb }}"></div>
+              </div>
+              <div style="flex:1;min-width:0;position:relative;overflow:hidden;border-left:1px solid {{ m.t.border }};padding:8px;box-sizing:border-box;font-family:Menlo,Consolas,monospace;font-size:11.5px">
+                <sc-for list="{{ m.json }}" as="line" hint-placeholder-count="10">
+                  <div style="height:18px;display:flex;align-items:center;white-space:pre">
+                    <sc-for list="{{ line }}" as="p" hint-placeholder-count="3"><span style="color:{{ p.c }}">{{ p.s }}</span></sc-for>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+            </sc-if>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 140px;gap:10px">
+          <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:12px;border-radius:10px;background:{{ m.t.surface }};border:1px solid {{ m.t.frame }}">
+            <sc-for list="{{ m.inputs }}" as="f" hint-placeholder-count="4">
+              <div style="display:flex;flex-direction:column;gap:4px">
+                <div style="height:26px;box-sizing:border-box;display:flex;align-items:center;padding:0 8px;border-radius:6px;background:{{ m.t.field }};border:1px solid {{ f.border }};box-shadow:{{ f.ring }};font-size:12px;white-space:nowrap;overflow:hidden">
+                  <i class="ph ph-magnifying-glass" style="font-size:13px;margin-right:6px;color:{{ m.t.faint }}"></i><span style="color:{{ f.color }};white-space:pre">{{ f.pre }}</span><span style="background:{{ m.t.sel }};color:{{ m.t.text }};white-space:pre">{{ f.sel }}</span><span style="width:1.5px;height:14px;background:{{ f.caret }}"></span>
+                </div>
+                <div style="font-family:Menlo,Consolas,monospace;font-size:10px;color:{{ m.t.faint }}">{{ f.label }}</div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="display:flex;justify-content:space-around;padding:12px 8px;border-radius:10px;background:{{ m.t.surface }};border:1px solid {{ m.t.frame }}">
+            <sc-for list="{{ m.bars }}" as="b" hint-placeholder-count="3">
+              <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+                <div style="flex:1;width:10px;border-radius:5px;background:{{ b.track }};position:relative">
+                  <div style="position:absolute;left:2px;right:2px;top:{{ b.top }}px;height:30px;border-radius:3px;background:{{ b.thumb }}"></div>
+                </div>
+                <div style="font-family:Menlo,Consolas,monospace;font-size:9.5px;color:{{ m.t.faint }}">{{ b.label }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+    </sc-for>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:8px;max-width:820px">
+    <div style="font-size:20px;font-weight:600;letter-spacing:-0.01em">Components</div>
+    <div style="font-size:14px;line-height:21px;color:#5a5f6b;text-wrap:pretty">The Lua widgets (<span style="font-family:Menlo,monospace;font-size:12.5px">packages/lua/gpuix/*.luax</span>) ship hardcoded zinc greys and a blue <span style="font-family:Menlo,monospace;font-size:12.5px">#60a5fa</span> focus ring. Below, they're redrawn with the theme tokens, keeping their current sizes. The React and Solid versions are headless, so the same tokens become the suggested <span style="font-family:Menlo,monospace;font-size:12.5px">StateStyle</span> defaults.</div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(560px,1fr));gap:24px">
+    <sc-for list="{{ modes }}" as="m" hint-placeholder-count="2">
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:Menlo,monospace;font-size:10.5px;letter-spacing:0.08em;text-transform:uppercase;color:#6b7080">{{ m.name }}</div>
+        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;border-radius:10px;overflow:hidden;border:1px solid {{ m.t.frame }};background:{{ m.t.border }};color:{{ m.t.text }};font-size:13px">
+
+          <div style="grid-column:1 / -1;display:flex;flex-direction:column;gap:12px;padding:16px;background:{{ m.t.bg }}">
+            <div style="font-family:Menlo,Consolas,monospace;font-size:10px;color:{{ m.t.faint }}">button</div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+              <div style="height:30px;display:flex;align-items:center;gap:6px;padding:0 12px;border-radius:6px;background:{{ m.t.accent }};color:{{ m.t.onAccent }};font-weight:500"><i class="ph ph-floppy-disk" style="font-size:15px"></i>Save</div>
+              <div style="height:30px;box-sizing:border-box;display:flex;align-items:center;padding:0 12px;border-radius:6px;background:{{ m.t.raised }};border:1px solid {{ m.t.borderStrong }}">Cancel</div>
+              <div style="height:30px;display:flex;align-items:center;gap:6px;padding:0 12px;border-radius:6px;background:{{ m.t.danger }};color:{{ m.t.onDanger }};font-weight:500"><i class="ph ph-trash" style="font-size:15px"></i>Delete</div>
+              <div style="height:30px;display:flex;align-items:center;padding:0 12px;border-radius:6px;background:{{ m.t.dangerWash }};color:{{ m.t.danger }}">Remove</div>
+              <div style="width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:6px;color:{{ m.t.muted }}"><i class="ph ph-gear-six" style="font-size:16px"></i></div>
+              <div style="flex:1"></div>
+              <sc-for list="{{ m.btnStates }}" as="s" hint-placeholder-count="5">
+                <div style="display:flex;flex-direction:column;align-items:center;gap:4px;opacity:{{ s.opacity }}">
+                  <div style="height:30px;box-sizing:border-box;display:flex;align-items:center;padding:0 10px;border-radius:6px;background:{{ s.bg }};border:1px solid {{ m.t.borderStrong }};box-shadow:{{ s.ring }}">Cancel</div>
+                  <div style="font-family:Menlo,Consolas,monospace;font-size:9.5px;color:{{ m.t.faint }}">{{ s.label }}</div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:12px;padding:16px;background:{{ m.t.bg }}">
+            <div style="font-family:Menlo,Consolas,monospace;font-size:10px;color:{{ m.t.faint }}">checkbox · radio_group</div>
+            <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px">
+              <sc-for list="{{ m.checks }}" as="c" hint-placeholder-count="4">
+                <div style="display:flex;align-items:center;gap:8px;opacity:{{ c.opacity }}">
+                  <div style="width:20px;height:20px;box-sizing:border-box;flex-shrink:0;display:flex;align-items:center;justify-content:center;border-radius:5px;background:{{ c.bg }};border:1px solid {{ c.border }};box-shadow:{{ c.ring }};color:{{ m.t.onAccent }}"><i class="{{ c.icon }}" style="font-size:13px"></i></div>
+                  <div>{{ c.label }}</div>
+                </div>
+              </sc-for>
+              <sc-for list="{{ m.radios }}" as="c" hint-placeholder-count="3">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <div style="width:18px;height:18px;box-sizing:border-box;flex-shrink:0;display:flex;align-items:center;justify-content:center;border-radius:9px;background:{{ m.t.field }};border:1px solid {{ c.border }}"><div style="width:8px;height:8px;border-radius:4px;background:{{ c.dot }}"></div></div>
+                  <div>{{ c.label }}</div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:12px;padding:16px;background:{{ m.t.bg }}">
+            <div style="font-family:Menlo,Consolas,monospace;font-size:10px;color:{{ m.t.faint }}">tooltip</div>
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:6px;padding-top:4px">
+              <div style="display:flex;align-items:center;gap:8px;height:26px;padding:0 8px;border-radius:6px;background:{{ m.t.raised }};border:1px solid {{ m.t.borderStrong }};box-shadow:0 4px 14px {{ m.t.shadow }};font-size:12px">Pick element<span style="font-family:Menlo,Consolas,monospace;font-size:10.5px;color:{{ m.t.faint }}">⌥⌘C</span></div>
+              <div style="width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:6px;background:{{ m.t.hover }};color:{{ m.t.text }}"><i class="ph ph-cursor-click" style="font-size:16px"></i></div>
+            </div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:6px;padding:16px;background:{{ m.t.bg }};min-height:230px">
+            <div style="font-family:Menlo,Consolas,monospace;font-size:10px;color:{{ m.t.faint }};margin-bottom:6px">select</div>
+            <div style="width:200px;height:36px;box-sizing:border-box;display:flex;align-items:center;padding:0 10px;border-radius:7px;background:{{ m.t.field }};border:1px solid {{ m.t.accent }};box-shadow:0 0 0 2px {{ m.t.focusRing }}">
+              <div style="flex:1">TypeScript</div><i class="ph ph-caret-up-down" style="font-size:14px;color:{{ m.t.muted }}"></i>
+            </div>
+            <div style="width:200px;box-sizing:border-box;display:flex;flex-direction:column;gap:2px;padding:5px;border-radius:8px;background:{{ m.t.raised }};border:1px solid {{ m.t.borderStrong }};box-shadow:0 8px 24px {{ m.t.shadow }}">
+              <div style="padding:4px 9px 2px;font-size:11px;color:{{ m.t.faint }}">Languages</div>
+              <sc-for list="{{ m.selectItems }}" as="it" hint-placeholder-count="4">
+                <div style="display:flex;align-items:center;gap:8px;height:30px;padding:0 9px;border-radius:6px;background:{{ it.bg }};color:{{ it.color }}">
+                  <div style="flex:1">{{ it.label }}</div><i class="{{ it.icon }}" style="font-size:14px;color:{{ m.t.accent }}"></i>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:6px;padding:16px;background:{{ m.t.bg }}">
+            <div style="font-family:Menlo,Consolas,monospace;font-size:10px;color:{{ m.t.faint }};margin-bottom:6px">combobox</div>
+            <div style="width:220px;height:36px;box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:0 10px;border-radius:7px;background:{{ m.t.field }};border:1px solid {{ m.t.accent }};box-shadow:0 0 0 2px {{ m.t.focusRing }}">
+              <i class="ph ph-magnifying-glass" style="font-size:14px;color:{{ m.t.faint }}"></i><span>ma</span><span style="width:1.5px;height:15px;margin-left:-7px;background:{{ m.t.accent }}"></span>
+            </div>
+            <div style="width:220px;box-sizing:border-box;display:flex;flex-direction:column;gap:2px;padding:5px;border-radius:8px;background:{{ m.t.raised }};border:1px solid {{ m.t.borderStrong }};box-shadow:0 8px 24px {{ m.t.shadow }}">
+              <sc-for list="{{ m.comboItems }}" as="it" hint-placeholder-count="3">
+                <div style="display:flex;align-items:center;gap:8px;height:30px;padding:0 9px;border-radius:6px;background:{{ it.bg }}">
+                  <i class="{{ it.icon }}" style="font-size:14px;color:{{ m.t.muted }}"></i>
+                  <div style="flex:1;white-space:pre"><span style="font-weight:600">{{ it.match }}</span><span style="color:{{ m.t.muted }}">{{ it.rest }}</span></div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="width:220px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;gap:6px;height:36px;border-radius:8px;border:1px dashed {{ m.t.borderStrong }};font-size:12px;color:{{ m.t.faint }}"><i class="ph ph-magnifying-glass-minus" style="font-size:14px"></i>No matches</div>
+          </div>
+
+          <div style="position:relative;display:flex;flex-direction:column;gap:12px;padding:16px;background:{{ m.t.bg }};min-height:200px">
+            <div style="font-family:Menlo,Consolas,monospace;font-size:10px;color:{{ m.t.faint }}">dialog</div>
+            <div style="position:relative;flex:1;border-radius:6px;overflow:hidden;background:{{ m.stripes }};display:flex;align-items:center;justify-content:center">
+              <div style="position:absolute;inset:0;background:{{ m.t.backdrop }}"></div>
+              <div style="position:relative;width:230px;display:flex;flex-direction:column;gap:6px;padding:14px;border-radius:10px;background:{{ m.t.raised }};border:1px solid {{ m.t.borderStrong }};box-shadow:0 12px 32px {{ m.t.shadow }}">
+                <div style="display:flex;align-items:center"><div style="flex:1;font-weight:600">Discard changes?</div><i class="ph ph-x" style="font-size:14px;color:{{ m.t.muted }}"></i></div>
+                <div style="font-size:12px;line-height:17px;color:{{ m.t.muted }}">Edits to theme.rs will be lost.</div>
+                <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:6px">
+                  <div style="height:26px;box-sizing:border-box;display:flex;align-items:center;padding:0 10px;border-radius:6px;border:1px solid {{ m.t.borderStrong }};font-size:12px">Cancel</div>
+                  <div style="height:26px;display:flex;align-items:center;gap:5px;padding:0 10px;border-radius:6px;background:{{ m.t.danger }};color:{{ m.t.onDanger }};font-size:12px;font-weight:500"><i class="ph ph-trash" style="font-size:13px"></i>Discard</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:12px;padding:16px;background:{{ m.t.bg }}">
+            <div style="font-family:Menlo,Consolas,monospace;font-size:10px;color:{{ m.t.faint }}">dock_layout · drawer</div>
+            <div style="flex:1;display:flex;flex-direction:column;border-radius:6px;overflow:hidden;border:1px solid {{ m.t.border }};background:{{ m.t.surface }};min-height:160px">
+              <div style="flex:1;display:flex;min-height:0">
+                <div style="width:96px;position:relative;background:{{ m.t.surface }};border-right:1px solid {{ m.t.border }};padding:8px;display:flex;flex-direction:column;gap:6px">
+                  <div style="height:6px;width:60px;border-radius:3px;background:{{ m.t.hover }}"></div>
+                  <div style="height:6px;width:44px;border-radius:3px;background:{{ m.t.hover }}"></div>
+                  <div style="position:absolute;right:-2px;top:0;bottom:0;width:3px;background:{{ m.t.accent }}"></div>
+                </div>
+                <div style="flex:1;background:{{ m.stripes }}"></div>
+              </div>
+              <div style="height:28px;display:flex;align-items:center;gap:2px;padding:0 4px;border-top:1px solid {{ m.t.border }};background:{{ m.t.surface }}">
+                <div style="min-width:24px;height:22px;display:flex;align-items:center;justify-content:center;border-radius:4px;background:{{ m.t.pressed }};color:{{ m.t.text }}"><i class="ph ph-sidebar-simple" style="font-size:14px"></i></div>
+                <div style="min-width:24px;height:22px;display:flex;align-items:center;justify-content:center;border-radius:4px;color:{{ m.t.muted }}"><i class="ph ph-list-magnifying-glass" style="font-size:14px"></i></div>
+                <div style="width:1px;height:16px;margin:0 3px;background:{{ m.t.borderStrong }}"></div>
+                <div style="min-width:24px;height:22px;display:flex;align-items:center;justify-content:center;border-radius:4px;background:{{ m.t.hover }};color:{{ m.t.muted }}"><i class="ph ph-terminal-window" style="font-size:14px"></i></div>
+                <div style="flex:1"></div>
+                <div style="font-size:11px;color:{{ m.t.faint }};padding-right:6px">Ln 42, Col 8</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </sc-for>
+  </div>
+
+  <sc-for list="{{ groups }}" as="g" hint-placeholder-count="3">
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="font-size:16px;font-weight:600">{{ g.title }}</div>
+      <div style="border:1px solid #d6d9e0;border-radius:10px;overflow:hidden;background:#f7f8fa">
+        <div style="display:grid;grid-template-columns:minmax(140px,1.1fr) minmax(0,1.6fr) minmax(0,1.6fr) minmax(0,1.6fr);gap:12px;padding:8px 14px;border-bottom:1px solid #d6d9e0;font-family:Menlo,monospace;font-size:10.5px;letter-spacing:0.06em;text-transform:uppercase;color:#6b7080">
+          <div>Token</div><div>Dark</div><div>Light</div><div>Used by</div>
+        </div>
+        <sc-for list="{{ g.rows }}" as="r" hint-placeholder-count="8">
+          <div style="display:grid;grid-template-columns:minmax(140px,1.1fr) minmax(0,1.6fr) minmax(0,1.6fr) minmax(0,1.6fr);gap:12px;align-items:center;padding:7px 14px;border-bottom:1px solid #e4e6eb;font-size:12.5px">
+            <div style="display:flex;align-items:center;gap:6px;min-width:0">
+              <span style="font-family:Menlo,monospace;font-size:12px">{{ r.n }}</span>
+              <sc-if value="{{ r.isNew }}" hint-placeholder-val="{{ false }}"><span style="font-family:Menlo,monospace;font-size:10px;padding:1px 5px;border-radius:4px;background:#d9f2e6;color:#1d5a44">new</span></sc-if>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;min-width:0">
+              <span style="width:18px;height:18px;flex-shrink:0;border-radius:4px;background:{{ r.dark }};box-shadow:inset 0 0 0 1px oklch(0 0 0 / 0.12)"></span>
+              <span style="font-family:Menlo,monospace;font-size:11px;color:#4a4f5a;overflow-wrap:anywhere">{{ r.dark }}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;min-width:0">
+              <span style="width:18px;height:18px;flex-shrink:0;border-radius:4px;background:{{ r.light }};box-shadow:inset 0 0 0 1px oklch(0 0 0 / 0.12)"></span>
+              <span style="font-family:Menlo,monospace;font-size:11px;color:#4a4f5a;overflow-wrap:anywhere">{{ r.light }}</span>
+            </div>
+            <div style="color:#5a5f6b;text-wrap:pretty">{{ r.use }}</div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-for>
+
+  <div style="display:flex;flex-direction:column;gap:10px">
+    <div style="font-size:16px;font-weight:600">Metrics</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px">
+      <sc-for list="{{ metrics }}" as="x" hint-placeholder-count="6">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px;border:1px solid #d6d9e0;border-radius:8px;background:#f7f8fa">
+          <span style="font-family:Menlo,monospace;font-size:11.5px">{{ x.n }}</span>
+          <span style="font-family:Menlo,monospace;font-size:11.5px;color:#5a5f6b">{{ x.v }}</span>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+const W = (a) => `oklch(1 0 0 / ${a})`;
+const K = (a) => `oklch(0.25 0.01 255 / ${a})`;
+const D = { bg:'oklch(0.165 0.006 255)', surface:'oklch(0.195 0.006 255)', raised:'oklch(0.235 0.007 255)', field:'oklch(0.15 0.006 255)', frame:'oklch(0.32 0.008 255)', border:W(0.08), borderStrong:W(0.14), text:'oklch(0.93 0.005 255)', muted:'oklch(0.72 0.008 255)', faint:'oklch(0.56 0.01 255)', dim:'oklch(0.66 0.008 255)', accent:'oklch(0.765 0.15 163)', onAccent:'oklch(0.2 0.03 163)', rowSel:'oklch(0.765 0.15 163 / 0.16)', sel:'oklch(0.765 0.15 163 / 0.26)', hover:W(0.05), thumb:W(0.18), thumbHover:W(0.3), thumbActive:W(0.44), focusRing:'oklch(0.765 0.15 163 / 0.35)', pressed:W(0.09), danger:'oklch(0.704 0.191 22.2)', onDanger:'oklch(0.2 0.04 22)', dangerWash:'oklch(0.704 0.191 22.2 / 0.14)', backdrop:'oklch(0.1 0.006 255 / 0.6)', shadow:'oklch(0 0 0 / 0.35)', codeText:'oklch(0.811 0.111 293.6)', codeWash:'oklch(0.702 0.183 293.5 / 0.12)', add:'oklch(0.765 0.177 163.2)', del:'oklch(0.704 0.191 22.2)', hunk:'oklch(0.6 0.04 255 / 0.06)', keyword:'oklch(0.673 0.131 276.9)', str:'oklch(0.765 0.127 163.2)', num:'oklch(0.828 0.136 84.4)', pink:'oklch(0.718 0.145 349.8)', comment:'oklch(0.6 0.008 255)', tag:'oklch(0.74 0.12 350)', attr:'oklch(0.82 0.12 84)', key:'oklch(0.74 0.12 277)' };
+const L = { bg:'oklch(0.99 0.002 255)', surface:'oklch(0.97 0.003 255)', raised:'oklch(1 0 0)', field:'oklch(1 0 0)', frame:K(0.14), border:K(0.09), borderStrong:K(0.16), text:'oklch(0.25 0.01 255)', muted:'oklch(0.45 0.012 255)', faint:'oklch(0.56 0.012 255)', dim:'oklch(0.5 0.01 255)', accent:'oklch(0.58 0.13 163)', onAccent:'oklch(0.99 0.01 163)', rowSel:'oklch(0.6 0.13 163 / 0.14)', sel:'oklch(0.65 0.13 163 / 0.24)', hover:K(0.05), thumb:K(0.2), thumbHover:K(0.32), thumbActive:K(0.46), focusRing:'oklch(0.58 0.13 163 / 0.3)', pressed:K(0.09), danger:'oklch(0.577 0.215 27.3)', onDanger:'oklch(0.99 0.01 27)', dangerWash:'oklch(0.577 0.215 27.3 / 0.10)', backdrop:'oklch(0.25 0.01 255 / 0.28)', shadow:'oklch(0.25 0.01 255 / 0.14)', codeText:'oklch(0.491 0.27 292.6)', codeWash:'oklch(0.541 0.281 293 / 0.10)', add:'oklch(0.596 0.145 163.2)', del:'oklch(0.577 0.245 27.3)', hunk:'oklch(0.4 0.04 255 / 0.07)', keyword:'oklch(0.511 0.19 277)', str:'oklch(0.53 0.105 163)', num:'oklch(0.56 0.13 60)', pink:'oklch(0.54 0.17 350)', comment:'oklch(0.53 0.01 255)', tag:'oklch(0.54 0.17 350)', attr:'oklch(0.56 0.12 70)', key:'oklch(0.5 0.18 277)' };
+const TREE = [[0,'▾','div',1,'root',null],[1,'▾','div',2,'sidebar',null],[2,'▸','div',5,'nav',null],[2,' ','text',9,null,'Inbox'],[1,'▾','div',12,'list',null],[2,'▾','div',14,'row-0',null],[3,' ','text',15,null,'Quarterly planning notes'],[3,' ','img',16,'avatar',null],[2,'▸','div',21,'row-1',null],[2,'▸','div',28,'row-2',null]];
+const JL = [[['{','p']],[['  "id"','k'],[': ','p'],['14','n'],[',','p']],[['  "type"','k'],[': ','p'],['"div"','s'],[',','p']],[['  "testId"','k'],[': ','p'],['"row-0"','s'],[',','p']],[['  "style"','k'],[': ','p'],['{','p']],[['    "display"','k'],[': ','p'],['"flex"','s'],[',','p']],[['    "padding"','k'],[': ','p'],['12','n'],[',','p']],[['    "gap"','k'],[': ','p'],['8','n']],[['  },','p']],[['  "events"','k'],[': ','p'],['["click"]','s'],[',','p']],[['  "paintedBounds"','k'],[': ','p'],['{ … }','p']]];
+const ICON = { div: 'ph ph-square', text: 'ph ph-text-t', img: 'ph ph-image' };
+const REQS = [
+  [200,'GET','/api/inbox?limit=50','fetch','4.2 kB',86,0,28,'application/json'],
+  [200,'GET','app.bundle.js','script','182 kB',214,2,70,'text/javascript'],
+  [304,'GET','theme.css','css','—',12,4,5,'text/css'],
+  [200,'POST','/api/threads/14/read','fetch','0.3 kB',64,40,21,'application/json'],
+  [404,'GET','/avatars/u_88.png','img','0 B',41,46,14,'text/html'],
+  [200,'GET','/api/me','fetch','1.1 kB',52,30,17,'application/json'],
+  [500,'PUT','/api/drafts/9','fetch','0.2 kB',310,52,48,'application/json'],
+  ['—','GET','/api/stream','fetch','—','—',60,40,'text/event-stream'],
+];
+const NICON = { fetch:'ph ph-brackets-curly', script:'ph ph-file-js', css:'ph ph-file-css', img:'ph ph-image' };
+const STATUS_TEXT = { 200:'OK', 304:'Not Modified', 404:'Not Found', 500:'Internal Server Error' };
+function mode(name, t, ui) {
+  const statusColor = (s) => typeof s !== 'number' ? t.faint : s >= 400 ? t.danger : s >= 300 ? t.muted : t.add;
+  const reqs = REQS.map(([status, method, nm, type, size, time, x, w], i) => ({
+    status, method, name: nm, size, time: typeof time === 'number' ? `${time} ms` : time, x, w, icon: NICON[type],
+    statusColor: statusColor(status), nameColor: typeof status === 'number' && status >= 400 ? t.danger : t.text,
+    bar: typeof status !== 'number' ? t.thumbHover : status >= 400 ? t.danger : i === ui.sel ? t.accent : t.thumbActive,
+    bg: i === ui.sel ? t.rowSel : 'transparent', onClick: () => ui.setSel(i),
+  }));
+  const r = REQS[ui.sel];
+  const sc = statusColor(r[0]);
+  const reqDetail = [
+    { k: 'URL', v: `localhost:4173${r[2]}`, c: t.text },
+    { k: 'Method', v: r[1], c: t.text },
+    { k: 'Status', v: typeof r[0] === 'number' ? `${r[0]} ${STATUS_TEXT[r[0]]}` : 'Pending', c: sc, dot: true },
+    { k: 'Duration', v: typeof r[5] === 'number' ? `${r[5]} ms` : '—', c: t.text },
+    { k: 'content-type', v: r[8], c: t.str, gap: 8 },
+    { k: 'content-length', v: r[4], c: t.num },
+    { k: 'cache-control', v: 'no-store', c: t.str },
+  ].map((d) => ({ gap: 0, dot: false, ...d }));
+  const tabs = [['elements','Elements','ph ph-tree-structure'],['network','Network','ph ph-wifi-high']].map(([id, label, icon]) => ({ label, icon, bg: ui.tab === id ? t.hover : 'transparent', color: ui.tab === id ? t.text : t.muted, onClick: () => ui.setTab(id) }));
+  const netFilters = ['All','Fetch','JS','CSS','Img'].map((label, i) => ({ label, bg: i === 0 ? t.pressed : 'transparent', color: i === 0 ? t.text : t.muted }));
+  const detailTabs = ['Headers','Payload','Response','Timing'].map((label, i) => ({ label, line: i === 0 ? t.accent : 'transparent', color: i === 0 ? t.text : t.muted }));
+  const net = { tabs, isNetwork: ui.tab === 'network', isElements: ui.tab === 'elements', reqs, reqDetail, netFilters, detailTabs };
+  const rows = TREE.map(([d, disc, type, id, test, content]) => {
+    const parts = [{ s: `<${type}>`, c: t.tag }, { s: ` #${id}`, c: t.faint }];
+    if (test) parts.push({ s: ` [${test}]`, c: t.attr });
+    if (content) parts.push({ s: ` ${content}`, c: t.muted });
+    return { pad: 6 + d * 14, disc: disc === '▾' ? 'ph-fill ph-caret-down' : disc === '▸' ? 'ph-fill ph-caret-right' : '', icon: ICON[type], discColor: id === 14 ? t.accent : t.faint, bg: id === 14 ? t.rowSel : id === 21 ? t.hover : 'transparent', parts };
+  });
+  const map = { p: t.muted, k: t.key, s: t.str, n: t.num };
+  const ring = `0 0 0 2px ${t.focusRing}`;
+  const ring2 = `0 0 0 2px ${t.focusRing}`;
+  const ctl = {
+    btnStates: [
+      { label: 'rest', bg: t.raised, ring: 'none', opacity: 1 },
+      { label: 'hover', bg: `linear-gradient(${t.hover}, ${t.hover}), ${t.raised}`, ring: 'none', opacity: 1 },
+      { label: 'pressed', bg: `linear-gradient(${t.pressed}, ${t.pressed}), ${t.raised}`, ring: 'none', opacity: 1 },
+      { label: 'focus', bg: t.raised, ring: ring2, opacity: 1 },
+      { label: 'disabled', bg: t.raised, ring: 'none', opacity: 0.45 },
+    ],
+    checks: [
+      { label: 'Wrap lines', bg: t.field, border: t.borderStrong, icon: '', ring: 'none', opacity: 1 },
+      { label: 'Show gutter', bg: t.accent, border: t.accent, icon: 'ph ph-check', ring: 'none', opacity: 1 },
+      { label: 'Focused', bg: t.field, border: t.accent, icon: '', ring: ring2, opacity: 1 },
+      { label: 'Disabled', bg: t.accent, border: t.accent, icon: 'ph ph-check', ring: 'none', opacity: 0.45 },
+    ],
+    radios: [
+      { label: 'Unified', border: t.accent, dot: t.accent },
+      { label: 'Split', border: t.borderStrong, dot: 'transparent' },
+    ],
+    selectItems: [
+      { label: 'Rust', bg: t.hover, color: t.text, icon: '' },
+      { label: 'TypeScript', bg: 'transparent', color: t.text, icon: 'ph ph-check' },
+      { label: 'Lua', bg: 'transparent', color: t.text, icon: '' },
+      { label: 'Python', bg: 'transparent', color: t.faint, icon: '' },
+    ],
+    comboItems: [
+      { match: 'ma', rest: 'in.rs', icon: 'ph ph-file-code', bg: t.hover },
+      { match: 'ma', rest: 'rkdown.rs', icon: 'ph ph-file-code', bg: 'transparent' },
+      { match: 'ma', rest: 'nifest.json', icon: 'ph ph-file', bg: 'transparent' },
+    ],
+  };
+  return {
+    ...ctl, ...net,
+    name, t: { ...t, pickWash: t.accent.replace(')', ' / 0.12)'), pickBg: t.accent.replace(')', ' / 0.16)') },
+    stripes: `repeating-linear-gradient(135deg, ${t.hover} 0 6px, transparent 6px 12px)`,
+    rows, json: JL.map((l) => l.map(([s, k]) => ({ s, c: map[k] }))),
+    inputs: [
+      { label: 'default', pre: 'Filter elements', sel: '', color: t.faint, border: t.borderStrong, ring: 'none', caret: 'transparent' },
+      { label: 'hover', pre: 'Filter elements', sel: '', color: t.faint, border: t.thumbHover, ring: 'none', caret: 'transparent' },
+      { label: 'focus', pre: 'row-', sel: '', color: t.text, border: t.accent, ring, caret: t.accent },
+      { label: 'selection', pre: 'div ', sel: '#14', color: t.text, border: t.accent, ring, caret: t.accent },
+    ],
+    bars: [{ label: 'rest', top: 6, track: 'transparent', thumb: t.thumb }, { label: 'hover', top: 24, track: t.hover, thumb: t.thumbHover }, { label: 'drag', top: 42, track: t.hover, thumb: t.thumbActive }],
+  };
+}
+const row = (n, k, use, isNew = false) => ({ n, dark: D[k], light: L[k], use, isNew });
+const GROUPS = [
+  { title: 'Surfaces & text', rows: [
+    row('bg', 'bg', 'Code and diff bodies, app background under the dock'),
+    row('surface', 'surface', 'Inspector dock, field strips', true),
+    row('raised', 'raised', 'Menus, select/combobox content, tooltip, dialog (Lua #27272a)', true),
+    row('field', 'field', 'Input, select trigger, checkbox (Lua #18181b)', true),
+    row('border', 'border', 'Hairlines and dock divider'),
+    row('borderStrong', 'borderStrong', 'Control outlines, menu edge (Lua #52525b, #71717a)', true),
+    row('text', 'text', 'Primary text, variables'),
+    row('textMuted', 'muted', 'Labels, icons, JSON punctuation'),
+    row('textDim', 'dim', 'Diff file paths'),
+    row('textFaint', 'faint', 'Placeholders, gutters, element ids'),
+  ]},
+  { title: 'Accent & interaction', rows: [
+    row('accent', 'accent', 'Pick highlight, focus border, expanded caret'),
+    row('onAccent', 'onAccent', 'Text on a solid accent label', true),
+    row('caret', 'accent', 'Input caret'),
+    row('selection', 'sel', 'Text selection wash (replaces the hardcoded 0x7c86ff59)', true),
+    row('focusRing', 'focusRing', '2px ring on focused controls (replaces util.focus_ring #60a5fa)', true),
+    row('rowSelected', 'rowSel', 'Selected tree row (replaces the hardcoded 0x164e63)', true),
+    row('rowHover', 'hover', 'Hovered/highlighted row and menu item, button hover', true),
+    row('danger', 'danger', 'Destructive buttons, invalid input border, error text, 4xx/5xx requests', true),
+    row('onDanger', 'onDanger', 'Text and icons on a solid danger fill', true),
+    row('dangerWash', 'dangerWash', 'Destructive menu item hover, error banner', true),
+    row('rowPressed', 'pressed', 'Pressed button, active dock button (Lua #3f3f46)', true),
+    row('backdrop', 'backdrop', 'Dialog.Backdrop dim', true),
+    row('shadow', 'shadow', 'Menus, tooltips, dialog popup', true),
+    row('scrollbarThumb', 'thumb', 'Default thumb when no scrollbarColor is set', true),
+    row('scrollbarThumbHover', 'thumbHover', 'Thumb under the pointer', true),
+    row('scrollbarThumbActive', 'thumbActive', 'Thumb while dragging', true),
+  ]},
+  { title: 'Code & diff', rows: [
+    row('codeText', 'codeText', 'Inline code text'),
+    row('codeWash', 'codeWash', 'Inline code background'),
+    row('diffAdd', 'add', 'Added lines, 2xx network status'),
+    row('diffDel', 'del', 'Deleted lines'),
+    row('diffHunkBg', 'hunk', 'Hunk header wash, now cool-tinted'),
+    row('syntax.keyword', 'keyword', 'Keywords, functions; stays indigo'),
+    row('syntax.string', 'str', 'Strings, constants'),
+    row('syntax.number', 'num', 'Numbers, types, properties'),
+    row('syntax.tag', 'pink', 'Tags, macros, escapes'),
+    row('syntax.comment', 'comment', 'Comments'),
+  ]},
+];
+const METRICS = [['inspectorHeight','280'],['inspectorRowHeight','22'],['inspectorTextSize','12'],['inspectorPadding','8'],['inspectorIndent','14'],['inspectorIconSize','14'],['scrollbarWidth','6'],['scrollbarMinThumb','20'],['inputHeight','26'],['inputRadius','6'],['menuRadius','6'],['menuItemHeight','24']].map(([n, v]) => ({ n, v }));
+class Component extends DCLogic {
+  state = { tab: 'network', sel: 3 };
+  renderVals() {
+    const ui = { ...this.state, setTab: (tab) => this.setState({ tab }), setSel: (sel) => this.setState({ sel }) };
+    return { modes: [mode('Dark · Theme::dark()', D, ui), mode('Light · Theme::light()', L, ui)], groups: GROUPS, metrics: METRICS };
+  }
+}
+</script>
+</body>
+</html>

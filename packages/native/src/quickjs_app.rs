@@ -86,14 +86,22 @@ pub fn run_js_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), St
             init_app(&app_name, cx);
             if options.watch {
                 crate::automation::enable_inspector();
+                crate::network::install(cx);
             }
             if let Some(server) = dev_server {
                 server.attach(cx);
             }
             cx.on_window_closed(|_cx, native_id| crate::text::paint::remove_window(native_id))
                 .detach();
-            let reloads = options.watch.then(|| watch_sources(&path));
-            match launch(path.clone(), js, &native_options, reloads, cx) {
+            let (watcher, reloads) = if options.watch {
+                let (watcher, reloads) = reload::watch_files(js.watched_files());
+                watcher.track_restart(js.configuration_files());
+                eprintln!("gpx: watching loaded app modules, text imports and configs");
+                (Some(watcher), Some(reloads))
+            } else {
+                (None, None)
+            };
+            match launch(path.clone(), js, &native_options, reloads, watcher, cx) {
                 Ok((_window, task)) => {
                     task.detach();
                 }
@@ -118,6 +126,7 @@ pub(crate) fn launch(
     js: QuickJsRuntime,
     window_options: &WindowOptions,
     reloads: Option<UnboundedReceiver<Vec<PathBuf>>>,
+    watcher: Option<reload::FileWatch>,
     cx: &mut gpui::App,
 ) -> Result<(gpui::WindowHandle<GpuixView>, gpui::Task<()>), String> {
     let tree = Arc::new(Mutex::new(js.with_tree(std::mem::take)));
@@ -163,6 +172,7 @@ pub(crate) fn launch(
         prompt_results,
         tray_ids: std::collections::HashSet::new(),
         subscriptions,
+        watcher,
     };
     let pending = startup.into_pending();
     let task = cx.spawn(async move |cx| {
@@ -182,17 +192,38 @@ pub(crate) fn start(
     size: SizeOverride,
     mode: Mode,
 ) -> Result<(QuickJsRuntime, WindowOptions), String> {
+    start_watched(path, size, mode, None)
+}
+
+fn start_watched(
+    path: &Path,
+    size: SizeOverride,
+    mode: Mode,
+    watcher: Option<&reload::FileWatch>,
+) -> Result<(QuickJsRuntime, WindowOptions), String> {
     let options = QuickJsOptions {
         host: Box::new(TreeHost::new(size)),
         mode,
         ..QuickJsOptions::default()
     };
-    let mut js = QuickJsRuntime::load_module(path, options)?;
+    let mut js = if let Some(watcher) = watcher {
+        QuickJsRuntime::load_module_tracking(path, options, |js| {
+            watcher.track(js.watched_files());
+            watcher.track_restart(js.configuration_files());
+        })?
+    } else {
+        QuickJsRuntime::load_module(path, options)?
+    };
     for _ in 0..STARTUP_TIMER_ROUNDS {
         if js.next_timer()? != Some(Duration::ZERO) {
             break;
         }
-        js.run_timers()?;
+        let result = js.run_timers();
+        if let Some(watcher) = watcher {
+            watcher.track(js.watched_files());
+            watcher.track_restart(js.configuration_files());
+        }
+        result?;
     }
     let options = js
         .window_options()
@@ -234,6 +265,7 @@ fn event_channel() -> (EventCallback, UnboundedReceiver<EventPayload>) {
 }
 
 struct RunningApp {
+    watcher: Option<reload::FileWatch>,
     path: PathBuf,
     js: QuickJsRuntime,
     window: gpui::WindowHandle<GpuixView>,
@@ -256,6 +288,8 @@ type Reloaded = (
 /// What woke the app's task. The event is boxed: it is far larger than the
 /// other variants.
 enum Wake {
+    Reset(crate::script::test_control::ResetRequest),
+    Fetch(crate::script::http::FetchCompletion),
     Tray(Option<u64>),
     Event(Option<Box<EventPayload>>),
     PathPrompt(Option<(u64, PathPromptResult)>),
@@ -279,7 +313,26 @@ impl RunningApp {
         let mut tray_events = Some(tray_events);
         self.replay(pending);
         self.apply_tray_commands(cx);
+        let mut resets = cx.update(crate::script::test_control::install);
+        let (fetch_sender, mut fetch_results) = futures::channel::mpsc::unbounded();
         loop {
+            if let Some(watcher) = &self.watcher {
+                watcher.track(self.js.watched_files());
+                watcher.track_restart(self.js.configuration_files());
+            }
+            for request in self.js.take_fetch_requests() {
+                let sender = fetch_sender.clone();
+                let client = cx.update(|cx| cx.http_client());
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Some(completion) =
+                            crate::script::http::execute(request, client).await
+                        {
+                            let _ = sender.unbounded_send(completion);
+                        }
+                    })
+                    .detach();
+            }
             let timer = match self.js.next_timer() {
                 // GPUI's timer is ready at once for no delay, and an app that
                 // keeps queuing zero-delay timers would then never let GPUI
@@ -311,6 +364,8 @@ impl RunningApp {
                     }
                 };
                 futures::select_biased! {
+                    request = resets.next() => Wake::Reset(request.unwrap()),
+                    completion = fetch_results.next() => Wake::Fetch(completion.unwrap()),
                     action = tray_action.fuse() => Wake::Tray(action),
                     event = events.next() => Wake::Event(event.map(Box::new)),
                     prompt = prompts.next() => Wake::PathPrompt(prompt),
@@ -319,6 +374,29 @@ impl RunningApp {
                 }
             };
             match wake {
+                Wake::Reset(request) => {
+                    let started = std::time::Instant::now();
+                    let result = match self.reload(cx) {
+                        Some((new_events, new_prompts)) => {
+                            events = new_events;
+                            prompts = new_prompts;
+                            self.apply_tray_commands(cx);
+                            cx.update(crate::script::test_control::paint)
+                                .map(|mut value| {
+                                    value["durationMs"] =
+                                        serde_json::json!(started.elapsed().as_secs_f64() * 1000.0);
+                                    value
+                                })
+                        }
+                        None => Err("application reset failed; see application log".into()),
+                    };
+                    request.finish(result);
+                }
+                Wake::Fetch(completion) => {
+                    if let Err(error) = self.js.settle_fetch(completion) {
+                        eprintln!("gpx: {error}");
+                    }
+                }
                 Wake::Tray(Some(action)) => {
                     if let Err(error) = self.js.dispatch_tray_action(action) {
                         eprintln!("gpx: {error}");
@@ -338,7 +416,9 @@ impl RunningApp {
                 Wake::PathPrompt(None) => {}
                 Wake::Timer => self.run_timers(),
                 Wake::SourceChange(Some(changed)) => {
-                    if !self.tray_ids.is_empty() || self.hot_update(&changed) {
+                    if self.js.configuration_changed(&changed)
+                        || self.watcher.as_ref().is_some_and(|watcher| watcher.requires_restart(&changed))
+                        || !self.tray_ids.is_empty() || self.hot_update(&changed) {
                         if let Some((reloaded_events, reloaded_prompts)) = self.reload(cx) {
                             events = reloaded_events;
                             prompts = reloaded_prompts;
@@ -518,7 +598,7 @@ impl RunningApp {
                 }
             })
             .unwrap_or_default();
-        let js = match start(&self.path, size, self.js.mode()) {
+        let js = match start_watched(&self.path, size, self.js.mode(), self.watcher.as_ref()) {
             Ok((js, _window_options)) => js,
             Err(error) => {
                 eprintln!("gpx: reload failed: {error}");
@@ -591,10 +671,6 @@ fn yield_now() -> impl std::future::Future<Output = ()> {
             std::task::Poll::Pending
         }
     })
-}
-
-fn watch_sources(entry: &Path) -> UnboundedReceiver<Vec<PathBuf>> {
-    reload::watch_sources(entry, is_js_source, "gpx")
 }
 
 #[cfg(test)]
@@ -697,7 +773,7 @@ mod tests {
             let (js, options) = start(&app.0, SizeOverride::default(), mode).unwrap();
             let (reload, reloads) = futures::channel::mpsc::unbounded();
             let (window, task) = cx
-                .update(|cx| launch(app.0.clone(), js, &options, Some(reloads), cx))
+                .update(|cx| launch(app.0.clone(), js, &options, Some(reloads), None, cx))
                 .unwrap();
             Self {
                 cx,
@@ -878,6 +954,39 @@ mod tests {
     }
 
     #[test]
+    fn fetch_completions_update_the_running_react_app() {
+        let app = App::new(
+            "main.tsx",
+            r#"
+            import { render } from '@gpuix/react';
+            import { useState } from 'react';
+            function App() {
+                const [value, setValue] = useState('Idle');
+                return <div testId="load" onClick={async () => {
+                    const response = await fetch('https://example.com/value');
+                    setValue((await response.json()).message);
+                }}><text testId="result">{value}</text></div>;
+            }
+            render(<App />, { focus: false });
+        "#,
+        );
+        let mut launched = Launched::new(&app);
+        launched.cx.update(|cx| {
+            cx.set_http_client(gpui::http_client::FakeHttpClient::create(|_| async {
+                Ok(gpui::http_client::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(gpui::http_client::AsyncBody::from(
+                        r#"{"message":"Fetched"}"#,
+                    ))
+                    .unwrap())
+            }));
+        });
+        launched.click("load");
+        assert_eq!(launched.text("result"), "Fetched");
+    }
+
+    #[test]
     fn events_and_timers_reach_the_running_app() {
         let app = App::new("main.tsx", &counter("Count"));
         let mut launched = Launched::new(&app);
@@ -947,6 +1056,33 @@ mod tests {
         assert_eq!(launched.text("count"), "Count 0");
         launched.click("button");
         assert_eq!(launched.text("count"), "Count 1");
+    }
+
+    #[test]
+    fn a_config_change_restarts_the_interpreter_and_invalid_config_can_recover() {
+        let app = App::new("main.tsx", COMPONENT_ENTRY);
+        app.write_file("counter.tsx", &component("Count"));
+        app.write_file("tsconfig.json", r#"{"compilerOptions":{"jsxImportSource":"@gpuix/react"}}"#);
+        let mut launched = Launched::in_mode(&app, Mode::Development);
+        launched.click("button");
+        app.write_file("tsconfig.json", "invalid json");
+        launched.changed(&["tsconfig.json"]);
+        assert_eq!(launched.text("count"), "Count 1");
+        app.write_file("tsconfig.json", r#"{"compilerOptions":{"jsxImportSource":"@gpuix/react"},"strict":true}"#);
+        launched.changed(&["tsconfig.json"]);
+        assert_eq!(launched.text("count"), "Count 0");
+    }
+
+    #[test]
+    fn a_failed_restart_keeps_new_missing_extended_configs_watched() {
+        let app = App::new("main.tsx", &counter("Count"));
+        app.write_file("tsconfig.json", r#"{"extends":"./base.json"}"#);
+        let (watcher, _receiver) = reload::watch_files([]);
+        assert!(start_watched(&app.0, SizeOverride::default(), Mode::Development, Some(&watcher)).is_err());
+        app.write_file("base.json", r#"{"compilerOptions":{"jsxImportSource":"@gpuix/react"}}"#);
+        let config = std::fs::canonicalize(app.0.parent().unwrap().join("base.json")).unwrap();
+        assert!(watcher.requires_restart(&[config]));
+        assert!(start_watched(&app.0, SizeOverride::default(), Mode::Development, Some(&watcher)).is_ok());
     }
 
     #[test]

@@ -86,12 +86,17 @@ mod macos {
     #[derive(Default)]
     struct Trays(HashMap<u64, Entry>);
     impl Global for Trays {}
+    struct Dispatcher(Rc<dyn Fn(u64)>);
+    impl Global for Dispatcher {}
 
     pub(super) fn init(callback: impl Fn(u64) + 'static, cx: &mut App) {
+        cx.set_global(Dispatcher(Rc::new(callback)));
+        if cx.try_global::<Trays>().is_some() {
+            return;
+        }
         cx.set_global(Trays::default());
-        let callback = Rc::new(callback);
         cx.on_action(move |event: &Invoke, cx| {
-            let callback = callback.clone();
+            let callback = cx.global::<Dispatcher>().0.clone();
             let action = event.action;
             cx.defer(move |_| callback(action));
         });
@@ -108,6 +113,18 @@ mod macos {
             async {}
         })
         .detach();
+    }
+
+    pub(super) fn clear(cx: &mut App) {
+        let trays = cx
+            .global_mut::<Trays>()
+            .0
+            .drain()
+            .map(|(_, entry)| entry.tray)
+            .collect::<Vec<_>>();
+        for tray in trays {
+            let _ = tray.close(cx);
+        }
     }
 
     fn menu(items: &[TrayItem]) -> Vec<MenuItem> {
@@ -190,6 +207,13 @@ mod macos {
 pub(crate) fn finish(cx: &mut gpui::App) {
     #[cfg(target_os = "macos")]
     macos::finish(cx);
+    #[cfg(not(target_os = "macos"))]
+    let _ = cx;
+}
+
+pub(crate) fn clear(cx: &mut gpui::App) {
+    #[cfg(target_os = "macos")]
+    macos::clear(cx);
     #[cfg(not(target_os = "macos"))]
     let _ = cx;
 }

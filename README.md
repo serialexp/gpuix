@@ -3036,6 +3036,52 @@ strikethrough, task lists, and autolinked bare URLs.
 
 All three take the same optional `theme` prop. Every field layers on top of the
 built-in dark theme, so overriding one token leaves the rest alone.
+The default palette is now **Comet, tidied**: cool neutral surfaces, an emerald
+interaction accent, and restrained syntax colours. The native inspector and
+bundled Lua controls use this same palette, rather than independent hardcoded
+colours. JavaScript React/Solid controls remain headless; these tokens do not
+force a skin onto application-defined styles.
+
+Shared optional `GpuixTheme` colour tokens are `surface`, `raised`, `field`,
+`borderStrong`, `onAccent`, `selection`, `focusRing`, `rowSelected`, `rowHover`,
+`rowPressed`, `danger`, `onDanger`, `dangerWash`, `backdrop`, `shadow`,
+`scrollbarThumb`, `scrollbarThumbHover`, and `scrollbarThumbActive`, in addition
+to the existing background, text, accent and syntax tokens. Inputs use
+`selection` for their text-selection wash. Scrollbar colours remain available
+for explicit `scrollbarColor` styling; native scrollers retain their existing
+opt-in scrollbar behavior.
+
+In Lua/LuaX, `gpuix.theme(overrides)` returns a complete palette and metrics
+table; omit the argument for dark defaults or pass `{ appearance = "light" }`.
+Overrides follow the same schema as the native `theme` prop. This is a snapshot,
+not a global setter: construct it outside a render, then pass it to controls
+through their optional `theme` prop. It works with both Lua rendering models.
+The `Button`, `Checkbox`, `RadioGroup`, `Select`, `Combobox`, `Tooltip`, `Drawer`,
+`DockLayout` and `Icon` modules accept that palette. Existing style props still
+take precedence. Button, indicator and menu states now have consistent colour,
+focus and disabled treatments; a custom style still owns its own presentation.
+
+```lua
+local palette = gpuix.theme({ appearance = "light", metrics = { inputHeight = 30 } })
+local Button = require("gpuix.solid.button")
+local Checkbox = require("gpuix.solid.checkbox")
+
+<Button theme={palette}><text>Run</text></Button>
+<Checkbox theme={palette} defaultChecked label="Enabled" />
+```
+
+The returned table includes resolved CSS colour strings, `fontSans`, `fontMono`,
+`syntax`, `metrics`, `appearance`, and the composited `buttonHover` and
+`buttonPressed` colours. Use it for application chrome as well as controls.
+Passing the same palette as the root host element's `theme` prop makes the
+native inspector follow that window's appearance and overrides. There is no
+implicit component theme context or automatic live palette replacement.
+
+Shared control metrics and defaults are `inputHeight: 26`, `inputRadius: 6`,
+`menuRadius: 6`, `menuItemHeight: 24`, `controlGap: 8`, `controlPadding: 8`,
+`controlIndicatorSize: 18`, `controlDotSize: 8`, and `controlRingWidth: 2`.
+`scrollbarWidth: 6` and `scrollbarMinThumb: 20` are also exported for explicit
+scrollbar styling. All are optional `theme.metrics` overrides.
 
 ```tsx
 <code
@@ -3693,6 +3739,251 @@ like in a browser.
 
 ## Automation
 
+### Declarative UI scenarios
+
+Suites run multiple cases in one native process. Between cases, `gpx` destroys
+the Lua or QuickJS interpreter and creates a fresh interpreter and application
+tree, while reusing the native host and existing startup windows. Hooks, stores,
+module globals, timers and callbacks do not carry over. Old Lua events and HTTP
+completions are generation-fenced; pending requests are cancelled when the old
+interpreter is dropped. A fresh tree is painted before the next case starts.
+Window positions and sizes are retained; windows opened only by the previous
+case are closed. This is not a rollback of filesystem changes, remote services,
+or native diagnostic history.
+
+```sh
+gpx test examples/scenarios/counter-suite.json --output test-results/counter
+gpx test examples/scenarios/counter-suite.json --ui
+```
+
+This runs only the selected suite, not every test in the repository. The bundled
+`counter-suite.json` exercises Lua's Solid-like runtime. For real JavaScript
+frameworks running in embedded QuickJS, use:
+
+```sh
+gpx test examples/scenarios/react-counter-suite.json --ui
+gpx test examples/scenarios/solid-counter-suite.json --ui
+```
+
+Each suite covers mouse activation, keyboard activation and state reset between
+cases. The React and Solid counter fixtures explicitly style their background,
+text and button surface; the shared Button primitives are headless and do not
+supply these colors. Run all scenarios and suites in a directory with:
+
+```sh
+gpx test examples/scenarios/
+gpx test examples/scenarios/ --ui
+```
+
+Discovery is recursive, sorted by file path, and includes JSON documents with
+an `app` and `tests` or `steps`. Other valid JSON (such as `tsconfig.json`) is
+ignored. Invalid JSON or invalid scenarios abort before any app starts. Symlinks
+and `.git`, `node_modules`, `target`, and `test-results` directories are skipped.
+An empty directory is an error. A run supports up to 10000 cases total. Relative
+app paths remain relative to each discovered file. Each file gets one native
+app process, reused between its cases; different files run sequentially. App
+startup/reset failures do not stop other files. Directory output contains
+`suite-001/`, `suite-002/`, etc. plus combined root HTML/JSON reports; cases
+include a `suite` name and a relative artifact `directory`. These commands do
+not discover Rust unit tests or Bun/Node adapter tests.
+
+The suite schema uses the same `schemaVersion`, `name`, `app` and `timeoutMs`
+fields as a scenario, with `tests` instead of `steps`. Each test has a `name`,
+`steps`, and optional `timeoutMs`. Suite and test names are nonempty, contain no
+control characters, and are at most 1024 bytes. App paths are relative to the suite file.
+`examples/scenarios/counter-suite.json` is a complete example. Cases run in order;
+an assertion failure skips the remaining steps in that case but does not stop
+later cases. A startup/reset failure fails the remaining cases rather than
+running them with untrusted state. Reports include per-case reset durations,
+separate case artifact directories, and combined HTML/JSON summaries. The suite
+JSON separates `startupDurationMs` (launch to dev-server readiness), total
+`durationMs`, each case's `resetDurationMs` (null for the first case), and the
+case's execution `durationMs` (excluding reset).
+
+`--ui` opens and activates one separate native Test Results window listing
+pending/running/passed/failed cases, durations and failure messages.
+It follows the imported Comet test-runner design: a summary toolbar, tests
+grouped by source file on the left, numbered steps and duration bars in the
+middle, and action arguments, expected/received failures and evidence on the
+right. List rows fill their columns; long titles and step descriptions stay
+on one line and truncate with an ellipsis, keeping status and durations visible.
+The pass/fail counts sit beside the suite title: passed text is muted with a
+green dot; failures use danger text and a danger dot (faint text and a neutral
+dot when there are no failures).
+Tests are indented beneath their source files. Step rows have a fixed,
+right-aligned number gutter before the status icon and action text.
+The filter matches test names and source paths; Cmd-F / Ctrl-F focuses
+it. Click a list to focus
+navigation: up/down selects steps and left/right selects tests. Snapshot/Tree
+switches between the saved app image and retained JSON (tree previews are
+limited to 256 KiB; full files remain in the artifacts). Screenshots mark the
+target element when its test ID and saved bounds are available. `Run all`
+starts a new run; `Rerun failed` executes only failed cases and preserves the
+last results of passed cases. These buttons are unavailable while running.
+Click a test to see its steps, then click a step to see its
+action, status, duration, errors and screenshot. A failing step is selected by
+default. With `--ui`, every executed step captures a screenshot immediately
+after its action or assertion; skipped steps have no screenshot. This does
+not wait for arbitrary asynchronous work—use an assertion to wait for the
+state you want to capture. Screenshots are saved in the case artifact directory
+and linked from both the native viewer and HTML reports. Capture failures fail
+the step and appear as artifact errors. Each captured image also records a tree;
+missing tree artifacts are reported without hiding the test result. Without `--ui`, capture remains limited
+to failed steps and explicit `screenshot` actions. The results window survives
+interpreter resets and is excluded from application trees, window selectors,
+picking and screenshots. Close this window to exit the runner after reviewing
+the results; without `--ui`, the command exits automatically for CI. A single
+scenario also accepts `--ui`, producing a one-case suite report. The results
+window is brought to the foreground only when first created, not on progress
+updates or interpreter resets. Add `--background` alongside `--ui` to keep the
+viewer non-activating too; `--background` without `--ui` is rejected because
+test apps already launch without activation. The application under test still launches in
+the background. The viewer has its own native process, shared across the entire
+directory run. App startup failures and crashes therefore leave the viewer
+available; closing it ends the runner. No viewer process is launched without
+`--ui`.
+
+Test-runner layout defaults are on `Theme.metrics` / `GpuixMetrics`:
+`testToolbarHeight: 40`, `testSectionHeight: 28`, `testRowHeight: 28`,
+`testStepHeight: 30`, `testFooterHeight: 22`, `testTestsWidth: 264`,
+`testStepsWidth: 360`, `testArgumentWidth: 72`, `testWindowWidth: 1240`,
+`testWindowHeight: 780`, `testPadding: 14`, `testDurationWidth: 44`,
+`testDurationBarWidth: 40`, `testStatusDotSize: 6`, `testFilePadding: 10`,
+`testCaseIndent: 16`, `testStepPadding: 12`, and `testStepNumberWidth: 16`.
+The standalone viewer uses the default theme.
+
+The authenticated development RPC additionally accepts `{ "method": "reset" }`
+and returns `{ "windows": [...], "durationMs": ... }` after a full interpreter
+reset and paint. `{ "method": "testReport", "name": "Suite", "cases": [...] }`
+creates or updates the native results window. Case updates contain `index`
+(0–9999), `name`, `status` (`pending`, `running`, `passed`, `failed`, `skipped`),
+optional `durationMs`, `suite` (source group), nullable `error`, and optional `reportPath`: an absolute
+path to the case's `report.json`, loaded by the native host for step evidence.
+Reports are limited to 16 MiB and 10000 steps; screenshot and tree paths must be filenames
+within the report directory. Screenshot files must remain available while reviewing.
+Send at most 32 updates per call;
+names are limited to 1024 bytes and errors to 4096 bytes. These debugging APIs
+are available only when the authenticated development server is enabled.
+`{ "method": "testCommands" }` drains the viewer's queued `"all"` / `"failed"`
+rerun requests; the runner polls it after a run completes.
+`{ "method": "testRun", "failedOnly": false }` queues the same request as
+Run all; set `failedOnly: true` for Rerun failed. It rejects requests while
+tests are pending/running or another run is queued, and failed-only requests
+when nothing failed. These control calls target the viewer's own authenticated
+endpoint (its logs are in the output's `viewer/` directory), not an app under test.
+Step reports may
+include `snapshot` metadata (image `width`, `height`, `scaleFactor`, target
+`testId` and bounds, and expected/received assertion values) for the evidence
+viewer. Screenshot, tree and bounds collection do not freeze asynchronous app
+updates; use explicit assertions when a settled state is required.
+
+#### Measuring interpreter reset costs
+
+`gpx bench-reset APP [--iterations COUNT]` (default 20, range 1–1000) is a
+measurement harness, not a scenario reset API. It creates one non-activating
+native window, then repeatedly destroys the interpreter, loads the entry into
+a fresh interpreter, reconstructs its retained tree, replaces the GPUI root,
+and builds a fresh frame in that same window. JSON output separates runtime
+load/evaluation, Lua mount, old-runtime disposal, root replacement, and CPU
+layout/paint scene construction. JavaScript's load measurement includes its
+initial reconciler commit. Native window/device/font initialization is retained
+across iterations. Source and framework modules are reloaded, not snapshotted.
+
+For several fresh launches and median/p95 statistics, run
+`bun scripts/bench-reset.ts examples/solid-counter.luax examples/counter.tsx`.
+`LAUNCHES` (default 5), `ITERATIONS` (default 20), and `GPX` (release binary
+path) configure the driver. It measures external process launch to first scene
+construction via a stderr marker and writes raw samples to
+`packages/react/screenshots/reset-bench/results.json`.
+
+Only the first initially open window is measured. This harness does not attach
+the app's normal event/HTTP/tray loop or wait for asynchronous application
+work, image downloads, GPU completion or display presentation. Immediate
+JavaScript startup timers run as in the normal launcher. This estimates the
+cost of a full interpreter/tree reset with warm native resources; it does not
+yet implement complete test-suite isolation or measure end-to-end assertions.
+See [measured results and methodology](docs/reset-benchmark.md) for the current
+Lua counter/workspace and embedded React measurements.
+
+#### Running scenarios
+
+`gpx test scenario.json` launches an embedded Lua/LuaX or JavaScript/TypeScript
+app in the background, runs ordered steps through the existing debug API, and
+exits with status 0 for success or 1 for failure. It needs no Bun/Node launcher
+or additional test service. Windows still render normally: this is a
+non-activating desktop test, not a headless renderer. Use a release `gpx`
+build, with `test-support` enabled for screenshots (the default).
+
+```sh
+gpx test examples/scenarios/counter.json
+gpx test examples/scenarios/counter.json --output test-results/counter
+```
+
+```json
+{
+  "schemaVersion": 1,
+  "name": "Increment counter",
+  "app": "../solid-counter.luax",
+  "timeoutMs": 5000,
+  "steps": [
+    { "action": "expectText", "testId": "solid-counter", "text": "Count: 0" },
+    { "action": "click", "testId": "solid-counter" },
+    { "action": "expectText", "testId": "solid-counter", "text": "Count: 1" },
+    { "action": "screenshot", "name": "Updated counter" }
+  ]
+}
+```
+
+`schemaVersion` must be 1. Unknown fields and action names are rejected.
+`app` is an entry file resolved relative to the scenario JSON. Each invocation starts
+one fresh process (reused between suite cases) and closes it afterward, including
+after failures, or when the results window is closed with `--ui`. The first
+open window is selected initially. The runner generates its own random debug
+token and never includes it in reports. The app's usual external side effects
+are real; scenarios do not sandbox the app or mock network requests.
+
+Supported actions:
+
+| Action | Fields and behavior |
+| --- | --- |
+| `click` | `testId`: waits for exactly one enabled node with positive painted bounds, then clicks its center once |
+| `press` | `keys`: native key sequence, e.g. `tab enter` or `cmd-a`; targets the selected window's current focus |
+| `expectText` | `testId`, `text`, optional `exact` (default false): concatenated retained descendant text must contain/match the expected string |
+| `expectVisible` | `testId`: exactly one mounted node must have positive painted bounds; does not prove it is unobscured |
+| `expectAbsent` | `testId`: no matching node may remain mounted |
+| `expectProp` | `testId`, `prop`, `value`: exact JSON equality against a retained custom prop, e.g. input `value`; not computed styles |
+| `window` | `index`: select a zero-based entry in the debug API's current open-window list, waiting for it to exist |
+| `screenshot` | Capture the selected window; optional `name` labels the report step |
+
+Every step accepts an optional `name` and `timeoutMs`. The default timeout
+is 5000 ms, configurable at scenario level; values must be 1–300000 ms.
+Initial process startup is allowed at least 10 seconds, separately from step deadlines.
+Assertions and click prerequisites retry every 50 ms until their deadline.
+`press` emits a key-down/key-up pair for each key, allowing controls that
+activate on key release to work while preserving GPUI's text-input handling.
+Clicks and key sequences are sent only once, never replayed on assertion
+failure. Duplicate test IDs are errors, not first-match selectors. Assertions
+inspect retained host nodes rather than framework component functions or
+native inspector chrome. Text produced internally by native markdown/code
+elements is not retained descendant text. This first runner does not provide
+arbitrary evaluation, text filling, dragging, scrolling or image comparison.
+
+The runner stops the current case at the first failed step and marks its later steps
+skipped. It writes `report.json` and an offline-viewable `report.html` linking
+local screenshots, plus `app.stdout.log` and `app.stderr.log`. Failure artifacts
+include a screenshot and a detailed retained tree when the app is still
+reachable; capture failures are reported without hiding the original error.
+An explicit screenshot step fails if capture fails. Setup failures are recorded
+in the report too. Invalid scenario files are rejected before launch.
+
+By default results go into a unique `test-results/run-...` (single scenario) or
+`test-results/suite-...` directory relative
+to the command's working directory. `--output DIRECTORY` selects an explicit
+location and replaces its reports/logs. Screenshots use step-number filenames.
+Reports, logs and trees may contain application data and credentials; treat
+these local artifacts accordingly. In CI, use a runner with the desktop/GPU
+environment GPUI normally needs and upload the results directory even on failure.
+
 ### Embedded development API
 
 `gpx --dev-server PORT app.luax` (also `.tsx`, `.lua`, and the other supported
@@ -3801,10 +4092,13 @@ above the dock; opening or closing it does not remount components or change
 their state. Each native window has its own inspector selection and expansion
 state, even when the application shares a store across windows.
 
-**Pick element** lets you click the running application to inspect another node
-without activating it; click **Cancel picking** or press Escape to cancel.
+The cursor icon at the left of the toolbar lets you click the running application
+to inspect another node without activating it; click it again or press Escape to cancel.
+The Elements tab sits beside it, and the close icon sits at the far right.
+Inspector chrome and its context menu are excluded from picking, including API
+point queries; they never select application elements underneath them.
 The selected painted element has a non-interactive outline while the dock is
-open. **Close inspector** restores the application area. Toggle the dock with
+open. The close icon restores the application area. Toggle the dock with
 `cmd-alt-i` on macOS or `ctrl-shift-i` on Windows/Linux. Selecting a node reveals
 and scrolls to its tree row. Removed selections are cleared; host IDs and
 expansion state are not guaranteed to survive hot reload.
@@ -3814,12 +4108,56 @@ Inspector layout follows `theme.metrics`, using these optional overrides:
 | Metric | Default | Meaning |
 | --- | --- | --- |
 | `inspectorHeight` | 280 | Dock height in logical pixels, capped at half the window height |
-| `inspectorRowHeight` | 24 | Tree row height |
+| `inspectorRowHeight` | 22 | Tree row height |
 | `inspectorTextSize` | 12 | Inspector text size |
 | `inspectorPadding` | 8 | Panel/header/menu padding |
 | `inspectorIndent` | 14 | Tree indentation per depth |
+| `inspectorIconSize` | 14 | Toolbar and element-type icon size |
 
-This is a read-only **host-element** inspector, not a framework component/hook
+#### Network tab
+
+The native inspector's **Network** tab records requests made through GPUI's
+shared HTTP client in development launches (`--watch` or `--dev-server`). This
+includes Lua's `gpuix.fetch`, embedded JavaScript's global `fetch`, and native
+HTTP(S) images. It does **not** intercept
+Bun/Node `fetch`, third-party Lua networking, subprocess traffic, or every
+connection made by the application. Loading embedded JavaScript modules from
+disk does not create network requests. Production launches do not install the
+recorder.
+
+The toolbar pauses/resumes recording of new requests, clears history, filters
+by URL/method/status (up to 256 filter characters), and selects All/Fetch/JS/CSS/Img categories. Categories
+come from the response content type, with unknown/pending requests in Fetch.
+The table shows status, method, URL, consumed response bytes, elapsed time and
+a relative waterfall. Select a row for **Headers**, **Payload**, **Response**
+or **Timing**. HTTP error responses remain normal responses; transport errors,
+cancelled requests and bodies dropped before EOF are marked separately.
+Timing reports observed headers/body/total durations, not DNS/TLS phases or
+per-redirect timings. Body duration includes time the consumer spends reading.
+
+Recording is application-wide, while tab/filter/selection state belongs to each
+window. Requests made before opening the dock are included. Pausing skips new
+requests but lets existing records finish. Clearing removes even pending records;
+their later completion does not put them back. History is bounded to 256 requests,
+with at most 16 KiB each of request/response headers and body previews per request.
+The recorder observes streams; it does not eagerly buffer them or change callbacks.
+
+Requests are not redacted: URLs (including queries), headers (including
+authorization, cookies, redirect locations and referrers), and body previews
+show the captured values. Valid complete JSON is pretty-printed; forms,
+invalid/truncated JSON and untyped UTF-8 bodies are shown as text. Non-UTF-8
+binary bodies show their byte count instead. Existing capture limits still
+apply, including a 2,048-character URL limit. This is a local development tool:
+screenshots can contain credentials and other sensitive data. Nothing is persisted.
+
+Network layout also accepts `theme.metrics` overrides: `inspectorNetworkColumns`
+is `[status, method, size, time, waterfall]` (defaults `[36, 44, 44, 44, 56]`);
+Name takes the remaining width. Other defaults are `inspectorNetworkToolbarHeight: 28`,
+`inspectorNetworkFilterWidth: 96`, `inspectorNetworkDetailLabelWidth: 84`,
+`inspectorNetworkTextSize: 11`, `inspectorNetworkListFraction: 0.63` (clamped to
+0.2–0.8), and `inspectorNetworkDetailRowHeight: 19`.
+
+The Elements tab is a read-only **host-element** inspector, not a framework component/hook
 debugger. Native widget internals remain one host node. It does not edit
 styles/state, resolve source locations, or profile rendering. Inspector chrome
 is outside the application's retained tree and cannot inspect itself.
@@ -4221,6 +4559,62 @@ The test renderer uses `VisualTestAppContext` with a `TestDispatcher` for determ
 
 ## Experimental embedded JavaScript runtime
 
+### Error locations
+
+Embedded React and Solid errors map compiled TypeScript/JSX lines and columns
+back to the source files. Hot updates keep plain, editor-clickable filenames
+in stacks and `Error.prepareStackTrace` call sites, without internal `?hot=N`
+suffixes. Missing-export diagnostics retain complete module paths and export
+names, including long ones. Each loaded version keeps its own source map until
+the interpreter is disposed, because older callbacks can still execute.
+
+Solid applications running under Bun still have a source-location limitation:
+Bun 1.4.0 ignores compiler source maps returned through its runtime plugin,
+so errors can refer to generated lines. This does not affect the embedded
+`gpx` runtime. See [Bun's plugin source-map issue](https://github.com/oven-sh/bun/issues/6173).
+
+### HTTP requests
+
+Embedded JavaScript provides a promise-based global `fetch` using the same
+native HTTP/TLS client as Lua and GPUI images. It works with React and Solid;
+development requests appear in the native inspector's Network tab. Try
+`gpx --watch examples/fetch.tsx`, then click **Look up public IPv4**.
+The same example runs under Bun/Node using that runtime's own fetch, but those
+requests are not captured by the native inspector.
+
+```ts
+const response = await fetch("https://api.ipify.org?format=json")
+if (!response.ok) throw new Error(`HTTP ${response.status}`)
+const { ip } = await response.json()
+```
+
+This is a buffered subset of the browser API, not a complete Web Fetch
+implementation. URLs must be absolute HTTP(S) strings without credentials.
+Options are `method`, `headers` (object, entry pairs or `Headers`), `body`
+(UTF-8 string only), `signal` (`AbortController` / `AbortSignal`), and
+`timeoutMs` (default 30000, range 1–300000, covering headers and body).
+Unknown options reject rather than silently doing nothing. GET/HEAD cannot
+have a body. Requests and responses are limited to 8 MiB, with at most 64
+pending requests. Redirects are returned, not followed; HTTP errors resolve
+normally, transport failures reject with `TypeError`, and aborts reject with
+the signal's reason (`AbortError` by default). Runtime disposal cancels pending
+requests; component cleanup should abort its own requests.
+Render the initial window before awaiting a request: queued HTTP work starts
+in the application's native event loop, not during module startup validation.
+
+Responses provide `status`, `ok`, `url`, `redirected` (false), `headers`,
+`bodyUsed`, and asynchronous `text()`, `json()`, and `arrayBuffer()` methods.
+The body can be consumed only once. Text is decoded as UTF-8 with replacement
+for invalid bytes. There are no streaming bodies, `Request`/`Response`
+constructors, multipart forms, cookie jar, browser cache, CORS enforcement or
+browser credentials handling. `Headers` supports iteration and the usual
+get/has/set/append/delete/forEach operations. Abort signals support `aborted`,
+`reason`, `throwIfAborted`, abort listeners, `onabort`, and `AbortSignal.abort`;
+they are not full DOM EventTargets. `--check` validates and queues requests
+without executing them, just like the Lua path.
+
+### Running embedded apps
+
 `gpx` runs a React or Solid app without Node or Bun. It compiles TypeScript
 and React JSX with oxc, and Solid JSX with Solid's Rust compiler, then runs
 the app in an embedded QuickJS engine and draws it with
@@ -4238,9 +4632,15 @@ The entry file's extension picks the engine: `.tsx`, `.ts`, `.mts`, `.jsx`,
 the app passes to `render()`; `--title`, `--width` and `--height` beat them.
 Without a title, the window is named after the entry file.
 
-`--watch` updates the app when a JavaScript or TypeScript file in the entry
-file's directory changes, and runs the frameworks' development builds, with
-their warnings and checks. A React app gets Fast Refresh, as under Vite: a
+`--watch` tracks the entry and imported JavaScript/TypeScript modules, text
+imports (`with { type: "text" }`), and the TypeScript/JavaScript configs
+consulted for JSX compilation, including extended configs. Imports outside
+the entry directory are included. Dynamically imported modules join the watch
+set when loaded; missing import candidates encountered during a failed update
+are watched for creation. There is no recursive scan of unrelated source files. Changes are
+content-polled every 100 ms and delivered after a stable poll.
+Watch mode runs the frameworks' development builds, with their warnings and
+checks. A React app gets Fast Refresh, as under Vite: a
 changed file that exports only components runs again and React
 swaps them in place, keeping their state, unless their hooks changed. A
 changed file that exports anything else also runs again in the files that
@@ -4254,8 +4654,11 @@ self-accepting component modules. Syntax errors are checked before disposal,
 so a failed compile leaves the mounted UI intact and the next edit can recover.
 When a change reaches the entry file, or a hot module invalidates the update,
 the app starts again in the same window with its state reset. A changed
-`tsconfig.json` still needs a restart. Neither framework hot-reloads in
-production mode.
+config automatically restarts the interpreter and resets state so JSX settings
+are re-read. This includes creating a nearer `tsconfig.json`/`jsconfig.json` or
+editing a consulted extended config. An invalid config leaves the current app
+running; fixing it triggers another restart attempt. Neither framework
+hot-reloads in production mode. Lua's directory-based watcher is unchanged.
 
 Development app modules receive `import.meta.hot` with persistent per-module
 `data`, `accept(callback?)` for self-acceptance, `dispose(callback)`, `decline()`
@@ -4276,7 +4679,8 @@ which framework its JSX compiles for, by `compilerOptions.jsxImportSource`
 `@jsxImportSource` comment isn't read. Without a config, the app is Solid if
 its entry file imports `@gpuix/solid` or `solid-js`, and React otherwise.
 Globals are the browser's basics: timers, `console`, `performance.now`,
-`queueMicrotask` and `structuredClone`, plus a read-only `process` with `env`,
+`queueMicrotask`, `structuredClone`, and the buffered HTTP/abort APIs above,
+plus a read-only `process` with `env`,
 `argv` and `platform` (no `exit`, events or streams). `import.meta.url` is the
 module's `file://` URL and `import.meta.main` is true in the entry file. An app
 can import one of its own files as a string:
@@ -4448,8 +4852,8 @@ each request and response body. Responses are buffered; streaming, uploads from
 files, automatic cookies, retries and browser CORS enforcement are not provided.
 `--check` and the synchronous Lua test renderer do not execute queued network
 requests. Applications remain trusted rather than sandboxed; network permission
-enforcement is not implemented. This is the shared transport foundation for a
-future inspector Network tab; request recording is not exposed yet.
+enforcement is not implemented. Development launches expose these requests in
+the native inspector's Network tab through the shared HTTP client.
 
 ### Mahina (formerly Lune) embedding experiment
 
@@ -4703,6 +5107,10 @@ Reversing rows preserves their visit counters; hiding/reopening activity resets
 its panel-local counter. The React-style workspace remains available via
 `just start`. This is a separate example, not an identical copy of that workspace.
 The input is controlled: sending clears both the store draft and native input.
+The **Look up public IPv4** button calls `https://api.ipify.org?format=json`
+only when clicked, showing loading, success or error feedback. Pending lookups
+are cancelled when the window's owner is disposed. Open the native inspector's
+Network tab to inspect the request.
 Header, activity-counter and inspector actions use the shared Solid Button
 component, with the same focus styling as the other workspace controls.
 Existing watch behavior applies; saving rebuilds Solid
@@ -4731,6 +5139,9 @@ Alternatively, `require("gpuix.solid.controls")` exports `Button`, `Checkbox`,
 `RadioGroup`, `Select`, `Combobox`, `Tooltip`, `Drawer` and `DockLayout`.
 These require a mounted Solid owner and use signals,
 not hooks; the original `gpuix.*` components are unchanged.
+
+Checkbox and radio indicators center their marks inside non-shrinking boxes;
+radio selection uses a geometric dot rather than a font-dependent bullet.
 
 Component props are eager in LuaX, so pass **accessors**, not accessor results,
 for reactive controlled values:

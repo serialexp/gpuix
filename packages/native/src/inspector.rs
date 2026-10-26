@@ -7,6 +7,8 @@ use crate::{renderer::GpuixView, retained_tree::RetainedTree, text::chrome_text,
 
 #[derive(Default)]
 pub(crate) struct InspectorState {
+    #[cfg(not(target_family = "wasm"))]
+    pub network: crate::inspector_network::NetworkPanel,
     pub open: bool,
     pub selected: Option<u64>,
     pub picking: bool,
@@ -17,6 +19,10 @@ pub(crate) struct InspectorState {
 
 impl InspectorState {
     fn select(&mut self, id: u64, tree: &RetainedTree) {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.network.active = false;
+        }
         self.open = true;
         self.selected = Some(id);
         self.menu = None;
@@ -50,11 +56,100 @@ impl InspectorState {
     }
 }
 
-fn label(value: impl Into<gpui::SharedString>) -> AnyElement {
+pub(crate) fn label(value: impl Into<gpui::SharedString>) -> AnyElement {
     chrome_text(value.into(), None)
 }
 
-fn action<Event: 'static>(
+pub(crate) fn icon(name: &str, theme: &Theme) -> AnyElement {
+    colored_icon(name, theme, theme.text_muted)
+}
+
+pub(crate) fn colored_icon(name: &str, theme: &Theme, color: gpui::Hsla) -> AnyElement {
+    #[cfg(any(feature = "lua54", feature = "luajit"))]
+    if let Ok(token) = crate::phosphor::token(name, "regular") {
+        if let Some(bytes) = crate::phosphor::source_from_token(&token) {
+            return gpui::svg()
+                .data(bytes)
+                .id(gpui::SharedString::from(format!(
+                    "__gpuix_inspector_icon_{name}"
+                )))
+                .size(px(theme.metrics.inspector_icon_size))
+                .flex_shrink_0()
+                .text_color(color)
+                .into_any_element();
+        }
+    }
+    gpui::div()
+        .size(px(theme.metrics.inspector_icon_size))
+        .into_any_element()
+}
+
+fn property_section(name: &str, value: &serde_json::Value, theme: &Theme) -> AnyElement {
+    let metrics = &theme.metrics;
+    let mut section = gpui::div()
+        .flex()
+        .flex_col()
+        .gap(px(metrics.inspector_padding / 2.0))
+        .pb(px(metrics.inspector_padding))
+        .mb(px(metrics.inspector_padding))
+        .border_b_1()
+        .border_color(theme.border)
+        .child(
+            gpui::div()
+                .text_color(theme.text_muted)
+                .child(label(name.to_owned())),
+        );
+    let values: Vec<(String, serde_json::Value)> = match value {
+        serde_json::Value::Object(values) => values
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        serde_json::Value::Null => Vec::new(),
+        value => vec![(String::new(), value.clone())],
+    };
+    if values.is_empty() {
+        section = section.child(
+            gpui::div()
+                .text_color(theme.text_faint)
+                .child(label("None")),
+        );
+    }
+    for (key, value) in values {
+        let color = if value.is_number() || value.is_boolean() {
+            theme.syntax.number
+        } else if value.is_string() {
+            theme.syntax.string
+        } else {
+            theme.text_muted
+        };
+        let display = if let Some(text) = value.as_str() {
+            text.to_owned()
+        } else {
+            value.to_string()
+        };
+        section = section.child(
+            gpui::div()
+                .flex()
+                .gap(px(metrics.inspector_padding))
+                .font_family(theme.font_mono.clone())
+                .child(
+                    gpui::div()
+                        .flex_shrink_0()
+                        .text_color(theme.syntax.keyword)
+                        .child(label(key)),
+                )
+                .child(
+                    gpui::div()
+                        .min_w_0()
+                        .text_color(color)
+                        .child(label(display)),
+                ),
+        );
+    }
+    section.into_any_element()
+}
+
+pub(crate) fn action<Event: 'static>(
     cx: &Context<GpuixView>,
     callback: impl Fn(&mut GpuixView, &mut Window, &mut Context<GpuixView>) + 'static,
 ) -> impl Fn(&Event, &mut Window, &mut gpui::App) + 'static {
@@ -223,13 +318,30 @@ pub(crate) fn build(
         .text_size(px(metrics.inspector_text_size))
         .text_color(theme.text);
     if state.open {
-        let row_ids = state.rows(tree);
+        #[cfg(not(target_family = "wasm"))]
+        crate::network::install(cx);
+        #[cfg(not(target_family = "wasm"))]
+        let network_active = state.network.active;
+        #[cfg(target_family = "wasm")]
+        let network_active = false;
+        #[cfg(not(target_family = "wasm"))]
+        let network_content = network_active
+            .then(|| crate::inspector_network::build(&mut state.network, theme, window, cx));
+        #[cfg(target_family = "wasm")]
+        let network_content: Option<AnyElement> = None;
+        let row_ids = if network_active {
+            Vec::new()
+        } else {
+            state.rows(tree)
+        };
         let row_count = row_ids.len();
         let row_metrics = metrics.clone();
+        let row_theme = theme.clone();
         let render_rows = cx.processor(move |view, range: std::ops::Range<usize>, _, cx| {
             let tree = view.tree.lock().unwrap();
             let state = &view.inspector;
             let metrics = &row_metrics;
+            let theme = &row_theme;
             let mut rows = Vec::new();
             for &(id, depth) in row_ids.get(range).unwrap_or(&[]) {
                 let Some(node) = tree.elements.get(&id) else {
@@ -248,13 +360,17 @@ pub(crate) fn build(
                     )))
                     .flex()
                     .items_center()
+                    .w_full()
+                    .overflow_hidden()
+                    .gap(px(metrics.inspector_padding / 2.0))
                     .h(px(metrics.inspector_row_height))
-                    .pl(px(depth as f32 * metrics.inspector_indent))
+                    .pl(px(
+                        metrics.inspector_padding + depth as f32 * metrics.inspector_indent
+                    ))
                     .cursor_pointer()
                     .block_mouse_except_scroll()
-                    .when(state.selected == Some(id), |row| {
-                        row.bg(gpui::rgb(0x164e63))
-                    })
+                    .hover(|row| row.bg(theme.row_hover))
+                    .when(state.selected == Some(id), |row| row.bg(theme.row_selected))
                     .on_click(action(cx, move |view, window, cx| {
                         choose(view, id, window, cx)
                     }));
@@ -265,6 +381,11 @@ pub(crate) fn build(
                         )))
                         .w(px(metrics.inspector_indent))
                         .flex_shrink_0()
+                        .text_color(if state.expanded.contains(&id) {
+                            theme.accent
+                        } else {
+                            theme.text_faint
+                        })
                         .child(label(disclosure))
                         .on_click(action(cx, move |view, _, cx| {
                             if !view.inspector.expanded.remove(&id) {
@@ -273,20 +394,41 @@ pub(crate) fn build(
                             cx.notify();
                         })),
                 );
-                let text = format!(
-                    "<{}> #{}{}{}",
-                    node.element_type,
-                    id,
-                    node.test_id
-                        .as_ref()
-                        .map(|value| format!(" [{value}]"))
-                        .unwrap_or_default(),
-                    node.content
-                        .as_ref()
-                        .map(|value| format!(" {}", value.chars().take(80).collect::<String>()))
-                        .unwrap_or_default()
-                );
-                rows.push(row.child(label(text)));
+                row = row
+                    .child(icon(
+                        match node.element_type.as_str() {
+                            "text" => "TextT",
+                            "img" => "Image",
+                            "svg" => "Shapes",
+                            _ => "Square",
+                        },
+                        &row_theme,
+                    ))
+                    .child(
+                        gpui::div()
+                            .text_color(row_theme.syntax.tag)
+                            .child(label(format!("<{}>", node.element_type))),
+                    )
+                    .child(
+                        gpui::div()
+                            .text_color(row_theme.text_faint)
+                            .child(label(format!("#{id}"))),
+                    );
+                if let Some(test_id) = &node.test_id {
+                    row = row.child(
+                        gpui::div()
+                            .text_color(row_theme.syntax.attribute)
+                            .child(label(format!("[{test_id}]"))),
+                    );
+                }
+                if let Some(content) = &node.content {
+                    row = row.child(
+                        gpui::div()
+                            .text_color(row_theme.text_muted)
+                            .child(label(content.chars().take(80).collect::<String>())),
+                    );
+                }
+                rows.push(row);
             }
             rows
         });
@@ -295,41 +437,86 @@ pub(crate) fn build(
             .flex_1()
             .min_w_0()
             .h_full();
-        let properties = state.selected.map(|id| {
-            let mut value = tree.node_to_json(id);
-            if let Some(object) = value.as_object_mut() {
-                object.remove("children");
-                let bounds = crate::automation::window_element_bounds(window.window_handle().window_id(), id);
-                object.insert("paintedBounds".into(), bounds.map(|bounds| serde_json::json!({ "x": bounds.x, "y": bounds.y, "width": bounds.width, "height": bounds.height })).unwrap_or(serde_json::Value::Null));
-            }
-            serde_json::to_string_pretty(&value).unwrap_or_default()
-        }).unwrap_or_else(|| "Select a host element. Right-click the app, then Inspect element.".into());
         let mut properties_pane = gpui::div()
             .id("__gpuix_inspector_properties")
             .flex_1()
             .min_w_0()
             .overflow_y_scroll()
+            .border_l_1()
+            .border_color(theme.border)
             .p(px(metrics.inspector_padding));
-        for line in properties.lines() {
-            properties_pane = properties_pane.child(label(line.to_owned()));
+        if let Some(id) = state.selected {
+            let mut value = tree.node_to_json(id);
+            let bounds =
+                crate::automation::window_element_bounds(window.window_handle().window_id(), id);
+            value["paintedBounds"] = bounds
+                .map(|bounds| {
+                    serde_json::json!({
+                        "x": bounds.x, "y": bounds.y, "width": bounds.width, "height": bounds.height
+                    })
+                })
+                .unwrap_or(serde_json::Value::Null);
+            let mut identity = serde_json::Map::new();
+            for key in ["id", "type", "testId", "text"] {
+                if let Some(value) = value.get(key) {
+                    identity.insert(key.to_owned(), value.clone());
+                }
+            }
+            properties_pane = properties_pane
+                .child(property_section(
+                    "Element",
+                    &serde_json::Value::Object(identity),
+                    theme,
+                ))
+                .child(property_section(
+                    "Layout · last paint",
+                    &value["paintedBounds"],
+                    theme,
+                ))
+                .child(property_section("Styles", &value["style"], theme))
+                .child(property_section("Properties", &value["customProps"], theme))
+                .child(property_section("Events", &value["events"], theme));
+        } else {
+            properties_pane =
+                properties_pane.child(gpui::div().text_color(theme.text_muted).child(label(
+                    "Select an element in the tree, or use the picker to inspect the application.",
+                )));
         }
         let header = gpui::div()
             .flex()
             .items_center()
             .h(px(metrics.inspector_row_height + metrics.inspector_padding))
-            .px(px(metrics.inspector_padding))
-            .gap(px(metrics.inspector_padding))
-            .child(label("Inspector · Host elements"))
-            .child(gpui::div().flex_1())
+            .px(px(metrics.inspector_padding / 2.0))
+            .gap(px(metrics.inspector_padding / 4.0))
+            .border_b_1()
+            .border_color(theme.border)
             .child(
                 gpui::div()
                     .id("__gpuix_inspector_pick")
-                    .cursor_pointer()
-                    .child(label(if state.picking {
+                    .aria_label(if state.picking {
                         "Cancel picking"
                     } else {
                         "Pick element"
-                    }))
+                    })
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(metrics.menu_item_height))
+                    .rounded(px(metrics.inspector_padding / 2.0))
+                    .hover(|button| button.bg(theme.row_hover))
+                    .when(state.picking, |button| {
+                        button.bg(theme.row_selected).text_color(theme.accent)
+                    })
+                    .child(colored_icon(
+                        "CursorClick",
+                        theme,
+                        if state.picking {
+                            theme.accent
+                        } else {
+                            theme.text_muted
+                        },
+                    ))
                     .on_click(action(cx, |view, _, cx| {
                         view.inspector.picking = !view.inspector.picking;
                         cx.notify();
@@ -337,9 +524,85 @@ pub(crate) fn build(
             )
             .child(
                 gpui::div()
-                    .id("__gpuix_inspector_close")
+                    .w(px(1.0))
+                    .h(px(metrics.inspector_icon_size))
+                    .mx(px(metrics.inspector_padding / 2.0))
+                    .bg(theme.border_strong),
+            )
+            .child(
+                gpui::div()
+                    .id("__gpuix_inspector_elements_tab")
                     .cursor_pointer()
-                    .child(label("Close inspector"))
+                    .flex()
+                    .items_center()
+                    .gap(px(metrics.inspector_padding * 0.75))
+                    .px(px(metrics.inspector_padding))
+                    .h(px(metrics.inspector_row_height))
+                    .rounded(px(metrics.inspector_padding / 2.0))
+                    .bg(if network_active {
+                        gpui::transparent_black()
+                    } else {
+                        theme.row_hover
+                    })
+                    .child(icon("TreeStructure", theme))
+                    .child(label("Elements"))
+                    .on_click(action(cx, |view, window, cx| {
+                        #[cfg(not(target_family = "wasm"))]
+                        {
+                            view.inspector.network.active = false;
+                        }
+                        crate::automation::pin_highlight(
+                            window.window_handle().window_id(),
+                            view.inspector.selected,
+                        );
+                        cx.notify();
+                    })),
+            )
+            .when(cfg!(not(target_family = "wasm")), |header| {
+                header.child(
+                    gpui::div()
+                        .id("__gpuix_inspector_network_tab")
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .gap(px(metrics.inspector_padding * 0.75))
+                        .px(px(metrics.inspector_padding))
+                        .h(px(metrics.inspector_row_height))
+                        .rounded(px(metrics.inspector_padding / 2.0))
+                        .bg(if network_active {
+                            theme.row_hover
+                        } else {
+                            gpui::transparent_black()
+                        })
+                        .child(icon("WifiHigh", theme))
+                        .child(label("Network"))
+                        .on_click(action(cx, |view, window, cx| {
+                            #[cfg(not(target_family = "wasm"))]
+                            {
+                                view.inspector.network.active = true;
+                            }
+                            view.inspector.picking = false;
+                            crate::automation::pin_highlight(
+                                window.window_handle().window_id(),
+                                None,
+                            );
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(gpui::div().flex_1())
+            .child(
+                gpui::div()
+                    .id("__gpuix_inspector_close")
+                    .aria_label("Close inspector")
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(metrics.menu_item_height))
+                    .rounded(px(metrics.inspector_padding / 2.0))
+                    .hover(|button| button.bg(theme.row_hover))
+                    .child(icon("X", theme))
                     .on_click(action(cx, |view, window, cx| {
                         view.inspector.open = false;
                         view.inspector.picking = false;
@@ -352,30 +615,50 @@ pub(crate) fn build(
             .h(px(metrics
                 .inspector_height
                 .min(f32::from(window.viewport_size().height) / 2.0)))
-            .bg(theme.bg)
+            .bg(theme.surface)
             .border_t_1()
             .border_color(theme.border)
             .block_mouse_except_scroll()
+            .on_painted(|bounds, window, _| {
+                crate::automation::exclude_inspector_bounds(bounds, window);
+            })
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .child(header)
-            .child(
+            .child(network_content.unwrap_or_else(|| {
                 gpui::div()
                     .flex()
                     .flex_1()
                     .min_h_0()
                     .child(rows)
-                    .child(properties_pane),
-            );
+                    .child(properties_pane)
+                    .into_any_element()
+            }));
     }
     if let Some((point, id)) = state.menu {
         let menu = gpui::div()
             .id("__gpuix_inspect_context_menu")
             .p(px(metrics.inspector_padding))
-            .bg(theme.bg)
+            .flex()
+            .items_center()
+            .gap(px(metrics.inspector_padding))
+            .rounded(px(metrics.menu_radius))
+            .bg(theme.raised)
+            .shadow(vec![gpui::BoxShadow {
+                color: theme.shadow,
+                offset: gpui::point(px(0.0), px(metrics.inspector_padding / 2.0)),
+                blur_radius: px(metrics.inspector_padding * 2.0),
+                spread_radius: px(0.0),
+                inset: false,
+            }])
             .border_1()
-            .border_color(theme.border)
+            .border_color(theme.border_strong)
             .occlude()
+            .on_painted(|bounds, window, _| {
+                crate::automation::exclude_inspector_bounds(bounds, window);
+            })
             .cursor_pointer()
+            .hover(|menu| menu.bg(theme.raised.blend(theme.row_hover)))
+            .child(icon("CrosshairSimple", theme))
             .child(label("Inspect element"))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .on_click(action(cx, move |view, window, cx| {
@@ -525,6 +808,11 @@ mod tests {
             draw(app);
             let after = crate::automation::window_bounds(window.window_id())[&1].height;
             assert!(after < before, "dock must reserve space below the app");
+            assert!(
+                crate::automation::painted_candidates(window.window_id(), 12.0, after + 16.0,)
+                    .is_empty(),
+                "inspector chrome must not pick application nodes behind it"
+            );
             assert_eq!(tree.lock().unwrap().elements[&1].subtree_revision, revision);
             assert_eq!(
                 window

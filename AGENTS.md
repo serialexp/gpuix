@@ -4,6 +4,15 @@
 
 Unless you are **remorses** or **monotykamary**, do not open a pull request. Open an issue. See [External contributors](#external-contributors).
 
+## Do not run osascript automatically
+
+Do not invoke `osascript` (AppleScript or JavaScript for Automation), directly
+or through scripts, tests, subprocesses or other wrappers, unless Bart explicitly
+requests it. These calls can trigger macOS security alerts. Do not use them to
+check desktop focus, inspect system menus or automate other applications during
+routine validation. Prefer GPUIX's own testing/debug APIs; if those cannot verify
+something, report that limitation rather than attempting OS-level automation.
+
 ## README is the public API contract
 
 Document every user-facing feature, element, prop, event, renderer option,
@@ -426,13 +435,9 @@ the executable name**, not the `Menu` name you pass, so `bun app.tsx` shows
 `setWindowsMenu:`, which prepends AppKit's own tiling items, `Enter Full Screen`
 included. Do not add that item yourself.
 
-Verify with the accessibility tree, not a screenshot. The system menu bar is
-outside the window, so GPUIX automation cannot see it.
-
-```bash
-osascript -e 'tell application "System Events" to tell (first process whose unix id is PID) \
-  to get name of every menu bar item of menu bar 1'
-```
+The system menu bar is outside the window, so GPUIX screenshots and automation
+cannot verify it. Leave system-menu verification to a manual check unless Bart
+explicitly requests OS-level automation; do not invoke `osascript` automatically.
 
 ## Browser keyboard input goes through GPUI's hidden element
 

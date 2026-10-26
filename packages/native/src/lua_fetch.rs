@@ -2,31 +2,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use futures::future::{AbortHandle, AbortRegistration, Abortable};
-use futures::AsyncReadExt;
-use gpui::http_client::{AsyncBody, HttpClient, HttpRequestExt, RedirectPolicy, Request, Url};
+use futures::future::AbortHandle;
+use gpui::http_client::{AsyncBody, HttpRequestExt, RedirectPolicy, Request, Url};
 use mlua::{AnyUserData, Function, Lua, LuaSerdeExt, Table, UserData, Value};
 
+use crate::script::http::MAX_BODY;
+pub(crate) use crate::script::http::{execute, FetchCompletion, FetchRequest};
+
 const MAX_PENDING: usize = 64;
-const MAX_BODY: usize = 8 * 1024 * 1024;
-
-pub(crate) struct FetchRequest {
-    id: u64,
-    request: Request<AsyncBody>,
-    registration: AbortRegistration,
-}
-
-pub(crate) struct FetchResponse {
-    status: u16,
-    headers: Vec<(String, Vec<u8>)>,
-    body: Vec<u8>,
-}
-
-pub(crate) struct FetchCompletion {
-    id: u64,
-    result: Result<FetchResponse, String>,
-}
-
 struct Pending {
     callback: Function,
     abort: AbortHandle,
@@ -75,46 +58,6 @@ struct FetchHandle {
     owner: Weak<Mutex<LuaFetch>>,
 }
 impl UserData for FetchHandle {}
-
-pub(crate) async fn execute(
-    request: FetchRequest,
-    client: Arc<dyn HttpClient>,
-) -> Option<FetchCompletion> {
-    let id = request.id;
-    let result = Abortable::new(
-        async move {
-            let mut response = client
-                .send(request.request)
-                .await
-                .map_err(|error| error.to_string())?;
-            let status = response.status().as_u16();
-            let headers = response
-                .headers()
-                .iter()
-                .map(|(name, value)| (name.to_string(), value.as_bytes().to_vec()))
-                .collect();
-            let mut body = Vec::new();
-            response
-                .body_mut()
-                .take((MAX_BODY + 1) as u64)
-                .read_to_end(&mut body)
-                .await
-                .map_err(|error| error.to_string())?;
-            if body.len() > MAX_BODY {
-                return Err("fetch response exceeds 8 MiB".into());
-            }
-            Ok(FetchResponse {
-                status,
-                headers,
-                body,
-            })
-        },
-        request.registration,
-    )
-    .await
-    .ok()?;
-    Some(FetchCompletion { id, result })
-}
 
 pub(crate) fn deliver(
     lua: &Lua,
@@ -278,6 +221,7 @@ pub(crate) fn install(lua: &Lua, api: &Table, state: &Arc<Mutex<LuaFetch>>) -> m
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::AsyncReadExt;
 
     fn setup() -> (Lua, Arc<Mutex<LuaFetch>>) {
         let lua = Lua::new();

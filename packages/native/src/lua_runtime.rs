@@ -3117,6 +3117,16 @@ fn install_api(
 ) -> mlua::Result<()> {
     let api = lua.create_table()?;
 
+    api.set("theme", lua.create_function(|lua, options: Option<Table>| {
+        let value = options.map(|options| lua.from_value::<serde_json::Value>(Value::Table(options))).transpose()?;
+        let theme = crate::theme::Theme::from_prop(value.as_ref());
+        let mut tokens = serde_json::to_value(&theme).map_err(mlua::Error::external)?;
+        tokens["buttonHover"] = serde_json::to_value(theme.raised.blend(theme.row_hover)).map_err(mlua::Error::external)?;
+        tokens["buttonPressed"] = serde_json::to_value(theme.raised.blend(theme.row_pressed)).map_err(mlua::Error::external)?;
+        tokens["appearance"] = serde_json::json!(value.as_ref().and_then(|value| value.get("appearance")).and_then(|value| value.as_str()).unwrap_or("dark"));
+        lua.to_value(&tokens)
+    })?)?;
+
     let prop_updates = host_updates.clone();
     api.set(
         "set_prop",
@@ -4384,7 +4394,7 @@ fn event_type(prop: &str) -> Option<&'static str> {
 }
 
 fn is_universal_prop(prop: &str) -> bool {
-    matches!(prop, "tabIndex" | "motion" | "highlight")
+    matches!(prop, "tabIndex" | "motion" | "highlight" | "theme")
 }
 
 fn reconcile_node(
@@ -5235,6 +5245,38 @@ mod tests {
     }
 
     #[test]
+    fn bundled_controls_share_the_native_palette_and_allow_light_overrides() {
+        let mut tree = RetainedTree::new();
+        let runtime = LuaRuntime::load_luax(r##"
+            local Button = require("gpuix.button")
+            local Checkbox = require("gpuix.checkbox")
+            local RadioGroup = require("gpuix.radio_group")
+            local palette = gpuix.theme({ appearance = "light", accent = "#ff0000",
+                metrics = { inputHeight = 30, controlIndicatorSize = 20 } })
+            assert(palette.appearance == "light")
+            assert(palette.bg ~= gpuix.theme().bg)
+            return function()
+                return <div theme={palette}>
+                    <Button theme={palette} testId="themed-button"><text>Run</text></Button>
+                    <Checkbox theme={palette} testId="themed-check" defaultChecked />
+                    <RadioGroup theme={palette} testId="themed-radio" defaultValue="a"
+                        options={{ {value="a",label="Alpha"} }} />
+                </div>
+            end
+        "##, &mut tree).unwrap();
+        let node = |name: &str| tree.elements.values().find(|node| node.test_id.as_deref() == Some(name)).unwrap();
+        assert_eq!(tree.elements[&tree.root_id.unwrap()].custom_props()["theme"]["appearance"], "light");
+        let button = tree.node_to_json(node("themed-button").id);
+        assert_eq!(button["style"]["height"], 30.0);
+        let indicator = tree.node_to_json(node("themed-check-indicator").id);
+        let background = indicator["style"]["background"].as_str().unwrap();
+        assert_eq!(crate::color::parse_color_rgba(background).unwrap(), gpui::rgb(0xff0000).into());
+        assert_eq!(indicator["style"]["width"], 20.0);
+        assert_eq!(indicator["style"]["alignItems"], "center");
+        drop(runtime);
+    }
+
+    #[test]
     fn fetch_callbacks_update_component_state_on_the_application_event_loop() {
         let mut tree = RetainedTree::new();
         let mut runtime = LuaRuntime::load_luax(r#"
@@ -5312,6 +5354,14 @@ mod tests {
         let button = id(&tree, "button");
         let radio_b = id(&tree, "radio-b");
         let checkbox = id(&tree, "checkbox");
+        for name in ["checkbox-indicator", "radio-a-indicator", "radio-b-indicator"] {
+            let indicator = &tree.elements[&id(&tree, name)];
+            let style = indicator.style.as_ref().unwrap();
+            assert_eq!(style.display.as_deref(), Some("flex"));
+            assert_eq!(style.align_items.as_deref(), Some("center"));
+            assert_eq!(style.justify_content.as_deref(), Some("center"));
+            assert_eq!(style.flex_shrink, Some(0.0));
+        }
         dispatch_by_test_id(&mut runtime, &mut tree, "checkbox-indicator").unwrap();
         dispatch_by_test_id(&mut runtime, &mut tree, "button").unwrap();
         assert_eq!(

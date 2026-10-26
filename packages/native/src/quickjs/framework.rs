@@ -10,7 +10,7 @@
 //! otherwise.
 
 use std::cell::OnceCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -27,6 +27,7 @@ const CONFIG_FILES: [&str; 2] = ["tsconfig.json", "jsconfig.json"];
 /// a changed config counts from the next reload.
 #[derive(Default)]
 pub(crate) struct Frameworks {
+    pub(crate) files: BTreeSet<PathBuf>,
     /// The framework each directory's nearest config sets, if it sets one.
     directories: HashMap<PathBuf, Option<Jsx>>,
     /// The entry file's framework, once a file needed it.
@@ -56,12 +57,14 @@ impl Frameworks {
         if let Some(jsx) = self.directories.get(directory) {
             return Ok(*jsx);
         }
-        let config = CONFIG_FILES
+        let candidates: Vec<_> = CONFIG_FILES
             .iter()
             .map(|name| directory.join(name))
-            .find(|path| path.is_file());
+            .collect();
+        self.files.extend(candidates.iter().cloned());
+        let config = candidates.into_iter().find(|path| path.is_file());
         let jsx = match (config, directory.parent()) {
-            (Some(config), _) => read_config(&config)?,
+            (Some(config), _) => read_config(&config, &mut self.files)?,
             (None, Some(parent)) => self.configured(parent)?,
             (None, None) => None,
         };
@@ -72,8 +75,8 @@ impl Frameworks {
 
 /// The framework `config`'s `jsxImportSource` names, set in it or in what
 /// it extends.
-fn read_config(config: &Path) -> Result<Option<Jsx>, String> {
-    let Some(source) = import_source(config, &mut Vec::new())? else {
+fn read_config(config: &Path, files: &mut BTreeSet<PathBuf>) -> Result<Option<Jsx>, String> {
+    let Some(source) = import_source(config, &mut Vec::new(), files)? else {
         return Ok(None);
     };
     [Jsx::React, Jsx::Solid]
@@ -94,13 +97,18 @@ fn read_config(config: &Path) -> Result<Option<Jsx>, String> {
 /// extends, the last of them first, as TypeScript merges them. `chain` is
 /// the configs that extend this one, to find a loop; two configs may both
 /// extend a third.
-fn import_source(config: &Path, chain: &mut Vec<PathBuf>) -> Result<Option<String>, String> {
+fn import_source(
+    config: &Path,
+    chain: &mut Vec<PathBuf>,
+    files: &mut BTreeSet<PathBuf>,
+) -> Result<Option<String>, String> {
     let config = fs::canonicalize(config).unwrap_or_else(|_| config.to_path_buf());
+    files.insert(config.clone());
     if chain.contains(&config) {
         return Err(format!("{}: `extends` loops back to it", config.display()));
     }
     chain.push(config.clone());
-    let source = own_or_extended_import_source(&config, chain);
+    let source = own_or_extended_import_source(&config, chain, files);
     chain.pop();
     source
 }
@@ -108,6 +116,7 @@ fn import_source(config: &Path, chain: &mut Vec<PathBuf>) -> Result<Option<Strin
 fn own_or_extended_import_source(
     config: &Path,
     chain: &mut Vec<PathBuf>,
+    files: &mut BTreeSet<PathBuf>,
 ) -> Result<Option<String>, String> {
     let text = fs::read_to_string(config)
         .map_err(|error| format!("Cannot read {}: {error}", config.display()))?;
@@ -135,13 +144,13 @@ fn own_or_extended_import_source(
     };
     let directory = config.parent().unwrap_or(Path::new(""));
     for name in extends.into_iter().rev() {
-        let base = find_extended(directory, name).ok_or_else(|| {
+        let base = find_extended(directory, name, files).ok_or_else(|| {
             format!(
                 "{}: cannot find {name:?}, which it extends",
                 config.display()
             )
         })?;
-        if let Some(source) = import_source(&base, chain)? {
+        if let Some(source) = import_source(&base, chain, files)? {
             return Ok(Some(source));
         }
     }
@@ -151,21 +160,26 @@ fn own_or_extended_import_source(
 /// The config `extends: name` names, from a config in `directory`: a path,
 /// with `.json` implied, or a package in a `node_modules` directory above,
 /// either a file in it or its `tsconfig.json`.
-fn find_extended(directory: &Path, name: &str) -> Option<PathBuf> {
-    let with_json = |path: PathBuf| {
-        let mut json = path.clone().into_os_string();
-        json.push(".json");
-        [path, PathBuf::from(json)]
-            .into_iter()
-            .find(|path| path.is_file())
-    };
+fn config_with_json(path: PathBuf, files: &mut BTreeSet<PathBuf>) -> Option<PathBuf> {
+    let mut json = path.clone().into_os_string();
+    json.push(".json");
+    [path, PathBuf::from(json)].into_iter().find(|path| {
+        if !path.is_dir() {
+            files.insert(path.clone());
+        }
+        path.is_file()
+    })
+}
+
+fn find_extended(directory: &Path, name: &str, files: &mut BTreeSet<PathBuf>) -> Option<PathBuf> {
     if name.starts_with("./") || name.starts_with("../") || Path::new(name).is_absolute() {
-        return with_json(directory.join(name));
+        return config_with_json(directory.join(name), files);
     }
     directory.ancestors().find_map(|ancestor| {
         let package = ancestor.join("node_modules").join(name);
-        with_json(package.clone()).or_else(|| {
+        config_with_json(package.clone(), files).or_else(|| {
             let config = package.join("tsconfig.json");
+            files.insert(config.clone());
             config.is_file().then_some(config)
         })
     })

@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "name": "Solid JavaScript counter suite",
+  "app": "../solid/scenario-counter.tsx",
+  "tests": [
+    {
+      "name": "Solid mouse activation",
+      "steps": [
+        { "action": "expectText", "testId": "counter", "text": "Count: 0", "exact": true },
+        { "action": "click", "testId": "counter" },
+        { "action": "expectText", "testId": "counter", "text": "Count: 1", "exact": true }
+      ]
+    },
+    {
+      "name": "Solid fresh state and keyboard activation",
+      "steps": [
+        { "action": "expectText", "testId": "counter", "text": "Count: 0", "exact": true },
+        { "action": "click", "testId": "counter" },
+        { "action": "press", "keys": "enter" },
+        { "action": "expectText", "testId": "counter", "text": "Count: 2", "exact": true },
+        { "action": "screenshot" }
+      ]
+    }
+  ]
+}

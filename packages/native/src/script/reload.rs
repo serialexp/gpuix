@@ -25,6 +25,103 @@ pub(crate) struct ApplicationReload {
 #[derive(Debug, PartialEq, Eq)]
 struct SourceSnapshot(Vec<(PathBuf, u64)>);
 
+pub(crate) struct FileWatch {
+    files: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<PathBuf, u64>>>,
+    restart: std::sync::Mutex<std::collections::BTreeSet<PathBuf>>,
+}
+
+impl FileWatch {
+    pub(crate) fn track_restart(&self, paths: Vec<PathBuf>) {
+        self.restart.lock().unwrap().extend(paths.iter().cloned());
+        self.track(paths);
+    }
+
+    pub(crate) fn requires_restart(&self, changed: &[PathBuf]) -> bool {
+        let restart = self.restart.lock().unwrap();
+        changed.iter().any(|path| restart.contains(path))
+    }
+
+    pub(crate) fn track(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        let mut files = self.files.lock().unwrap();
+        for path in paths {
+            if files.contains_key(&path) {
+                continue;
+            }
+            match file_fingerprint(&path) {
+                Ok(hash) => {
+                    files.insert(path, hash);
+                }
+                Err(error) => eprintln!("gpx: cannot watch {}: {error}", path.display()),
+            }
+        }
+    }
+}
+
+fn file_fingerprint(path: &Path) -> std::io::Result<u64> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::NotADirectory
+                    | std::io::ErrorKind::IsADirectory
+            ) =>
+        {
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Ok(hasher.finish())
+}
+
+pub(crate) fn watch_files(
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> (
+    FileWatch,
+    futures::channel::mpsc::UnboundedReceiver<Vec<PathBuf>>,
+) {
+    let watcher = FileWatch {
+        files: Default::default(),
+        restart: Default::default(),
+    };
+    watcher.track(paths);
+    let files = watcher.files.clone();
+    let (sender, receiver) = futures::channel::mpsc::unbounded();
+    std::thread::spawn(move || {
+        let mut pending = std::collections::BTreeSet::new();
+        while !sender.is_closed() {
+            std::thread::sleep(Duration::from_millis(100));
+            let mut changed = false;
+            {
+                let mut files = files.lock().unwrap();
+                for (path, observed) in files.iter_mut() {
+                    match file_fingerprint(path) {
+                        Ok(hash) if hash != *observed => {
+                            *observed = hash;
+                            pending.insert(path.clone());
+                            changed = true;
+                        }
+                        Ok(_) => {}
+                        Err(error) => eprintln!("gpx: cannot scan {}: {error}", path.display()),
+                    }
+                }
+            }
+            if !changed && !pending.is_empty() {
+                if sender
+                    .unbounded_send(std::mem::take(&mut pending).into_iter().collect())
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+    });
+    (watcher, receiver)
+}
+
 fn source_snapshot(root: &Path, is_source: fn(&Path) -> bool) -> std::io::Result<SourceSnapshot> {
     let mut sources = Vec::new();
     collect_sources(root, is_source, &mut sources)?;
@@ -154,6 +251,37 @@ fn collect_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_watches_follow_added_paths_deletion_and_recreation() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = directory.path().join("shared.txt");
+        let config = directory.path().join("tsconfig.json");
+        std::fs::write(&outside, "before").unwrap();
+        let (watcher, mut receiver) = watch_files([outside.clone()]);
+        let mut next = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            loop {
+                if let Ok(paths) = receiver.try_recv() {
+                    break paths;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "watch notification timed out"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        std::fs::write(&outside, "after").unwrap();
+        assert_eq!(next(), [outside.clone()]);
+        watcher.track([outside.clone(), config.clone()]);
+        std::fs::write(&config, "{}").unwrap();
+        assert_eq!(next(), [config]);
+        std::fs::remove_file(&outside).unwrap();
+        assert_eq!(next(), [outside.clone()]);
+        std::fs::write(&outside, "restored").unwrap();
+        assert_eq!(next(), [outside]);
+    }
 
     #[test]
     fn a_snapshot_change_names_the_files_added_removed_and_changed() {

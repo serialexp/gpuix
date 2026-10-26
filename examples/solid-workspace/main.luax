@@ -11,12 +11,14 @@ local Combobox = require("gpuix.solid.combobox")
 local Tooltip = require("gpuix.solid.tooltip")
 local Drawer = require("gpuix.solid.drawer")
 local DockLayout = require("gpuix.solid.dock_layout")
-local colors = { background = "#15171c", panel = "#1d2027", text = "#e5e7eb", muted = "#9ca3af", accent = "#2563eb" }
+local palette = gpuix.theme()
+local colors = { background = palette.bg, panel = palette.surface, text = palette.text,
+    muted = palette.textMuted, accent = palette.rowSelected }
 local button_style = {
-    padding = 10, borderRadius = 6, background = colors.panel,
+    padding = 10, borderRadius = 6, background = palette.raised,
     focus = { foregroundBoxShadow = {
         offsetX = 0, offsetY = 0, blurRadius = 0, spreadRadius = 2,
-        color = "#60a5fa", inset = true,
+        color = palette.focusRing, inset = true,
     } },
 }
 local function read_field(field)
@@ -31,6 +33,34 @@ local function MainWindow()
         local activity_visible = read_field("show_activity")
         local activity = read_field("activity")
         local draft = read_field("draft")
+        local ip_loading, set_ip_loading = solid.create_signal(false)
+        local ip_message, set_ip_message = solid.create_signal("Look up your public IPv4 using ipify.")
+        local ip_request
+        solid.on_cleanup(function()
+            if ip_request then gpuix.cancel_fetch(ip_request) end
+        end)
+        local function lookup_ip()
+            if ip_loading() then return end
+            set_ip_loading(true)
+            set_ip_message("Contacting ipify…")
+            ip_request = gpuix.fetch("https://api.ipify.org?format=json", { timeoutMs = 10000 },
+                function(response, error)
+                    ip_request = nil
+                    set_ip_loading(false)
+                    if error then
+                        set_ip_message("Request failed: " .. tostring(error))
+                    elseif not response.ok then
+                        set_ip_message("Request failed: HTTP " .. response.status)
+                    else
+                        local ok, data = pcall(response.json, response)
+                        if ok and type(data) == "table" and type(data.ip) == "string" then
+                            set_ip_message("Public IPv4: " .. data.ip)
+                        else
+                            set_ip_message("Request failed: invalid ipify response")
+                        end
+                    end
+                end)
+        end
         local detail = solid.create_memo(function()
             for _, message in ipairs(messages()) do
                 if message.id == selected() then return message end
@@ -139,6 +169,11 @@ local function MainWindow()
                     <text>{detail() and detail().body or ""}</text>
                     <text style={{ color = colors.muted }}>Messages: {total()}</text>
                     <text>Draft preview: {draft()}</text>
+                    <Button testId="lookup-ip" style={button_style} disabled={ip_loading}
+                        onClick={lookup_ip}>
+                        <text>{ip_loading() and "Looking up IPv4…" or "Look up public IPv4"}</text>
+                    </Button>
+                    <text testId="public-ip-result" style={{ color = colors.muted }}>{ip_message()}</text>
                     <Select testId="conversation-select" options={choices} value={selected}
                         onValueChange={select_conversation} />
                     <Combobox testId="conversation-combobox" items={choices} value={selected}

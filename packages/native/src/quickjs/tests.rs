@@ -11,6 +11,84 @@ use super::{
 use crate::element_tree::{EventModifiers, EventPayload};
 use crate::retained_tree::RetainedTree;
 
+#[test]
+fn fetch_queues_http_and_settles_promises_with_buffered_responses() {
+    let js = QuickJsRuntime::load(r#"
+        fetch('https://example.com/ip', {
+            method: 'POST', headers: { 'X-Test': 'yes' }, body: 'hello'
+        }).then(async response => {
+            if (response.status !== 201 || !response.ok || response.bodyUsed) throw Error('metadata');
+            if (response.headers.get('CONTENT-TYPE') !== 'application/json') throw Error('headers');
+            const data = await response.json();
+            if (data.ip !== '127.0.0.1' || !response.bodyUsed) throw Error('json');
+            try { await response.text(); throw Error('consumed twice'); }
+            catch (error) { if (!(error instanceof TypeError)) throw error; }
+            globalThis.fetchDone = true;
+        });
+    "#, "fetch.js", QuickJsOptions::default()).unwrap();
+    let requests = js.take_fetch_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].request.method(), "POST");
+    assert_eq!(requests[0].request.headers()["x-test"], "yes");
+    assert_eq!(
+        requests[0].request.headers()["content-type"],
+        "text/plain;charset=UTF-8"
+    );
+    js.settle_fetch(crate::script::http::FetchCompletion {
+        id: requests[0].id,
+        result: Ok(crate::script::http::FetchResponse {
+            status: 201,
+            headers: vec![("content-type".into(), b"application/json".to_vec())],
+            body: br#"{"ip":"127.0.0.1"}"#.to_vec(),
+        }),
+    })
+    .unwrap();
+    js.call(|ctx, _| ctx.eval::<(), _>("if (!globalThis.fetchDone) throw Error('not settled')"))
+        .unwrap();
+}
+
+#[test]
+fn fetch_abort_validation_errors_and_binary_responses() {
+    let js = QuickJsRuntime::load(r#"
+        const controller = new AbortController();
+        const pending = fetch('https://example.com/cancel', { signal: controller.signal });
+        controller.abort();
+        pending.catch(error => { if (error.name !== 'AbortError') throw error; });
+        fetch('file:///tmp/private').catch(error => { if (!(error instanceof TypeError)) throw error; });
+        fetch('https://example.com', { body: 'bad' }).catch(error => { if (!(error instanceof TypeError)) throw error; });
+        fetch('https://example.com', { cache: 'no-store' }).catch(error => { if (!(error instanceof TypeError)) throw error; });
+        fetch('https://example.com', { signal: AbortSignal.abort() }).catch(error => { if (error.name !== 'AbortError') throw error; });
+        fetch('https://example.com/binary').then(async response => {
+            if (response.ok || response.status !== 404) throw Error('HTTP error rejected');
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            if (bytes.length !== 3 || bytes[1] !== 255) throw Error('binary corruption');
+            globalThis.binaryDone = true;
+        });
+        fetch('https://example.com/fail').catch(error => {
+            if (!(error instanceof TypeError) || error.message !== 'offline') throw error;
+            globalThis.failed = true;
+        });
+    "#, "fetch.js", QuickJsOptions::default()).unwrap();
+    let requests = js.take_fetch_requests();
+    assert_eq!(requests.len(), 2);
+    js.settle_fetch(crate::script::http::FetchCompletion {
+        id: requests[0].id,
+        result: Ok(crate::script::http::FetchResponse {
+            status: 404,
+            headers: vec![],
+            body: vec![0, 255, 1],
+        }),
+    })
+    .unwrap();
+    js.settle_fetch(crate::script::http::FetchCompletion {
+        id: requests[1].id,
+        result: Err("offline".into()),
+    })
+    .unwrap();
+    js.call(|ctx, _| ctx.eval::<(), _>("if (!binaryDone || !failed) throw Error('not settled')"))
+        .unwrap();
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn application_trays_load_the_shared_api_and_route_callbacks() {
@@ -1251,6 +1329,39 @@ fn enums_namespaces_and_parameter_properties_run() {
 }
 
 #[test]
+fn watch_paths_include_external_modules_text_and_extended_configs() {
+    let dir = AppDir::new(&[
+        ("app/main.tsx", "import { render } from '@gpuix/react'; import { value } from '../shared/value.ts'; import note from '../shared/note.md' with { type: 'text' }; render(<text>{value}{note}</text>)"),
+        ("shared/value.ts", "export const value = 1"),
+        ("shared/note.md", "hello"),
+        ("tsconfig.json", r#"{"extends":"./base.json"}"#),
+        ("base.json", r#"{"compilerOptions":{"jsxImportSource":"@gpuix/react"}}"#),
+        ("app/unrelated.ts", "throw Error('not imported')"),
+    ]);
+    let app = App::try_load_module(&dir.path("app/main.tsx")).unwrap();
+    let files = app.js.watched_files();
+    for name in ["app/main.tsx", "shared/value.ts", "shared/note.md", "tsconfig.json", "base.json"] {
+        let path = std::fs::canonicalize(dir.path(name)).unwrap();
+        assert!(files.contains(&path), "missing {} in {files:?}", path.display());
+    }
+    assert!(!files.contains(&std::fs::canonicalize(dir.path("app/unrelated.ts")).unwrap()));
+    assert!(app.js.configuration_changed(&[std::fs::canonicalize(dir.path("base.json")).unwrap()]));
+}
+
+#[test]
+fn dynamic_imports_join_the_watch_set_when_loaded() {
+    let dir = AppDir::new(&[
+        ("main.ts", "globalThis.load = () => import('./lazy.ts')"),
+        ("lazy.ts", "export const value = 1"),
+    ]);
+    let app = App::try_load_module(&dir.path("main.ts")).unwrap();
+    let lazy = std::fs::canonicalize(dir.path("lazy.ts")).unwrap();
+    assert!(!app.js.watched_files().contains(&lazy));
+    app.js.call(|ctx, _| ctx.eval::<(), _>("load(); undefined")).unwrap();
+    assert!(app.js.watched_files().contains(&lazy));
+}
+
+#[test]
 fn stack_traces_point_at_the_source_lines() {
     let dir = AppDir::new(&[(
         "main.ts",
@@ -1273,6 +1384,19 @@ fail(2)
     assert!(error.contains("Error: mapped 2"), "{error}");
     assert!(error.contains(&format!("at fail ({main}:7:")), "{error}");
     assert!(error.contains(&format!("({main}:10:")), "{error}");
+}
+
+#[test]
+fn missing_exports_report_the_complete_module_path_and_export_name() {
+    let directory = "long-module-directory-".repeat(6);
+    let filename = format!("{directory}/dependency.ts");
+    let export = "long_export_name_".repeat(8);
+    let source = format!("import {{ {export} }} from './{filename}'; console.log({export})");
+    let dir = AppDir::new(&[("main.ts", &source), (&filename, "export const available = 1")]);
+    let expected = std::fs::canonicalize(dir.path(&filename)).unwrap();
+    let error = App::try_load_module(&dir.path("main.ts")).err().unwrap();
+    assert!(error.contains(&export), "{error}");
+    assert!(error.contains(&expected.display().to_string()), "{error}");
 }
 
 #[test]
@@ -2807,8 +2931,43 @@ fn a_module_that_throws_fails_the_hot_update() {
     let changed = edit(&dir, "counter.tsx", &source);
     let error = app.js.hot_update(&[changed]).unwrap_err();
     assert!(error.contains("boom"), "{error}");
+    let source_file = std::fs::canonicalize(dir.path("counter.tsx")).unwrap();
+    assert!(error.contains(&format!("{}:1:", source_file.display())), "{error}");
+    assert!(!error.contains("?hot="), "{error}");
     app.click(app.test_id("counter")).unwrap();
     assert_eq!(app.texts(), ["Count: 2"]);
+}
+
+#[test]
+fn a_missing_new_import_stays_watched_after_a_failed_hot_update() {
+    let dir = hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    let source = format!("import {{ extra }} from './new.ts'; console.log(extra);\n{}", counter_source("New ", ""));
+    let changed = edit(&dir, "counter.tsx", &source);
+    assert!(app.js.hot_update(&[changed]).is_err());
+    let missing = std::fs::canonicalize(dir.path("counter.tsx")).unwrap().with_file_name("new.ts");
+    assert!(app.js.watched_files().contains(&missing));
+    let added = edit(&dir, "new.ts", "export const extra = 1");
+    assert!(matches!(app.js.hot_update(&[added]), Ok(HotUpdate::Refreshed(_))));
+    app.settle();
+    assert_eq!(app.texts(), ["New Count: 0"]);
+}
+
+#[test]
+fn hot_update_call_sites_use_the_source_filename_and_position() {
+    let dir = hot_app();
+    let mut app = App::load_development(&dir.path("main.tsx"));
+    app.settle();
+    let source = format!(
+        "Error.prepareStackTrace = (_error, sites) => sites.map(site => `${{site.getFileName()}}:${{site.getLineNumber()}}:${{site.getColumnNumber()}}`).join('\\n');\nthrow new Error('mapped sites');\n{}",
+        counter_source("New ", "")
+    );
+    let changed = edit(&dir, "counter.tsx", &source);
+    let error = app.js.hot_update(&[changed]).unwrap_err();
+    let source_file = std::fs::canonicalize(dir.path("counter.tsx")).unwrap();
+    assert!(error.contains(&format!("{}:2:", source_file.display())), "{error}");
+    assert!(!error.contains("?hot="), "{error}");
 }
 
 #[test]

@@ -1,37 +1,5 @@
 local util = require("gpuix._util")
 
-local root_style = { display = "flex", position = "relative", alignItems = "start" }
-local input_style = {
-    width = 220,
-    height = 36,
-    padding = 9,
-    borderRadius = 7,
-    borderWidth = 1,
-    borderColor = "#52525b",
-    background = "#18181b",
-    color = "#fafafa",
-    focus = util.focus_ring,
-}
-local content_style = {
-    width = 220,
-    display = "flex",
-    flexDirection = "column",
-    padding = 5,
-    gap = 2,
-    borderRadius = 8,
-    borderWidth = 1,
-    borderColor = "#52525b",
-    background = "#27272a",
-}
-local item_style = {
-    display = "flex",
-    flexDirection = "row",
-    alignItems = "center",
-    width = "100%",
-    padding = 9,
-    borderRadius = 6,
-}
-
 local function normalize_options(items)
     local options = {}
     for index, item in ipairs(items or {}) do
@@ -59,6 +27,10 @@ local function contains(values, value)
 end
 
 return function(props)
+    local palette = props.theme or util.palette
+    local defaults = util.control_styles(palette)
+    local root_style = { display = "flex", position = "relative", alignItems = "start" }
+    local input_style, content_style = defaults.trigger, defaults.menu
     local options = normalize_options(props.items)
     local default_value = props.defaultValue
     if props.multiple and default_value == nil then default_value = {} end
@@ -194,7 +166,7 @@ return function(props)
                     if not state.disabled then set_active_index(option_index) end
                 end}
                 onClick={function() select_option(option) end}
-                style={util.resolve_style(props.itemStyle, state, item_style)}
+                style={util.resolve_style(props.itemStyle, state, util.menu_item_style(palette, state))}
             >
                 {content}
             </div>
@@ -226,6 +198,7 @@ return function(props)
 
     return <div style={util.resolve_style(props.style, root_state, root_style)}>
         <input
+            theme={palette}
             testId={props.testId}
             value={query}
             placeholder={props.placeholder}

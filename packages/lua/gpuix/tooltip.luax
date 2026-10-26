@@ -1,20 +1,12 @@
 local util = require("gpuix._util")
 
-local root_style = { display = "flex", position = "relative", alignItems = "start" }
-local trigger_style = {
-    display = "flex",
-    alignItems = "center",
-    focus = util.focus_ring,
-}
-local content_style = {
-    maxWidth = 280,
-    padding = 8,
-    borderRadius = 6,
-    background = "#27272a",
-    color = "#fafafa",
-}
-
 return function(props)
+    local palette = props.theme or util.palette
+    local root_style = { display = "flex", position = "relative", alignItems = "start" }
+    local trigger_style = util.control_styles(palette).row
+    local content_style = { maxWidth = 280, padding = palette.metrics.controlPadding,
+        borderRadius = palette.metrics.menuRadius, background = palette.raised, color = palette.text,
+        borderWidth = 1, borderColor = palette.borderStrong }
     local internal_open, set_internal_open = gpuix.use_state(props.defaultOpen == true)
     local controlled = props.open ~= nil
     local open = internal_open

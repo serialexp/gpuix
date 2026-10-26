@@ -4,14 +4,15 @@ local default_style = {
     width = 16,
     height = 16,
     flexShrink = 0,
-    color = "#a1a1aa",
+    color = util.palette.textMuted,
 }
 
 return function(props)
+    local palette = props.theme or util.palette
     if props.name == nil then error("gpuix.icon requires a name") end
     local weight = props.weight or "regular"
     local size = props.size or 16
-    local color = props.color or "#a1a1aa"
+    local color = props.color or palette.textMuted
     local state = { name = props.name, weight = weight, size = size, color = color }
     local style = props.style
     if style == nil then

@@ -1,104 +1,6 @@
 local Drawer = require("gpuix.drawer")
 local util = require("gpuix._util")
 
-local root_style = {
-    width = "100%",
-    height = "100%",
-    minWidth = 0,
-    minHeight = 0,
-    display = "flex",
-    flexDirection = "column",
-    position = "relative",
-    background = "#18181b",
-}
-
-local workspace_style = {
-    display = "flex",
-    flexDirection = "row",
-    position = "relative",
-    flexGrow = 1,
-    minWidth = 0,
-    minHeight = 0,
-}
-
-local content_style = {
-    display = "flex",
-    flexDirection = "row",
-    flexGrow = 1,
-    minWidth = 0,
-    minHeight = 0,
-}
-
-local status_bar_style = {
-    width = "100%",
-    height = 28,
-    flexShrink = 0,
-    display = "flex",
-    flexDirection = "row",
-    alignItems = "center",
-    paddingLeft = 4,
-    paddingRight = 4,
-    gap = 3,
-    borderTopWidth = 1,
-    borderColor = "#3f3f46",
-    background = "#18181b",
-}
-
-local button_style = {
-    minWidth = 24,
-    height = 22,
-    display = "flex",
-    flexDirection = "row",
-    alignItems = "center",
-    justifyContent = "center",
-    paddingLeft = 6,
-    paddingRight = 6,
-    borderRadius = 4,
-    hover = { background = "#27272a" },
-    active = { background = "#3f3f46" },
-    focus = util.focus_ring,
-}
-
-local active_button_style = {
-    minWidth = 24,
-    height = 22,
-    display = "flex",
-    flexDirection = "row",
-    alignItems = "center",
-    justifyContent = "center",
-    paddingLeft = 6,
-    paddingRight = 6,
-    borderRadius = 4,
-    background = "#3f3f46",
-    hover = { background = "#52525b" },
-    active = { background = "#52525b" },
-    focus = util.focus_ring,
-}
-
-local menu_style = {
-    width = 150,
-    display = "flex",
-    flexDirection = "column",
-    padding = 5,
-    gap = 2,
-    borderRadius = 7,
-    borderWidth = 1,
-    borderColor = "#52525b",
-    background = "#27272a",
-    focus = util.focus_ring,
-}
-
-local menu_item_style = {
-    width = "100%",
-    display = "flex",
-    flexDirection = "row",
-    alignItems = "center",
-    padding = 7,
-    borderRadius = 4,
-    hover = { background = "#3f3f46" },
-    focus = util.focus_ring,
-}
-
 local function copy(source)
     local result = {}
     for key, value in pairs(source) do result[key] = value end
@@ -147,6 +49,106 @@ local function panel_size(panel, sizes, position)
 end
 
 return function(props)
+    local palette = props.theme or util.palette
+    local root_style = {
+        width = "100%",
+        height = "100%",
+        minWidth = 0,
+        minHeight = 0,
+        display = "flex",
+        flexDirection = "column",
+        position = "relative",
+        background = palette.surface,
+        color = palette.text,
+    }
+
+    local workspace_style = {
+        display = "flex",
+        flexDirection = "row",
+        position = "relative",
+        flexGrow = 1,
+        minWidth = 0,
+        minHeight = 0,
+    }
+
+    local content_style = {
+        display = "flex",
+        flexDirection = "row",
+        flexGrow = 1,
+        minWidth = 0,
+        minHeight = 0,
+    }
+
+    local status_bar_style = {
+        width = "100%",
+        height = 28,
+        flexShrink = 0,
+        display = "flex",
+        flexDirection = "row",
+        alignItems = "center",
+        paddingLeft = 4,
+        paddingRight = 4,
+        gap = 3,
+        borderTopWidth = 1,
+        borderColor = palette.border,
+        background = palette.surface,
+    }
+
+    local button_style = {
+        minWidth = 24,
+        height = 22,
+        display = "flex",
+        flexDirection = "row",
+        alignItems = "center",
+        justifyContent = "center",
+        paddingLeft = 6,
+        paddingRight = 6,
+        borderRadius = 4,
+        hover = { background = palette.raised },
+        active = { background = palette.rowPressed },
+        focus = util.focus_style(palette),
+    }
+
+    local active_button_style = {
+        minWidth = 24,
+        height = 22,
+        display = "flex",
+        flexDirection = "row",
+        alignItems = "center",
+        justifyContent = "center",
+        paddingLeft = 6,
+        paddingRight = 6,
+        borderRadius = 4,
+        background = palette.rowPressed,
+        hover = { background = palette.rowHover },
+        active = { background = palette.rowHover },
+        focus = util.focus_style(palette),
+    }
+
+    local menu_style = {
+        width = 150,
+        display = "flex",
+        flexDirection = "column",
+        padding = 5,
+        gap = 2,
+        borderRadius = 7,
+        borderWidth = 1,
+        borderColor = palette.borderStrong,
+        background = palette.raised,
+        focus = util.focus_style(palette),
+    }
+
+    local menu_item_style = {
+        width = "100%",
+        display = "flex",
+        flexDirection = "row",
+        alignItems = "center",
+        padding = 7,
+        borderRadius = 4,
+        hover = { background = palette.rowPressed },
+        focus = util.focus_style(palette),
+    }
+
     local panels = props.panels or {}
     local active_panels, set_active_panels = gpuix.use_state(initial_active_panels(panels))
     local position_overrides, set_position_overrides = gpuix.use_state({})
@@ -262,7 +264,7 @@ return function(props)
                 local state = { id = panel.id, active = active, position = position }
                 local content = panel.renderButton and panel.renderButton(state)
                     or <text style={{
-                        color = active and "#fafafa" or "#a1a1aa",
+                        color = active and palette.text or palette.textMuted,
                         fontSize = 11,
                     }}>{panel.buttonLabel or panel.label or tostring(panel.id)}</text>
                 local custom_style = active
@@ -338,7 +340,7 @@ return function(props)
                     onClick={function() choose(item_index) end}
                     style={util.resolve_style(props.menuItemStyle, state, menu_item_style)}
                 >
-                    <text style={{ color = "#fafafa", fontSize = 12 }}>
+                    <text style={{ color = palette.text, fontSize = 12 }}>
                         {(selected and "✓  " or "   ") .. "Dock " .. position}
                     </text>
                 </div>
@@ -377,7 +379,7 @@ return function(props)
             height = 16,
             marginLeft = 3,
             marginRight = 3,
-            background = "#3f3f46",
+            background = palette.rowPressed,
         }} />
     end
 
@@ -429,6 +431,7 @@ return function(props)
             drawer_style.bottom = 0
         end
         drawers[#drawers + 1] = <Drawer
+            theme={palette}
             key={panel.id}
             testId={active and util.test_id(
                 props.testId,
@@ -454,7 +457,7 @@ return function(props)
         </Drawer>
     end
 
-    return <div testId={props.testId} style={util.resolve_style(props.style, {}, root_style)}>
+    return <div theme={palette} testId={props.testId} style={util.resolve_style(props.style, {}, root_style)}>
         <div style={util.resolve_style(props.workspaceStyle, {}, workspace_style)}>
             <div style={center_frame_style}>
                 <div

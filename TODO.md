@@ -1,8 +1,8 @@
 # TODO
 
-- Add a bounded, credential-redacted network recorder and inspector Network tab
-  around the shared HTTP client, including Lua's built-in fetch. Extend tracing
-  to other runtime clients explicitly rather than implying all traffic is captured.
+- Extend inspector network recording to external runtime clients explicitly
+  (Bun/Node fetch is not currently captured). Add transport-provided DNS/TLS and
+  per-redirect timings when the shared HTTP client exposes them.
 
 - Extend desktop distribution checks beyond isolated `--check` startup: launch
   packaged apps on each OS, verify painted content and interaction, and capture
@@ -55,35 +55,25 @@
 - The `rust-test` CI job runs the native crate's tests on macOS and Linux
   only. Add Windows once someone checks that the vendored LuaJIT and
   quickjs-ng build there with MSVC.
-- QuickJS cuts module names to 64 bytes (`ATOM_GET_STR_BUF_SIZE`) in some
-  of its own messages, such as "Could not find export 'x' in module ...",
-  and app module names are absolute paths. Show them in full, by a patch or
-  by rewriting the message where GPUIX reports it.
-- `gpx --watch` watches the JavaScript and TypeScript files in the entry
-  file's directory tree, so a JavaScript app doesn't reload when a module
-  from outside it (`../shared/x.ts`) or a text import (`./notes.md`)
-  changes. Watch the files the QuickJS loader actually loaded instead (it
-  knows their paths).
 - Errors thrown from Solid TSX under Bun report line numbers in the
   compiled output, not the source: `@gpuix/solid`'s Bun plugin returns the
   compiler's code without a source map, and Bun ignored an inline
   `sourceMappingURL` in plugin output when tried. Find a way to hand Bun
-  the compiler's map (`sourceMap: true` returns one).
+  the compiler's map (`sourceMap: true` returns one). Reproduced on Bun 1.4.0:
+  an original line 22 is reported as generated line 2 even with an inline map.
+  `Error.prepareStackTrace` can remap explicit `.stack` reads but does not fix
+  Bun's uncaught-error reporting, so do not ship that as a complete solution.
+  Track https://github.com/oven-sh/bun/issues/6173.
 - Bun 1.4.0's code splitting runs the modules of an import cycle in the
   wrong order when two entries share them (`@solidjs/signals`' core.js
   ran before scheduler.js). `packages/native/embedded/build.ts` works
   around it and fails on any other cycle. Report it to Bun with the small
   reproduction (two entries, `export * from` solid-js and from
   `@solidjs/universal`) and drop the workaround once it's fixed.
-- After a `gpx --watch` hot update, stack traces name the new module
-  versions with their `?hot=N` (`counter.tsx?hot=3:4:7`), which editors
-  don't open as a file link, and the runtime keeps a position map for each
-  version. QuickJS names a module's functions by its module name, so drop
-  the suffix where traces are built (the source-position patch could
-  rewrite the file name too) and free old versions' maps.
-- `gpx` reads a JavaScript app's `tsconfig.json` to pick Solid or React,
-  but `--watch` doesn't watch it, so changing `jsxImportSource` takes a
-  restart. Add the configs it read to what it watches.
+- QuickJS keeps old loaded modules and their source maps until interpreter
+  disposal. Reclaim maps only together with the corresponding bytecode:
+  timers, callbacks and retained errors can still reference older versions,
+  so deleting maps just because a hot update succeeded produces wrong locations.
 - `cargo clippy --features test-support,quickjs --all-targets` in
   packages/native reports about 58 lints (needless `return`s, too many
   arguments, `sort_by_key`, complex types), and CI doesn't run clippy.

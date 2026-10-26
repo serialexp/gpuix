@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css">
+  <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/fill/style.css">
+  <style>body{margin:0;background:#e9ebef} a{color:#2b7a5e} a:hover{color:#1d5a44}</style>
+</helmet>
+<div style="min-height:100vh;box-sizing:border-box;padding:32px;display:flex;justify-content:center;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif">
+  <div style="width:100%;max-width:1320px;height:780px;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;border:1px solid {{ t.frame }};background:{{ t.bg }};color:{{ t.text }};font-size:12px;box-shadow:0 20px 50px oklch(0.25 0.01 255 / 0.22)">
+
+    <div style="height:28px;flex-shrink:0;display:flex;align-items:center;gap:8px;padding:0 12px;background:{{ t.surface }};border-bottom:1px solid {{ t.border }}">
+      <div style="display:flex;gap:7px"><div style="width:11px;height:11px;border-radius:6px;background:#ff5f57"></div><div style="width:11px;height:11px;border-radius:6px;background:#febc2e"></div><div style="width:11px;height:11px;border-radius:6px;background:#28c840"></div></div>
+      <div style="flex:1;text-align:center;font-size:11.5px;font-weight:500;color:{{ t.muted }};margin-right:46px">GPUIX Test Results</div>
+    </div>
+
+    <div style="height:40px;flex-shrink:0;display:flex;align-items:center;gap:10px;padding:0 10px 0 14px;border-bottom:1px solid {{ t.border }};background:{{ t.surface }}">
+      <i class="{{ summary.icon }}" style="font-size:16px;color:{{ summary.color }}"></i>
+      <div style="font-size:13px;font-weight:600">Solid Lua counter suite</div>
+      <div style="display:flex;align-items:center;gap:12px;margin-left:6px;font-size:11.5px;color:{{ t.muted }}">
+        <div style="display:flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:3px;background:{{ t.add }}"></span>{{ summary.passed }} passed</div>
+        <div style="display:flex;align-items:center;gap:5px;color:{{ summary.failedColor }}"><span style="width:6px;height:6px;border-radius:3px;background:{{ summary.failedDot }}"></span>{{ summary.failed }} failed</div>
+        <div style="font-family:Menlo,Consolas,monospace;font-size:11px;color:{{ t.faint }}">{{ summary.time }}</div>
+      </div>
+      <div style="flex:1"></div>
+      <div style="height:26px;width:180px;box-sizing:border-box;display:flex;align-items:center;gap:6px;padding:0 8px;border-radius:6px;background:{{ t.field }};border:1px solid {{ t.borderStrong }};color:{{ t.faint }}"><i class="ph ph-magnifying-glass" style="font-size:13px"></i>Filter tests</div>
+      <sc-if value="{{ summary.hasFailed }}" hint-placeholder-val="{{ false }}">
+        <div style="height:26px;box-sizing:border-box;display:flex;align-items:center;gap:6px;padding:0 10px;border-radius:6px;background:{{ t.raised }};border:1px solid {{ t.borderStrong }}"><i class="ph ph-arrow-counter-clockwise" style="font-size:13px;color:{{ t.muted }}"></i>Rerun failed</div>
+      </sc-if>
+      <div style="height:26px;display:flex;align-items:center;gap:6px;padding:0 10px;border-radius:6px;background:{{ t.accent }};color:{{ t.onAccent }};font-weight:500"><i class="ph-fill ph-play" style="font-size:12px"></i>Run all</div>
+    </div>
+
+    <div style="flex:1;min-height:0;display:grid;grid-template-columns:minmax(150px,264px) minmax(210px,360px) minmax(300px,1fr)">
+
+      <div style="display:flex;flex-direction:column;min-width:0;background:{{ t.surface }};border-right:1px solid {{ t.border }}">
+        <div style="height:28px;flex-shrink:0;display:flex;align-items:center;gap:6px;padding:0 10px;color:{{ t.muted }};font-family:Menlo,Consolas,monospace;font-size:11px">
+          <i class="ph-fill ph-caret-down" style="font-size:10px;color:{{ t.faint }}"></i><i class="ph ph-file-code" style="font-size:13px"></i>solid_counter.test.lua
+        </div>
+        <sc-for list="{{ tests }}" as="ts" hint-placeholder-count="2">
+          <div onClick="{{ ts.onClick }}" style="height:28px;flex-shrink:0;display:flex;align-items:center;gap:8px;padding:0 10px 0 26px;cursor:pointer;background:{{ ts.bg }}">
+            <i class="{{ ts.icon }}" style="font-size:14px;flex-shrink:0;color:{{ ts.iconColor }}"></i>
+            <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ ts.name }}</div>
+            <div style="font-family:Menlo,Consolas,monospace;font-size:10.5px;color:{{ t.faint }}">{{ ts.dur }}</div>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="display:flex;flex-direction:column;min-width:0;border-right:1px solid {{ t.border }}">
+        <div style="height:28px;flex-shrink:0;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid {{ t.border }}">
+          <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500">{{ cur.name }}</div>
+          <div style="font-size:11px;color:{{ t.faint }}">{{ cur.stepCount }} steps</div>
+        </div>
+        <sc-for list="{{ steps }}" as="st" hint-placeholder-count="5">
+          <div onClick="{{ st.onClick }}" style="height:30px;flex-shrink:0;display:grid;grid-template-columns:16px 16px minmax(0,1fr) 40px 44px;gap:8px;align-items:center;padding:0 12px;cursor:pointer;background:{{ st.bg }};opacity:{{ st.opacity }}">
+            <div style="font-family:Menlo,Consolas,monospace;font-size:10.5px;color:{{ t.faint }};text-align:right">{{ st.n }}</div>
+            <i class="{{ st.statusIcon }}" style="font-size:14px;color:{{ st.statusColor }}"></i>
+            <div style="display:flex;align-items:baseline;gap:6px;min-width:0;white-space:nowrap">
+              <span style="font-family:Menlo,Consolas,monospace;font-size:11.5px;color:{{ st.actionColor }}">{{ st.action }}</span>
+              <span style="overflow:hidden;text-overflow:ellipsis;font-size:11.5px;color:{{ t.muted }}">{{ st.summary }}</span>
+            </div>
+            <div style="height:4px;border-radius:2px;background:{{ t.hover }};overflow:hidden"><div style="height:100%;width:{{ st.w }}%;border-radius:2px;background:{{ st.bar }}"></div></div>
+            <div style="font-family:Menlo,Consolas,monospace;font-size:10.5px;color:{{ t.faint }};text-align:right">{{ st.dur }}</div>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden">
+        <div style="height:28px;flex-shrink:0;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid {{ t.border }}">
+          <i class="{{ det.icon }}" style="font-size:14px;color:{{ t.muted }}"></i>
+          <div style="font-family:Menlo,Consolas,monospace;font-size:12px;font-weight:600">{{ det.action }}</div>
+          <div style="height:18px;display:flex;align-items:center;padding:0 6px;border-radius:4px;background:{{ det.pillBg }};color:{{ det.statusColor }};font-size:10.5px;font-weight:500">{{ det.status }}</div>
+          <div style="flex:1"></div>
+          <div style="flex-shrink:0;white-space:nowrap;font-family:Menlo,Consolas,monospace;font-size:10.5px;color:{{ t.faint }}">step {{ det.n }} of {{ cur.stepCount }} · {{ det.dur }}</div>
+        </div>
+
+        <div style="flex:1;min-height:0;display:flex;flex-direction:column;gap:14px;padding:14px;overflow:hidden">
+          <div style="display:flex;flex-direction:column;gap:2px;font-family:Menlo,Consolas,monospace;font-size:11.5px">
+            <sc-for list="{{ det.args }}" as="a" hint-placeholder-count="3">
+              <div style="min-height:20px;display:grid;grid-template-columns:72px minmax(0,1fr);gap:10px;align-items:baseline">
+                <div style="color:{{ t.faint }}">{{ a.k }}</div>
+                <div style="color:{{ a.c }};overflow-wrap:anywhere">{{ a.v }}</div>
+              </div>
+            </sc-for>
+          </div>
+
+          <sc-if value="{{ det.hasError }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:6px;background:{{ t.dangerWash }};font-size:11.5px">
+              <div style="display:flex;align-items:center;gap:6px;color:{{ t.danger }};font-weight:500"><i class="ph ph-warning-circle" style="font-size:14px"></i>{{ det.errTitle }}</div>
+              <div style="display:grid;grid-template-columns:72px minmax(0,1fr);gap:4px 10px;font-family:Menlo,Consolas,monospace;font-size:11.5px">
+                <div style="color:{{ t.faint }}">expected</div><div style="color:{{ t.text }}">{{ det.expected }}</div>
+                <div style="color:{{ t.faint }}">received</div><div style="color:{{ t.danger }}">{{ det.received }}</div>
+              </div>
+            </div>
+          </sc-if>
+
+          <div style="flex:1;min-height:0;display:flex;flex-direction:column;gap:6px">
+            <div style="display:flex;align-items:center;gap:8px;font-size:11px;color:{{ t.faint }}">
+              <div style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ det.snapLabel }}</div>
+              <div style="display:flex;flex-shrink:0;align-items:center;gap:2px">
+                <div style="height:20px;display:flex;align-items:center;padding:0 7px;border-radius:4px;background:{{ t.pressed }};color:{{ t.text }}">Snapshot</div>
+                <div style="height:20px;display:flex;align-items:center;padding:0 7px;border-radius:4px;color:{{ t.muted }}">Tree</div>
+              </div>
+            </div>
+            <div style="flex:1;min-height:0;position:relative;border-radius:6px;border:1px solid {{ t.border }};background:{{ t.stripes }};overflow:hidden;display:flex;justify-content:center;padding:14px;box-sizing:border-box">
+              <div style="width:100%;max-width:380px;display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding:24px 16px 14px;box-sizing:border-box;border-radius:4px;background:{{ t.app }};color:{{ t.appText }};font-size:12px;opacity:{{ det.snapOpacity }}">
+                <sc-for list="{{ det.els }}" as="el" hint-placeholder-count="9">
+                  <div style="position:relative;display:flex;align-items:center;min-height:22px;max-width:100%;white-space:nowrap;padding:{{ el.pad }};border-radius:4px;background:{{ el.bg }};color:{{ el.color }};box-shadow:{{ el.ring }}">
+                    {{ el.label }}
+                    <sc-if value="{{ el.target }}" hint-placeholder-val="{{ false }}">
+                      <div style="position:absolute;right:-2px;bottom:100%;margin-bottom:3px;height:16px;z-index:1;display:flex;align-items:center;padding:0 5px;border-radius:3px;background:{{ el.tagBg }};color:{{ el.tagColor }};font-family:Menlo,Consolas,monospace;font-size:9.5px;white-space:nowrap">{{ el.tag }}</div>
+                    </sc-if>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="height:22px;flex-shrink:0;display:flex;align-items:center;gap:14px;padding:0 12px;border-top:1px solid {{ t.border }};background:{{ t.surface }};font-size:10.5px;color:{{ t.faint }}">
+      <div style="display:flex;align-items:center;gap:5px"><i class="ph ph-arrows-down-up" style="font-size:11px"></i>steps</div>
+      <div style="display:flex;align-items:center;gap:5px"><i class="ph ph-arrows-left-right" style="font-size:11px"></i>tests</div>
+      <div style="flex:1"></div>
+      <div style="font-family:Menlo,Consolas,monospace">gpuix test · 800 × 600 · seed 1</div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;Dark&quot;,&quot;Light&quot;],&quot;default&quot;:&quot;Dark&quot;,&quot;tsType&quot;:&quot;'Dark' | 'Light'&quot;},&quot;scenario&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;One failure&quot;,&quot;All passing&quot;],&quot;default&quot;:&quot;One failure&quot;,&quot;tsType&quot;:&quot;'One failure' | 'All passing'&quot;}}">
+const W = (a) => `oklch(1 0 0 / ${a})`;
+const K = (a) => `oklch(0.25 0.01 255 / ${a})`;
+const D = { bg:'oklch(0.165 0.006 255)', surface:'oklch(0.195 0.006 255)', raised:'oklch(0.235 0.007 255)', field:'oklch(0.15 0.006 255)', frame:'oklch(0.32 0.008 255)', border:W(0.08), borderStrong:W(0.14), text:'oklch(0.93 0.005 255)', muted:'oklch(0.72 0.008 255)', faint:'oklch(0.56 0.01 255)', accent:'oklch(0.765 0.15 163)', onAccent:'oklch(0.2 0.03 163)', rowSel:'oklch(0.765 0.15 163 / 0.16)', hover:W(0.05), thumb:W(0.18), thumbActive:W(0.44), pressed:W(0.09), danger:'oklch(0.704 0.191 22.2)', onDanger:'oklch(0.2 0.04 22)', dangerWash:'oklch(0.704 0.191 22.2 / 0.14)', add:'oklch(0.765 0.177 163.2)', addWash:'oklch(0.765 0.177 163.2 / 0.14)', str:'oklch(0.765 0.127 163.2)', num:'oklch(0.828 0.136 84.4)', keyword:'oklch(0.673 0.131 276.9)', key:'oklch(0.74 0.12 277)', app:'oklch(0.21 0.004 255)', appText:'oklch(0.93 0.005 255)', appMuted:'oklch(0.66 0.008 255)', appBtn:'oklch(0.55 0.2 262)' };
+const L = { bg:'oklch(0.99 0.002 255)', surface:'oklch(0.97 0.003 255)', raised:'oklch(1 0 0)', field:'oklch(1 0 0)', frame:K(0.14), border:K(0.09), borderStrong:K(0.16), text:'oklch(0.25 0.01 255)', muted:'oklch(0.45 0.012 255)', faint:'oklch(0.56 0.012 255)', accent:'oklch(0.58 0.13 163)', onAccent:'oklch(0.99 0.01 163)', rowSel:'oklch(0.6 0.13 163 / 0.14)', hover:K(0.05), thumb:K(0.2), thumbActive:K(0.46), pressed:K(0.09), danger:'oklch(0.577 0.215 27.3)', onDanger:'oklch(0.99 0.01 27)', dangerWash:'oklch(0.577 0.215 27.3 / 0.10)', add:'oklch(0.596 0.145 163.2)', addWash:'oklch(0.596 0.145 163.2 / 0.12)', str:'oklch(0.53 0.105 163)', num:'oklch(0.56 0.13 60)', keyword:'oklch(0.511 0.19 277)', key:'oklch(0.5 0.18 277)', app:'oklch(1 0 0)', appText:'oklch(0.25 0.01 255)', appMuted:'oklch(0.5 0.01 255)', appBtn:'oklch(0.55 0.2 262)' };
+const R3 = [[1,0],[2,0],[3,0]];
+const S = (action, args, dur, snap, extra) => ({ action, args, dur, snap, status: 'passed', ...extra });
+const TESTS = [
+  { name: 'Mouse activation', steps: [
+    S('expectText', { testId: 'solid-counter', text: 'Count: 0', exact: true }, 24, { count: 0, target: 'solid-counter' }),
+    S('click', { testId: 'solid-counter', button: 'left' }, 48, { count: 1, target: 'solid-counter' }),
+    S('expectText', { testId: 'solid-counter', text: 'Count: 1', exact: true }, 22, { count: 1, target: 'solid-counter' }),
+    S('screenshot', { name: 'mouse-activation' }, 15, { count: 1 }),
+  ] },
+  { name: 'Fresh state and keyboard activation', steps: [
+    S('expectText', { testId: 'solid-counter', text: 'Count: 0', exact: true }, 29, { count: 0, target: 'solid-counter' }),
+    S('click', { testId: 'solid-counter', button: 'left' }, 52, { count: 1, target: 'solid-counter' }),
+    S('press', { key: 'Enter' }, 29, { count: 2, target: 'solid-counter' }),
+    S('expectText', { testId: 'solid-counter', text: 'Count: 2', exact: true }, 27, { count: 2, target: 'solid-counter' }),
+    S('screenshot', { name: 'keyboard-activation' }, 15, { count: 2 }),
+  ] },
+  { name: 'Reverse keeps local row counts', failing: true, steps: [
+    S('click', { testId: 'row-1', button: 'left' }, 40, { count: 0, target: 'row-1', rows: [[1,1],[2,0],[3,0]] }),
+    S('click', { testId: 'reverse-rows', button: 'left' }, 38, { count: 0, target: 'reverse-rows', rows: [[3,0],[2,0],[1,0]] }),
+    S('expectText', { testId: 'row-1', text: 'Row 1, position 3: 1 clicks', exact: true }, 134, { count: 0, target: 'row-1', rows: [[3,0],[2,0],[1,0]] }, { status: 'failed', expected: '"Row 1, position 3: 1 clicks"', received: '"Row 1, position 3: 0 clicks"', errTitle: 'Text did not match after 134 ms' }),
+    S('screenshot', { name: 'reverse-rows' }, 0, { count: 0, rows: [[3,0],[2,0],[1,0]] }, { status: 'skipped' }),
+  ] },
+];
+const AICON = { expectText: 'ph ph-check-square-offset', click: 'ph ph-cursor-click', press: 'ph ph-keyboard', screenshot: 'ph ph-camera' };
+const testDur = (ts) => ts.steps.reduce((a, s) => a + s.dur, 0) + 2;
+const summarize = (s) => {
+  const a = s.args;
+  if (s.action === 'press') return a.key;
+  if (s.action === 'screenshot') return a.name;
+  if (s.action === 'expectText') return `${a.testId} = "${a.text}"`;
+  return a.testId;
+};
+
+class Component extends DCLogic {
+  state = { test: 1, step: 0 };
+  list() { return (this.props.scenario ?? 'One failure') === 'All passing' ? TESTS.slice(0, 2) : TESTS; }
+  componentDidMount() {
+    this.onKey = (e) => {
+      const tests = this.list();
+      const ti = Math.min(this.state.test, tests.length - 1);
+      const n = tests[ti].steps.length;
+      if (e.key === 'ArrowDown') this.setState({ test: ti, step: Math.min(n - 1, this.state.step + 1) });
+      else if (e.key === 'ArrowUp') this.setState({ test: ti, step: Math.max(0, this.state.step - 1) });
+      else if (e.key === 'ArrowRight') this.setState({ test: Math.min(tests.length - 1, ti + 1), step: 0 });
+      else if (e.key === 'ArrowLeft') this.setState({ test: Math.max(0, ti - 1), step: 0 });
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener('keydown', this.onKey);
+  }
+  componentWillUnmount() { window.removeEventListener('keydown', this.onKey); }
+  renderVals() {
+    const base = (this.props.theme ?? 'Dark') === 'Light' ? L : D;
+    const t = { ...base, stripes: `repeating-linear-gradient(135deg, ${base.hover} 0 6px, transparent 6px 12px)` };
+    const tests = this.list();
+    const ti = Math.min(this.state.test, tests.length - 1);
+    const cur = tests[ti];
+    const si = Math.min(this.state.step, cur.steps.length - 1);
+    const sIcon = { passed: 'ph-fill ph-check-circle', failed: 'ph-fill ph-x-circle', skipped: 'ph ph-circle-dashed' };
+    const sColor = { passed: t.add, failed: t.danger, skipped: t.faint };
+    const failedCount = tests.filter((x) => x.failing).length;
+    const total = tests.reduce((a, x) => a + testDur(x), 0);
+    const maxDur = Math.max(...cur.steps.map((s) => s.dur));
+
+    const testRows = tests.map((x, i) => ({
+      name: x.name, dur: `${testDur(x)} ms`,
+      icon: x.failing ? sIcon.failed : sIcon.passed, iconColor: x.failing ? t.danger : t.add,
+      bg: i === ti ? t.rowSel : 'transparent', onClick: () => this.setState({ test: i, step: 0 }),
+    }));
+    const steps = cur.steps.map((s, i) => ({
+      n: i + 1, action: s.action, summary: summarize(s),
+      statusIcon: sIcon[s.status], statusColor: sColor[s.status],
+      actionColor: s.status === 'failed' ? t.danger : t.text,
+      dur: s.status === 'skipped' ? '—' : `${s.dur} ms`,
+      w: Math.round((s.dur / maxDur) * 100),
+      bar: s.status === 'failed' ? t.danger : i === si ? t.accent : t.thumbActive,
+      opacity: s.status === 'skipped' ? 0.6 : 1,
+      bg: i === si ? t.rowSel : 'transparent', onClick: () => this.setState({ step: i }),
+    }));
+
+    const s = cur.steps[si];
+    const val = (v) => typeof v === 'string' ? { v: `"${v}"`, c: t.str } : typeof v === 'number' ? { v: String(v), c: t.num } : { v: String(v), c: t.keyword };
+    const args = Object.entries(s.args).map(([k, v]) => ({ k, ...val(v) }));
+    const sn = s.snap;
+    const target = s.status === 'skipped' ? null : sn.target;
+    const ring = (id) => id === target ? `0 0 0 1.5px ${s.status === 'failed' ? t.danger : t.accent}` : 'none';
+    const el = (label, id, kind) => ({
+      label, target: id === target, tag: `[${id}]`,
+      tagBg: s.status === 'failed' ? t.danger : t.accent, tagColor: s.status === 'failed' ? t.onDanger : t.onAccent,
+      ring: ring(id),
+      pad: kind === 'primary' ? '8px 14px' : kind === 'ghost' ? '4px 8px' : kind === 'row' ? '4px 6px' : '0 2px',
+      bg: kind === 'primary' ? t.appBtn : 'transparent',
+      color: kind === 'primary' ? 'oklch(0.99 0 0)' : kind === 'muted' ? t.appMuted : t.appText,
+    });
+    const rows = sn.rows ?? R3;
+    const els = [
+      el(`Count: ${sn.count}`, 'solid-counter', 'primary'),
+      el(`Doubled: ${sn.count * 2}`, 'doubled', 'text'),
+      el('Toggle details', 'toggle-details', 'ghost'),
+      el('Reverse rows (local counts survive)', 'reverse-rows', 'ghost'),
+      el('Add row', 'add-row', 'ghost'),
+      ...rows.map(([r, c], p) => el(`Row ${r}, position ${p + 1}: ${c} clicks`, `row-${r}`, 'row')),
+      el('Index: counts stay at their positions', 'index-note', 'muted'),
+    ];
+    const statusLabel = { passed: 'Passed', failed: 'Failed', skipped: 'Skipped' }[s.status];
+    const det = {
+      n: si + 1, action: s.action, icon: AICON[s.action], status: statusLabel,
+      statusColor: sColor[s.status], pillBg: s.status === 'failed' ? t.dangerWash : s.status === 'passed' ? t.addWash : t.hover,
+      dur: s.status === 'skipped' ? 'not run' : `${s.dur} ms`, args, els,
+      hasError: s.status === 'failed', errTitle: s.errTitle, expected: s.expected, received: s.received,
+      snapLabel: s.status === 'skipped' ? 'Not run — previous step failed. Showing last captured frame.' : s.status === 'failed' ? 'Frame at failure' : `Frame after step ${si + 1}`,
+      snapOpacity: s.status === 'skipped' ? 0.5 : 1,
+    };
+    return {
+      t, tests: testRows, steps, det,
+      cur: { name: cur.name, stepCount: cur.steps.length },
+      summary: {
+        passed: tests.length - failedCount, failed: failedCount, time: `${total} ms`, hasFailed: failedCount > 0,
+        icon: failedCount ? 'ph-fill ph-x-circle' : 'ph-fill ph-check-circle', color: failedCount ? t.danger : t.add,
+        failedColor: failedCount ? t.danger : t.faint, failedDot: failedCount ? t.danger : t.thumb,
+      },
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -19,9 +19,11 @@ The crates.io package of `rquickjs-sys` 0.14.0 with
 `rquickjs-sys-0.14.0-map-hash-mix.diff`,
 `rquickjs-sys-0.14.0-source-position.diff`,
 `rquickjs-sys-0.14.0-proxy-accessor-descriptor.diff` and
-`rquickjs-sys-0.14.0-rerun-on-source-change.diff` applied, in that order.
+`rquickjs-sys-0.14.0-rerun-on-source-change.diff`, then
+`rquickjs-sys-0.14.0-source-filenames.diff` applied, in that order.
 `Cargo.toml` swaps it in with `[patch.crates-io]`, and the `quickjs` feature
-turns on the first two's features. The other two are plain fixes.
+turns on the first two's features. The remaining patches extend or fix them
+without additional feature flags.
 
 ### map-hash-mix
 
@@ -43,7 +45,14 @@ that maps each position a stack trace shows. GPUIX compiles app TypeScript
 and JSX before QuickJS runs it, so QuickJS's positions are in the compiled
 code; the hook puts them back at the source. It applies to the built-in
 stack format, to the `CallSite`s an app's `Error.prepareStackTrace` gets,
-and to a syntax error's position where QuickJS shows one. A hook written in
+and to a syntax error's position where QuickJS shows one. The follow-up
+`source-filenames` patch lets the hook return a display filename too. The
+returned C string is borrowed and must remain valid until the runtime is
+disposed; GPUIX owns it alongside each version's source map. This removes
+hot-update suffixes without changing module identity or losing old callbacks'
+maps. The follow-up also removes fixed buffers from export-resolution names
+and grows formatted error messages beyond the 256-byte fast path when needed,
+so long paths are not truncated. A hook written in
 JavaScript (as `Error.prepareStackTrace`) can't run when the stack is full,
 and QuickJS then leaves a stack overflow's `stack` null; a C hook can. That
 still happens when an app sets its own `Error.prepareStackTrace`, as it

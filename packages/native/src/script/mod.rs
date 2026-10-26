@@ -4,8 +4,13 @@
 //! own error wording.
 
 pub(crate) mod app;
+pub(crate) mod http;
 pub(crate) mod reload;
+#[cfg(feature = "quickjs")]
+pub(crate) mod reset_bench;
 pub(crate) mod server;
+pub(crate) mod test_control;
+pub(crate) mod test_ui;
 pub(crate) mod tray;
 pub(crate) mod tray_api;
 

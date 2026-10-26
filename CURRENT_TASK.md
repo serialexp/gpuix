@@ -1,3 +1,27 @@
+# Dependency-aware embedded hot reload (2026-10-26)
+
+- Replaced the embedded JavaScript entry-directory scan with an explicit, dynamically extended file watcher. Runtime graph records loaded/attempted modules (including dynamic and text imports); framework lookup records consulted configs, extends chains and missing nearer config candidates. External imports now update too. Lua's directory watcher is unchanged.
+- Changes to configs restart the interpreter with state reset, avoiding stale framework caches. Failed reloads retain newly attempted dependency/config watches, including missing extended configs; fixing those files can recover without another edit to the entry. Invalid configs leave the previous UI running. Ordinary React/Solid module updates retain their existing refresh semantics.
+- Content polling remains 100 ms with one stable poll for coalescing, and stops when its receiver closes. Watch registration preserves existing fingerprints; deletion/recreation and newly added watch paths have regression coverage. No recursive scan of unrelated files.
+- Regression coverage includes external code/text imports, extended configs, dynamic imports joining after load, invalid-config recovery, missing-import recovery and missing-config recovery. Live background checks exercise real filesystem notifications, state preservation/reset, recovery and unchanged desktop focus. README and TODO updated.
+- Validation: 560 library and 30 CLI tests pass. Release launcher and live watcher checks pass; logs are /tmp/gpuix-watch-tests-final.log, /tmp/gpuix-watch-build.log and /tmp/gpuix-watch-live.log.
+
+# Embedded JavaScript error locations (2026-10-26)
+
+- Extended the vendored QuickJS source-position hook to return a borrowed display filename as well as source coordinates. Rust owns each plain filename beside its version-specific position map; built-in stacks and custom `Error.prepareStackTrace` CallSites no longer expose `?hot=N`. Module identities are unchanged.
+- Export-resolution diagnostics now use complete atom strings, and formatted engine error messages grow beyond their 256-byte fast path. A regression checks both long module paths and long export names.
+- Do not discard maps from older module versions: retained callbacks and errors can still reference their bytecode. They are disposed with the interpreter. The new vendor follow-up patch is recorded in vendor/README.md and reverse-apply checked.
+- Bun 1.4.0 still ignores inline source maps from runtime plugins. Reproduced original line 22 reported as generated line 2. An experimental `Error.prepareStackTrace` adapter corrected explicit `.stack` reads but not Bun's own uncaught-error report; removed rather than shipping incomplete/global interception. README and TODO document the upstream limitation (oven-sh/bun#6173). No Solid plugin changes remain.
+- Validation: 554 library and 30 CLI tests pass; Solid TypeScript build passes.
+
+# Directory scenarios and native test viewer (2026-10-26)
+
+- Restored the stashed macOS work after merging the Linux fixes. Kept platform-aware keystroke parsing alongside release activation, and kept the Linux closed-tray-channel handling alongside interpreter resets and HTTP completions. The original stash is retained as a backup.
+- `gpx test examples/scenarios/ --ui` recursively discovers scenario/suite JSON files, validates before launching, runs files sequentially, reuses each file's app between cases, and writes combined JSON/HTML reports. The independent native viewer survives app crashes and supports filtering, arrow navigation, failed-only reruns and Run all.
+- Viewer follows the Comet test-runner design with grouped cases, steps and evidence columns. Every executed UI step captures screenshot/tree evidence; details show assertion values, snapshot target bounds and a Tree toggle. `--ui --background` avoids activating the viewer; default UI launches activate it once.
+- The updated GPUI had a macOS compile regression: `NSOperatingSystemVersion::new` no longer exists. Fixed it in `zed/crates/gpui_macos/src/window.rs` using the struct initializer already used elsewhere in GPUI. This submodule edit is uncommitted and must be published before advancing the parent pin.
+- Verification after integration: 552 Rust library tests and 30 CLI tests pass; release launcher builds; all 7 bundled Lua/React/Solid cases pass. Live independent-viewer checks cover screenshots/trees, target bounds, startup/assertion failures, reset isolation, both rerun modes, final exit status and unchanged desktop focus. Fixed a flaky mock HTTP test by explicitly making accepted sockets blocking.
+
 # Publishing Linux compatibility changes (2026-10-25)
 
 - Bart authorized commit and push. Published rebased Zed commit `03e9509da6af0871ba1bbdc3d0e1266409c08552` to `Aeolun/zed` branch `gpuix-linux-upstream-20261025`, using a normal new-branch push (no remote history rewritten). Updated `.gitmodules` branch to match; URL remains Aeolun/zed.
@@ -38,6 +62,74 @@
 
 # Current task
 
+## 2026-10-23: Interpreter reset cost measurements
+
+- Added `gpx bench-reset` and scripts/bench-reset.ts to measure fresh startup
+  against fresh Lua/JS interpreters, trees and GPUI roots in one retained native
+  window. Timings separate load, Lua mount, disposal, root swap and CPU drawing.
+- Seven launches / 140 resets per example on M3 Max: Lua counter 235.6 ms fresh
+  versus 3.07 ms reset; Lua workspace 239.7 versus 6.42 ms; embedded React
+  counter 251.2 versus 16.78 ms. Native initialization/window opening dominate.
+- docs/reset-benchmark.md records methodology and limitations. This is not yet
+  a complete suite reset/isolation path: event/HTTP/tray rebinding, extra-window
+  cleanup and asynchronous readiness still need implementation and measurement.
+- Validation: 546 library and 26 CLI tests pass; the driver typechecks in
+  isolation (the broader scripts project has unrelated existing type errors).
+
+## 2026-10-23: Declarative native UI scenarios
+
+- Added `gpx test scenario.json [--output DIRECTORY]`, with background fresh
+  process launches and ordered click/press/window/screenshot steps plus retrying
+  text, custom-prop, mounted-absence and painted-bounds assertions.
+- Produces offline HTML and JSON reports, stdout/stderr logs, failure PNG/tree
+  artifacts and skipped-step reporting; the app is closed after each run.
+  README documents the schema and limitations; examples/scenarios/counter.json
+  is a runnable Solid Lua mouse/keyboard scenario.
+- Fixed shared native automation press to include key-up after GPUI's
+  text-input-aware key-down path, allowing Enter/Space release activation.
+- Validation: 544 library and 26 CLI tests pass. Live Lua/React/Solid scenarios,
+  delayed updates, keyboard activation, intentional assertion failure artifacts,
+  missing entry and failed startup reports pass without changing desktop focus.
+
+## 2026-10-23: Inspect requests without redaction
+
+- Removed automatic URL/query, header and JSON-field redaction from the local
+  Network inspector. Form, untyped UTF-8 and invalid/truncated JSON previews
+  are visible too. Capture-size limits still apply; README warns screenshots
+  can contain credentials.
+- Validation: all 543 Rust tests pass, including unredacted query/header/body
+  rendering and form/truncated JSON preview regression assertions.
+
+## 2026-10-23: Embedded JavaScript fetch
+
+- Added promise-based global fetch, Headers and abort support to QuickJS,
+  sharing the native HTTP transport with Lua rather than duplicating it.
+- Buffered responses support text/JSON/ArrayBuffer and single consumption;
+  requests support string bodies, cancellation and bounded timeouts/body sizes.
+  README documents the supported subset and remaining browser API gaps.
+- Added examples/fetch.tsx with a click-triggered public IPv4 lookup.
+- Validation: 543 Rust library tests pass, including promise/error/binary/abort
+  and running-app completion coverage. Background live React and Solid POSTs
+  and the real ipify lookup succeeded; Network-tab screenshots show requests.
+  Bun/Node requests still use their own transport and are not captured.
+
+## 2026-10-23: Native Network inspector
+
+- Committed Lua fetch separately as 8ab5207 before starting the inspector.
+- Implemented the design's Network tab against a development-only shared
+  HTTP-client recorder: bounded history, streaming previews, unredacted metadata,
+  record/pause/clear, text/type filters, waterfall and request detail tabs.
+- Scope is the shared GPUI transport (Lua fetch and native HTTP images), not
+  ambient Bun/Node or third-party network interception. Theme work remains
+  uncommitted and is reused by the native UI.
+- Validation: 540 Rust tests passed initially, including streaming/cancellation
+  and a native filter-input/chrome-isolation regression. Embedded bundles and
+  native TypeScript build pass. Real HTTP screenshots cover image/POST/404,
+  headers/payload/response/timing, filtering, pause/clear and pending requests
+  without taking desktop focus. Existing fetch checks pass for both Lua models,
+  including binary bodies, UI responsiveness, body timeouts and cancellation;
+  the native inspector interaction regression also passes.
+
 ## 2026-10-22: Non-activating embedded app checks
 
 - Added `gpx --background` for Lua/LuaX and QuickJS window creation. Live
@@ -49,6 +141,33 @@
 - Validation: 535 Rust library tests and 21 launcher tests pass. Release gpx
   rebuilt. Live Lua and QuickJS startup, click/state updates and GPU screenshots
   each preserved the desktop foreground application's PID.
+
+## 2026-10-22: Shared Comet theme and native inspector styling
+
+- Implemented the local Native Theme Spec's Comet, tidied dark/light palette in
+  Theme, with semantic surface, interaction, focus, danger and scrollbar tokens.
+  Added shared control metrics and the matching GpuixTheme/GpuixMetrics fields.
+- gpuix.theme(overrides) exports resolved palette snapshots to Lua. Bundled
+  controls in both rendering models accept a theme palette; existing custom
+  styles retain precedence. React/Solid JavaScript controls remain headless.
+- Restyled the native inspector with Phosphor icons, full-width coloured tree
+  rows, an Elements toolbar and structured property sections. Its appearance
+  follows the root host theme; Lua now preserves theme on div/text hosts.
+  Input selection also reads the native selection token.
+- Corrected the toolbar against the actual mockup: icon-only picker on the
+  left, separator and Elements pill, icon-only close on the right. No inert
+  resize button is shown while the dock has no resize interaction.
+  Painted inspector and popup bounds exclude chrome from native/API picking,
+  including application boxes extending underneath it.
+- Updated the Solid workspace's application chrome to consume the palette.
+  Both workspace examples pass launcher --check. Live dark/light galleries
+  for both Lua models render correctly, including the native inspector.
+- Release launcher/addon rebuilt. Rust: 535 passed; native JS/Lua: 27 passed;
+  React: 540 passed, 6 QuickJS-addon skips; examples: 55 passed; Solid JS:
+  29 passed, 7 QuickJS-addon skips. React TypeScript build passed. Native
+  inspector picking/state and live fetch checks also pass after restyling.
+- Network-tab design is being handled separately by Bart; no
+  placeholder Network tab or request-recording UI has been added here.
 
 ## 2026-10-22: Native in-app inspector (supersedes browser-first UX)
 

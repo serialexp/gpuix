@@ -1,32 +1,8 @@
 local util = require("gpuix._util")
 
-local group_style = {
-    display = "flex",
-    flexDirection = "row",
-    alignItems = "center",
-    gap = 12,
-}
-
-local item_style = {
-    display = "flex",
-    flexDirection = "row",
-    alignItems = "center",
-    gap = 6,
-    focus = util.focus_ring,
-}
-
-local indicator_style = {
-    width = 18,
-    height = 18,
-    display = "flex",
-    alignItems = "center",
-    justifyContent = "center",
-    borderRadius = 9,
-    borderWidth = 1,
-    borderColor = "#71717a",
-}
-
 return function(props)
+    local palette = props.theme or util.palette
+    local group_style = util.control_styles(palette).row
     local options = props.options or {}
     local initial = props.defaultValue
     if initial == nil and options[1] ~= nil then initial = options[1].value end
@@ -77,14 +53,16 @@ return function(props)
                     move_from(option_index, -1)
                 end
             end}
-            style={util.resolve_style(props.itemStyle, state, item_style)}
+            style={util.resolve_style(props.itemStyle, state, util.row_style(palette, state))}
         >
             <div
                 testId={util.test_id(props.testId, "-" .. option_value .. "-indicator")}
                 onClick={select_option}
-                style={util.resolve_style(props.indicatorStyle, state, indicator_style)}
+                style={util.resolve_style(props.indicatorStyle, state, util.indicator_style(palette, state, true))}
             >
-                {selected and <div onClick={select_option} style={{ width = 8, height = 8, borderRadius = 4, background = "#fafafa" }} /> or nil}
+                {selected and <div onClick={select_option} style={{ width = palette.metrics.controlDotSize,
+                    height = palette.metrics.controlDotSize, borderRadius = palette.metrics.controlDotSize / 2,
+                    background = palette.accent }} /> or nil}
             </div>
             <text>{option.label or option_value}</text>
         </div>

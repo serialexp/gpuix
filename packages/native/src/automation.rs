@@ -43,6 +43,7 @@ struct WindowBounds {
     bounds: HashMap<u64, ElementBounds>,
     visible: HashMap<u64, ElementBounds>,
     order: Vec<u64>,
+    inspector_bounds: Vec<gpui::Bounds<gpui::Pixels>>,
     highlight: Option<(u64, Option<Instant>)>,
 }
 
@@ -84,6 +85,7 @@ pub fn bounds_frame_reset() -> impl IntoElement {
                 entry.bounds.clear();
                 entry.visible.clear();
                 entry.order.clear();
+                entry.inspector_bounds.clear();
             });
         },
     )
@@ -190,12 +192,29 @@ pub fn window_bounds(window: gpui::WindowId) -> HashMap<u64, ElementBounds> {
     })
 }
 
+pub(crate) fn exclude_inspector_bounds(bounds: gpui::Bounds<gpui::Pixels>, window: &Window) {
+    BOUNDS.with(|cell| {
+        cell.borrow_mut()
+            .entry(window.window_handle().window_id())
+            .or_default()
+            .inspector_bounds
+            .push(bounds.intersect(&window.content_mask().bounds));
+    });
+}
+
 pub fn painted_candidates(window: gpui::WindowId, x: f64, y: f64) -> Vec<u64> {
     BOUNDS.with(|cell| {
         let windows = cell.borrow();
         let Some(entry) = windows.get(&window) else {
             return Vec::new();
         };
+        if entry
+            .inspector_bounds
+            .iter()
+            .any(|bounds| bounds.contains(&gpui::point(gpui::px(x as f32), gpui::px(y as f32))))
+        {
+            return Vec::new();
+        }
         entry
             .order
             .iter()
@@ -230,10 +249,10 @@ pub fn highlight(window: gpui::WindowId, node: Option<u64>) {
     });
 }
 
-pub fn inspector_overlay() -> impl IntoElement {
+pub fn inspector_overlay(color: gpui::Hsla) -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        |_, _, window, _| {
+        move |_, _, window, _| {
             let bounds = BOUNDS.with(|cell| {
                 let windows = cell.borrow();
                 let entry = windows.get(&window.window_handle().window_id())?;
@@ -250,7 +269,7 @@ pub fn inspector_overlay() -> impl IntoElement {
                             point(px(bounds.x as f32), px(bounds.y as f32)),
                             gpui::size(px(bounds.width as f32), px(bounds.height as f32)),
                         ),
-                        gpui::rgb(0x38bdf8),
+                        color,
                         gpui::BorderStyle::default(),
                     ));
                 }
@@ -418,7 +437,9 @@ pub fn dispatch_keystrokes(
     keystrokes: &str,
 ) -> Result<(), String> {
     for keystroke in keystrokes.split(' ') {
-        window.dispatch_keystroke(parse_keystroke(keystroke, cx.platform_info().os)?, cx);
+        let keystroke = parse_keystroke(keystroke, cx.platform_info().os)?;
+        window.dispatch_keystroke(keystroke.clone(), cx);
+        window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
     }
     Ok(())
 }
@@ -576,6 +597,44 @@ pub fn dispatch_scroll_wheel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::prelude::*;
+
+    struct KeyboardButton {
+        focus: gpui::FocusHandle,
+        clicks: Rc<Cell<usize>>,
+    }
+
+    impl gpui::Render for KeyboardButton {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            let clicks = self.clicks.clone();
+            gpui::div()
+                .id("__gpuix_keyboard_test")
+                .size_full()
+                .track_focus(&self.focus)
+                .on_click(move |_, _, _| clicks.set(clicks.get() + 1))
+        }
+    }
+
+    #[test]
+    fn automation_press_releases_keys_and_activates_focused_buttons() {
+        let mut cx = gpui::TestAppContext::single();
+        let focus = cx.update(|cx| cx.focus_handle());
+        let clicks = Rc::new(Cell::new(0));
+        let window = cx.add_window({
+            let focus = focus.clone();
+            let clicks = clicks.clone();
+            move |_, _| KeyboardButton { focus, clicks }
+        });
+        cx.update_window(window.into(), |_, window, cx| window.focus(&focus, cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            dispatch_keystrokes(window, cx, "enter space").unwrap();
+        })
+        .unwrap();
+        assert_eq!(clicks.get(), 2);
+    }
 
     #[test]
     fn bounds_and_picking_are_isolated_by_window_and_clipped() {
@@ -616,6 +675,18 @@ mod tests {
         assert!(painted_candidates(first, 30.0, 10.0).is_empty());
         assert!(painted_candidates(first, 20.0, 10.0).is_empty());
         assert!(painted_candidates(second, 10.0, 10.0).is_empty());
+        BOUNDS.with(|cell| {
+            cell.borrow_mut()
+                .get_mut(&first)
+                .unwrap()
+                .inspector_bounds
+                .push(Bounds::new(
+                    point(px(5.0), px(5.0)),
+                    gpui::size(px(10.0), px(10.0)),
+                ));
+        });
+        assert!(painted_candidates(first, 10.0, 10.0).is_empty());
+        assert_eq!(painted_candidates(first, 2.0, 2.0), vec![7]);
         highlight(first, Some(7));
         remove_window_bounds(first);
         assert!(window_bounds(first).is_empty());

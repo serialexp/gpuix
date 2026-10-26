@@ -1,0 +1,142 @@
+diff --git a/quickjs/quickjs.c b/quickjs/quickjs.c
+index 936170d..9810d15 100644
+--- a/quickjs/quickjs.c
++++ b/quickjs/quickjs.c
+@@ -8085,15 +8085,16 @@ void JS_SetSourcePositionFunc(JSRuntime *rt, JSSourcePositionFunc *func,
+ 
+ /* Local patch: the embedder's position, for every position a stack trace
+    shows. */
+-static void map_source_position(JSContext *ctx, const char *filename,
++static const char *map_source_position(JSContext *ctx, const char *filename,
+                                 int *line_num, int *col_num)
+ {
+ #ifdef RQUICKJS_SOURCE_POSITION
+     JSRuntime *rt = ctx->rt;
+     if (rt->source_position_func && filename && *line_num > 0)
+-        rt->source_position_func(rt->source_position_opaque, filename,
+-                                 line_num, col_num);
++        return rt->source_position_func(rt->source_position_opaque, filename,
++                                        line_num, col_num);
+ #endif
++    return filename;
+ }
+ 
+ static int find_line_num(JSContext *ctx, JSFunctionBytecode *b,
+@@ -8234,7 +8235,7 @@ static void build_backtrace(JSContext *ctx, JSValueConst error_val,
+        yet: an error thrown with no JS frame running (a module the embedder
+        declares, say) already has an empty one. */
+     if (filename && line_num != -1)
+-        map_source_position(ctx, filename, &line_num, &col_num);
++        filename = map_source_position(ctx, filename, &line_num, &col_num);
+ 
+     // Save exception because conversion to double may fail.
+     saved_exception = JS_GetException(ctx);
+@@ -8335,8 +8336,8 @@ static void build_backtrace(JSContext *ctx, JSValueConst error_val,
+                 pc = sf->cur_pc - b->byte_code_buf - 1;
+                 line_num1 = find_line_num(ctx, b, pc, &col_num1);
+                 atom_str = b->filename ? JS_AtomToCString(ctx, b->filename) : NULL;
+-                map_source_position(ctx, atom_str, &line_num1, &col_num1);
+-                dbuf_printf(&dbuf, " (%s", atom_str ? atom_str : "<null>");
++                const char *source_file = map_source_position(ctx, atom_str, &line_num1, &col_num1);
++                dbuf_printf(&dbuf, " (%s", source_file ? source_file : "<null>");
+                 JS_FreeCString(ctx, atom_str);
+                 if (line_num1 != -1)
+                     dbuf_printf(&dbuf, ":%d:%d", line_num1, col_num1);
+@@ -8461,9 +8462,19 @@ JS_MakeError(JSContext *ctx, JSErrorEnum error_num, bool add_backtrace,
+              JS_PRINTF_FORMAT const char *fmt, va_list ap)
+ {
+     char buf[256];
+-
+-    vsnprintf(buf, sizeof(buf), fmt, ap);
+-    return JS_MakeError2(ctx, error_num, add_backtrace, buf);
++    va_list copy;
++    va_copy(copy, ap);
++    int length = vsnprintf(buf, sizeof(buf), fmt, copy);
++    va_end(copy);
++    if (length < (int)sizeof(buf))
++        return JS_MakeError2(ctx, error_num, add_backtrace, buf);
++    char *message = js_malloc(ctx, (size_t)length + 1);
++    if (!message)
++        return JS_EXCEPTION;
++    vsnprintf(message, (size_t)length + 1, fmt, ap);
++    JSValue error = JS_MakeError2(ctx, error_num, add_backtrace, message);
++    js_free(ctx, message);
++    return error;
+ }
+ 
+ /* fmt and arguments may be pure ASCII or UTF-8 encoded contents */
+@@ -31064,28 +31075,35 @@ static void js_resolve_export_throw_error(JSContext *ctx,
+                                           JSResolveResultEnum res,
+                                           JSModuleDef *m, JSAtom export_name)
+ {
+-    char buf1[ATOM_GET_STR_BUF_SIZE];
+-    char buf2[ATOM_GET_STR_BUF_SIZE];
++    if (res == JS_RESOLVE_RES_EXCEPTION)
++        return;
++    const char *name = JS_AtomToCString(ctx, export_name);
++    if (!name)
++        return;
++    const char *module_name = JS_AtomToCString(ctx, m->module_name);
++    if (!module_name) {
++        JS_FreeCString(ctx, name);
++        return;
++    }
+     switch(res) {
+     case JS_RESOLVE_RES_EXCEPTION:
+         break;
+     default:
+     case JS_RESOLVE_RES_NOT_FOUND:
+         JS_ThrowSyntaxError(ctx, "Could not find export '%s' in module '%s'",
+-                            JS_AtomGetStr(ctx, buf1, sizeof(buf1), export_name),
+-                            JS_AtomGetStr(ctx, buf2, sizeof(buf2), m->module_name));
++                            name, module_name);
+         break;
+     case JS_RESOLVE_RES_CIRCULAR:
+         JS_ThrowSyntaxError(ctx, "circular reference when looking for export '%s' in module '%s'",
+-                            JS_AtomGetStr(ctx, buf1, sizeof(buf1), export_name),
+-                            JS_AtomGetStr(ctx, buf2, sizeof(buf2), m->module_name));
++                            name, module_name);
+         break;
+     case JS_RESOLVE_RES_AMBIGUOUS:
+         JS_ThrowSyntaxError(ctx, "export '%s' in module '%s' is ambiguous",
+-                            JS_AtomGetStr(ctx, buf1, sizeof(buf1), export_name),
+-                            JS_AtomGetStr(ctx, buf2, sizeof(buf2), m->module_name));
++                            name, module_name);
+         break;
+     }
++    JS_FreeCString(ctx, name);
++    JS_FreeCString(ctx, module_name);
+ }
+ 
+ 
+@@ -63560,7 +63578,16 @@ static void js_new_callsite_data(JSContext *ctx, JSCallSiteData *csd, JSStackFra
+         } else {
+             const char *filename = JS_ToCString(ctx, csd->filename);
+             if (filename) {
+-                map_source_position(ctx, filename, &line_num1, &col_num1);
++                const char *source_file = map_source_position(ctx, filename, &line_num1, &col_num1);
++                if (source_file != filename) {
++                    JSValue mapped_filename = JS_NewString(ctx, source_file);
++                    if (!JS_IsException(mapped_filename)) {
++                        JS_FreeValue(ctx, csd->filename);
++                        csd->filename = mapped_filename;
++                    } else {
++                        JS_FreeValue(ctx, JS_GetException(ctx));
++                    }
++                }
+                 JS_FreeCString(ctx, filename);
+             } else {
+                 JS_FreeValue(ctx, JS_GetException(ctx)); // Clear exception.
+diff --git a/quickjs/quickjs.h b/quickjs/quickjs.h
+index c2a59db..d446177 100644
+--- a/quickjs/quickjs.h
++++ b/quickjs/quickjs.h
+@@ -513,7 +513,7 @@ JS_EXTERN void JS_SetRuntimeInfo(JSRuntime *rt, const char *info);
+    from, for code compiled from another source. It runs while a trace is
+    built, possibly with the stack nearly full, so it must not call into the
+    runtime. It leaves positions it doesn't know unchanged. */
+-typedef void JSSourcePositionFunc(void *opaque, const char *filename,
++typedef const char *JSSourcePositionFunc(void *opaque, const char *filename,
+                                   int *line_num, int *col_num);
+ JS_EXTERN void JS_SetSourcePositionFunc(JSRuntime *rt,
+                                         JSSourcePositionFunc *func,

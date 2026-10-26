@@ -10,6 +10,8 @@ mod archive;
 mod package;
 #[path = "gpx/packager.rs"]
 mod packager;
+#[path = "gpx/scenario.rs"]
+mod scenario;
 
 use gpuix_native::{
     check_js_file, check_lua_file, is_js_source, is_lua_source, run_js_file, run_lua_file,
@@ -48,6 +50,34 @@ pub(crate) fn main() {
 
 fn run() -> Result<(), String> {
     let raw_arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if raw_arguments.first().map(String::as_str) == Some("__test-results") {
+        return gpuix_native::run_test_results(
+            raw_arguments
+                .iter()
+                .any(|argument| argument == "--background"),
+        );
+    }
+    if raw_arguments.first().map(String::as_str) == Some("bench-reset") {
+        if raw_arguments
+            .iter()
+            .any(|argument| argument == "--help" || argument == "-h")
+        {
+            println!("Usage: gpx bench-reset APP [--iterations COUNT]");
+            return Ok(());
+        }
+        let iterations = match &raw_arguments[1..] {
+            [_] => 20,
+            [_, flag, count] if flag == "--iterations" => {
+                count.parse::<usize>().map_err(|error| error.to_string())?
+            }
+            _ => return Err("Usage: gpx bench-reset APP [--iterations COUNT]".into()),
+        };
+        gpuix_native::benchmark_script_resets(Path::new(&raw_arguments[1]), iterations)?;
+        return Ok(());
+    }
+    if raw_arguments.first().map(String::as_str) == Some("test") {
+        return scenario::run(&raw_arguments[1..]);
+    }
     if raw_arguments.first().map(String::as_str) == Some("package") {
         return packager::run(&raw_arguments[1..]);
     }
@@ -243,7 +273,9 @@ fn dimension(value: String, name: &str) -> Result<f32, String> {
 
 fn usage() -> String {
     format!(
-        "Usage: gpx package gpuix.json [--format app|binary|deb] [--output PATH]\n\
+        "Usage: gpx bench-reset APP [--iterations COUNT]\n\
+         Usage: gpx test FILE-OR-DIRECTORY [--output DIRECTORY] [--ui [--background]]\n\
+         Usage: gpx package gpuix.json [--format app|binary|deb] [--output PATH]\n\
          Usage: gpx [--manifest gpuix.json] [--check] [--watch] [--background] [--dev-server PORT] [--title TITLE] [--width PX] [--height PX] [app]\n\
          The app is a {} file, run in the embedded Lua runtime, or a {} file,\n\
          run in the embedded QuickJS runtime. It is required unless gpx is launched from an app\n\

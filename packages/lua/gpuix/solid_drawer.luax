@@ -6,6 +6,7 @@ local Show = solid.Show
 local read = shared.read
 
 return function(props)
+    local palette = props.theme or util.palette
     local function side()
         local current = read(props, "side", "right")
         assert(current == "left" or current == "right" or current == "bottom",
@@ -82,7 +83,7 @@ return function(props)
     local function panel_style()
         local result = shared.style({ display = "flex", position = "relative", flexShrink = 0,
             minWidth = 0, minHeight = 0, overflow = "hidden",
-            background = "#18181b", borderColor = "#3f3f46" }, props.style, state())
+            background = palette.surface, color = palette.text, borderColor = palette.border }, props.style, state())
         if side() == "bottom" then
             if result.left == nil and result.right == nil then result.width = "100%" else result.width = nil end
             result.height = open() and size() or 0
@@ -101,7 +102,7 @@ return function(props)
     end
     local function handle_style()
         local result = shared.style({ position = "absolute", background = "transparent",
-            hover = { background = "#60a5fa66" }, active = { background = "#60a5fa" }, focus = util.focus_ring },
+            hover = { background = palette.focusRing }, active = { background = palette.accent }, focus = util.focus_style(palette) },
             props.resizeHandleStyle, state())
         local thickness = read(props, "resizeHandleSize", 6)
         result.top = 0

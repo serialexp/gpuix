@@ -18,3 +18,5 @@ examples/AppIcon.icns
 tmp-icons/
 # Test output churns every run; the curated set the README links to lives in
 # docs/images and is regenerated with `bun scripts/screenshots.ts`.
+# Local native UI scenario reports and artifacts.
+test-results/

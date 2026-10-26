@@ -117,7 +117,20 @@ impl Resolver for AppResolver {
                     "Cannot import {name:?} from {base}: `type: {kind:?}` imports aren't supported, only `type: \"text\"`"
                 )),
             };
-            let resolved = resolved.map_err(|message| Exception::throw_message(ctx, &message))?;
+            let resolved = resolved.map_err(|message| {
+                if !is_embedded(base_path)
+                    && (name.starts_with("./") || name.starts_with("../") || Path::new(name).is_absolute())
+                {
+                    let target = Path::new(base_path).parent().unwrap_or(Path::new("")).join(name);
+                    let candidates = if kind.as_deref() == Some("text") {
+                        vec![target]
+                    } else {
+                        app_file_candidates(&target)
+                    };
+                    self.0.graph.borrow_mut().attempted.extend(candidates.into_iter().filter(|path| !path.is_dir()));
+                }
+                Exception::throw_message(ctx, &message)
+            })?;
             if is_embedded(&resolved) {
                 return Ok(resolved);
             }
@@ -174,10 +187,12 @@ impl Loader for AppLoader {
             };
             let compiled = compile(&source, path, self.0.mode, jsx)
                 .map_err(|message| throw_whole(ctx, ErrorKind::Syntax, &message))?;
+            let source_file = std::ffi::CString::new(file)
+                .map_err(|_| Exception::throw_message(ctx, "module filename contains a NUL byte"))?;
             self.0
                 .positions
                 .borrow_mut()
-                .insert(name.to_string(), compiled.positions);
+                .insert(name.to_string(), (compiled.positions, source_file));
             // The new version's imports replace the last one's, as the
             // resolver records them.
             self.0.graph.borrow_mut().forget_imports(file);
@@ -301,9 +316,11 @@ fn resolve_text(base: &str, name: &str) -> Result<String, String> {
 /// itself, a `.js`-style path naming its TypeScript source, the path with a
 /// module extension added, or a directory's `index` file.
 fn find_app_file(target: &Path) -> Option<PathBuf> {
-    if target.is_file() {
-        return Some(target.to_path_buf());
-    }
+    if target.is_file() { return Some(target.to_path_buf()); }
+    app_file_candidates(target).into_iter().find(|path| path.is_file())
+}
+
+fn app_file_candidates(target: &Path) -> Vec<PathBuf> {
     let sources: &[&str] = match target.extension().and_then(|extension| extension.to_str()) {
         Some("js") => &["ts", "tsx"],
         Some("jsx") => &["tsx"],
@@ -322,10 +339,10 @@ fn find_app_file(target: &Path) -> Option<PathBuf> {
     let index = IMPLIED_EXTENSIONS
         .iter()
         .map(|extension| target.join(format!("index.{extension}")));
-    swapped
+    std::iter::once(target.to_path_buf()).chain(swapped)
         .chain(appended)
         .chain(index)
-        .find(|path| path.is_file())
+        .collect()
 }
 
 /// `name` relative to the embedded file `base`, or `None` if it leaves the

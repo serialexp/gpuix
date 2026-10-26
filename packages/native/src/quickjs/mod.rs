@@ -47,6 +47,7 @@ use crate::renderer::{apply_batch_to_tree, PathPromptOptions, WindowOptions};
 use crate::retained_tree::RetainedTree;
 
 mod compile;
+mod fetch;
 mod framework;
 mod hot;
 mod modules;
@@ -130,6 +131,7 @@ impl Default for QuickJsOptions {
 
 /// What the native functions JS calls share with the runtime.
 struct Shared {
+    fetch: RefCell<fetch::FetchState>,
     tray_commands: RefCell<Vec<crate::script::tray_api::TrayCommand>>,
     host: RefCell<Box<dyn Host>>,
     /// What failed during the current call, in order.
@@ -140,7 +142,7 @@ struct Shared {
     console: RefCell<ConsoleSink>,
     /// Each compiled app module's positions, by module name, for stack
     /// traces.
-    positions: RefCell<HashMap<String, compile::PositionMap>>,
+    positions: RefCell<HashMap<String, (compile::PositionMap, std::ffi::CString)>>,
     /// Which framework app files' JSX is for, as worked out so far.
     frameworks: RefCell<framework::Frameworks>,
     mode: Mode,
@@ -210,11 +212,31 @@ impl Drop for QuickJsRuntime {
         // call that unwound may not have. A prompt still open never settles.
         self.shared.rejections.borrow_mut().clear();
         self.shared.prompts.borrow_mut().clear();
+        self.shared.fetch.replace(fetch::FetchState::default());
         self.shared.refresh.borrow_mut().take();
     }
 }
 
 impl QuickJsRuntime {
+    pub(crate) fn watched_files(&self) -> Vec<std::path::PathBuf> {
+        let mut files = self.shared.graph.borrow().files();
+        files.extend(self.shared.frameworks.borrow().files.iter().cloned());
+        if let Some(entry) = &self.shared.entry {
+            files.insert(entry.into());
+        }
+        files.into_iter().collect()
+    }
+
+    pub(crate) fn configuration_changed(&self, changed: &[std::path::PathBuf]) -> bool {
+        let frameworks = self.shared.frameworks.borrow();
+        changed.iter().any(|path| frameworks.files.contains(path)
+            || std::fs::canonicalize(path).is_ok_and(|path| frameworks.files.contains(&path)))
+    }
+
+    pub(crate) fn configuration_files(&self) -> Vec<std::path::PathBuf> {
+        self.shared.frameworks.borrow().files.iter().cloned().collect()
+    }
+
     /// Start a runtime and run `source` as a classic script. `file_name`
     /// names it in stack traces.
     #[cfg(test)]
@@ -239,6 +261,14 @@ impl QuickJsRuntime {
     /// `await` keeps running, and a failure after that fails the call it
     /// happens in.
     pub(crate) fn load_module(entry: &Path, options: QuickJsOptions) -> Result<Self, String> {
+        Self::load_module_tracking(entry, options, |_| {})
+    }
+
+    pub(crate) fn load_module_tracking(
+        entry: &Path,
+        options: QuickJsOptions,
+        track: impl FnOnce(&Self),
+    ) -> Result<Self, String> {
         let entry = std::path::absolute(entry)
             .map_err(|error| format!("cannot load {}: {error}", entry.display()))?;
         let entry = entry
@@ -250,7 +280,7 @@ impl QuickJsRuntime {
         let module_name = modules::resolve(modules::bundle(options.mode), "", entry)
             .unwrap_or_else(|_| entry.to_string());
         let js = Self::start(options, Some(module_name))?;
-        js.call(|ctx, hooks| {
+        let loaded = js.call(|ctx, hooks| {
             // The entry runs inside `import`, so its failure is reported
             // with the prelude's `reportError`, which the app can't replace.
             let report = hooks.report_error.clone().restore(ctx)?;
@@ -259,7 +289,9 @@ impl QuickJsRuntime {
                 .catch()?
                 .call::<_, Value>((This(promise.clone()), report))?;
             Ok(())
-        })?;
+        });
+        track(&js);
+        loaded?;
         Ok(js)
     }
 
@@ -270,6 +302,7 @@ impl QuickJsRuntime {
         let context =
             Context::full(&runtime).map_err(|error| format!("cannot start QuickJS: {error}"))?;
         let shared = Rc::new(Shared {
+            fetch: RefCell::new(fetch::FetchState::default()),
             tray_commands: RefCell::new(Vec::new()),
             host: RefCell::new(options.host),
             errors: RefCell::new(Vec::new()),
@@ -299,6 +332,7 @@ impl QuickJsRuntime {
                 let mut options = EvalOptions::default();
                 options.filename = Some("gpuix:prelude".to_string());
                 ctx.eval_with_options::<(), _>(PRELUDE, options)?;
+                ctx.eval::<(), _>(include_str!("fetch.js"))?;
                 Hooks::get(&ctx)
             })();
             // Nothing can describe an exception before the prelude ran.
@@ -558,7 +592,7 @@ type SourcePositionFunc = unsafe extern "C" fn(
     file: *const c_char,
     line: *mut c_int,
     column: *mut c_int,
-);
+) -> *const c_char;
 
 extern "C" {
     fn JS_SetSourcePositionFunc(
@@ -577,10 +611,11 @@ unsafe extern "C" fn map_source_position(
     file: *const c_char,
     line: *mut c_int,
     column: *mut c_int,
-) {
+) -> *const c_char {
     // SAFETY: `opaque` is the runtime's live `Shared` (see
     // `set_source_position_hook`), and QuickJS passes a valid file name and
     // position.
+    let original_file = file;
     let (shared, file, line, column) = unsafe {
         (
             &*opaque.cast::<Shared>(),
@@ -590,17 +625,18 @@ unsafe extern "C" fn map_source_position(
         )
     };
     let (Ok(file), Ok(positions)) = (file.to_str(), shared.positions.try_borrow()) else {
-        return;
+        return original_file;
+    };
+    let Some((positions, source_file)) = positions.get(file) else {
+        return original_file;
     };
     let (Ok(compiled_line), Ok(compiled_column)) = (u32::try_from(*line), u32::try_from(*column))
     else {
-        return;
+        return source_file.as_ptr();
     };
-    let Some((source_line, source_column)) = positions
-        .get(file)
-        .and_then(|map| map.source_position(compiled_line, compiled_column))
+    let Some((source_line, source_column)) = positions.source_position(compiled_line, compiled_column)
     else {
-        return;
+        return source_file.as_ptr();
     };
     if let (Ok(source_line), Ok(source_column)) =
         (c_int::try_from(source_line), c_int::try_from(source_column))
@@ -608,6 +644,7 @@ unsafe extern "C" fn map_source_position(
         *line = source_line;
         *column = source_column;
     }
+    source_file.as_ptr()
 }
 
 fn install_host<'js>(
@@ -616,6 +653,7 @@ fn install_host<'js>(
     env: &[(String, String)],
 ) -> rquickjs::Result<()> {
     let host = Object::new(ctx.clone())?;
+    fetch::install(ctx, &host, shared)?;
     host.set("process", process_info(ctx, shared.entry.as_deref(), env)?)?;
 
     let clock = shared.clone();

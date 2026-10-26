@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use futures::StreamExt as _;
+use futures::{FutureExt as _, StreamExt as _};
 use gpui::AppContext as _;
 
 use crate::element_tree::EventPayload;
@@ -68,12 +68,16 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
             crate::renderer::init_app(&app_name, cx);
             if options.watch {
                 crate::automation::enable_inspector();
+                crate::network::install(cx);
             }
             if let Some(server) = dev_server {
                 server.attach(cx);
             }
 
             let (event_sender, mut event_receiver) = futures::channel::mpsc::unbounded();
+            let event_sender = LuaEventSender { sender: event_sender, generation: 0 };
+            let current_sender = Rc::new(RefCell::new(event_sender.clone()));
+            let mut resets = crate::script::test_control::install(cx);
             let fetch_sender = event_sender.clone();
             let fetch_executor = cx.background_executor().clone();
             let fetch_client = cx.http_client();
@@ -158,9 +162,41 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
             let native_ids_for_events = native_ids.clone();
             let window_bounds_for_events = window_bounds.clone();
             let definitions_for_events = definitions.clone();
-            let event_sender_for_events = event_sender.clone();
+            let mut event_sender_for_events = event_sender.clone();
+            let sender_for_events = current_sender.clone();
+            let reset_path = path.clone();
+            let reset_options = options.clone();
             cx.spawn(async move |cx| {
-                while let Some(event) = event_receiver.next().await {
+                loop {
+                    let received = futures::select_biased! {
+                        request = resets.next() => {
+                            let Some(request) = request else { return };
+                            let started = std::time::Instant::now();
+                            let sender = LuaEventSender {
+                                sender: event_sender_for_events.sender.clone(),
+                                generation: event_sender_for_events.generation + 1,
+                            };
+                            let result = cx.update(|cx| reset_lua_host(
+                                &reset_path, &reset_options, &runtime_for_events, &sender,
+                                &windows_for_events, &trees_for_events, &native_ids_for_events,
+                                &window_bounds_for_events, &definitions_for_events, cx,
+                            )).and_then(|_| cx.update(crate::script::test_control::paint));
+                            if result.is_ok() {
+                                event_sender_for_events = sender;
+                                *sender_for_events.borrow_mut() = event_sender_for_events.clone();
+                            }
+                            request.finish(result.map(|mut value| {
+                                value["durationMs"] = serde_json::json!(started.elapsed().as_secs_f64() * 1000.0);
+                                value
+                            }));
+                            continue;
+                        },
+                        event = event_receiver.next().fuse() => event,
+                    };
+                    let Some((generation, event)) = received else { return };
+                    if generation != event_sender_for_events.generation {
+                        continue;
+                    }
                     let (changed, focus_request, commands) = {
                         let mut runtime = runtime_for_events.lock().unwrap();
                         let result = match event {
@@ -256,7 +292,7 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
                 let native_ids_for_reload = native_ids.clone();
                 let window_bounds_for_reload = window_bounds.clone();
                 let definitions_for_reload = definitions.clone();
-                let event_sender_for_reload = event_sender.clone();
+                let event_sender_for_reload = current_sender.clone();
                 let mut reload_receiver = watch_sources(&path);
                 cx.spawn(async move |cx| {
                     while reload_receiver.next().await.is_some() {
@@ -334,7 +370,7 @@ pub fn run_lua_file(path: impl AsRef<Path>, options: AppOptions) -> Result<(), S
                                     open_lua_window(
                                         &window,
                                         &runtime_for_reload,
-                                        &event_sender_for_reload,
+                                        &event_sender_for_reload.borrow(),
                                         &windows_for_reload,
                                         &trees_for_reload,
                                         &native_ids_for_reload,
@@ -402,7 +438,20 @@ enum LuaEvent {
     Tray(u64),
     Fetch(crate::lua_fetch::FetchCompletion),
 }
-type LuaEventSender = futures::channel::mpsc::UnboundedSender<LuaEvent>;
+#[derive(Clone)]
+struct LuaEventSender {
+    sender: futures::channel::mpsc::UnboundedSender<(u64, LuaEvent)>,
+    generation: u64,
+}
+
+impl LuaEventSender {
+    fn unbounded_send(
+        &self,
+        event: LuaEvent,
+    ) -> Result<(), futures::channel::mpsc::TrySendError<(u64, LuaEvent)>> {
+        self.sender.unbounded_send((self.generation, event))
+    }
+}
 
 fn apply_tray_commands(commands: Vec<crate::script::tray_api::TrayCommand>, cx: &mut gpui::App) {
     for command in commands {
@@ -459,6 +508,126 @@ type LuaWindowDefinitions = Rc<RefCell<HashMap<String, WindowOptions>>>;
 
 fn window_handle(windows: &SharedLuaWindows, id: &str) -> Option<gpui::WindowHandle<GpuixView>> {
     windows.get(id)
+}
+
+fn reset_lua_host(
+    path: &Path,
+    options: &AppOptions,
+    runtime: &Arc<Mutex<LuaRuntime>>,
+    sender: &LuaEventSender,
+    windows: &SharedLuaWindows,
+    trees: &LuaTrees,
+    native_ids: &LuaNativeWindowIds,
+    bounds: &SharedLuaWindowBounds,
+    definitions: &LuaWindowDefinitions,
+    cx: &mut gpui::App,
+) -> Result<serde_json::Value, String> {
+    let mut fresh = LuaRuntime::load_application_file(path)?;
+    let mut specs = fresh.window_options();
+    if options.background {
+        for spec in &mut specs {
+            spec.focus = false;
+        }
+    }
+    if !fresh.is_application_entry() {
+        if let Some(main) = specs.iter_mut().find(|spec| spec.id == "main") {
+            main.title = options.title.clone().unwrap_or_else(|| default_title(path));
+            main.width = options.width.unwrap_or(main.width);
+            main.height = options.height.unwrap_or(main.height);
+        }
+    }
+    if !specs.iter().any(|spec| spec.open) {
+        return Err("reset application must open at least one window".into());
+    }
+    let mut prepared = HashMap::new();
+    for spec in &specs {
+        fresh.set_window_open(&spec.id, spec.open);
+    }
+    for spec in specs.iter().filter(|spec| spec.open) {
+        let mut tree = RetainedTree::new();
+        fresh.mount_window(&spec.id, &mut tree)?;
+        prepared.insert(spec.id.clone(), Arc::new(Mutex::new(tree)));
+    }
+    let executor = cx.background_executor().clone();
+    let client = cx.http_client();
+    let fetch_sender = sender.clone();
+    fresh.set_fetch_dispatcher(move |request| {
+        let sender = fetch_sender.clone();
+        let client = client.clone();
+        executor
+            .spawn(async move {
+                if let Some(completion) = crate::lua_fetch::execute(request, client).await {
+                    let _ = sender.unbounded_send(LuaEvent::Fetch(completion));
+                }
+            })
+            .detach();
+    });
+    *runtime.lock().unwrap() = fresh;
+    *definitions.borrow_mut() = specs
+        .iter()
+        .cloned()
+        .map(|spec| (spec.id.clone(), spec))
+        .collect();
+    crate::script::tray_api::clear(cx);
+    let tray_sender = sender.clone();
+    crate::script::tray_api::init(
+        move |action| {
+            let _ = tray_sender.unbounded_send(LuaEvent::Tray(action));
+        },
+        cx,
+    );
+    for id in windows.ids() {
+        if !prepared.contains_key(&id) {
+            if let Some(handle) = windows.get(&id) {
+                native_ids.borrow_mut().remove(&handle.window_id());
+                windows.remove(&id);
+                trees.borrow_mut().remove(&id);
+                handle
+                    .update(cx, |_, window, _| window.remove_window())
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    for spec in specs.iter().filter(|spec| spec.open) {
+        if let Some(handle) = windows.get(&spec.id) {
+            let tree = prepared.remove(&spec.id).unwrap();
+            trees.borrow_mut().insert(spec.id.clone(), tree.clone());
+            let sender = sender.clone();
+            let id = spec.id.clone();
+            let callback: EventCallback = Arc::new(move |payload| {
+                let _ = sender.unbounded_send(LuaEvent::Window(id.clone(), Box::new(payload)));
+            });
+            gpui::AnyWindowHandle::from(handle)
+                .update(cx, |_, window, cx| {
+                    window.replace_root(cx, |window, cx| {
+                        let observed_bounds = bounds.clone();
+                        let observed_id = spec.id.clone();
+                        cx.observe_window_bounds(window, move |_, window, _| {
+                            observed_bounds.insert(observed_id.clone(), window.window_bounds());
+                        })
+                        .detach();
+                        GpuixView::new(
+                            tree,
+                            Some(callback),
+                            spec.title.clone(),
+                            SharedSelection::default(),
+                        )
+                        .with_native_tab_navigation()
+                    });
+                })
+                .map_err(|error| error.to_string())?;
+            runtime.lock().unwrap().set_window_open(&spec.id, true);
+        } else {
+            let mut spec = spec.clone();
+            spec.focus = false;
+            open_lua_window(
+                &spec, runtime, sender, windows, trees, native_ids, bounds, cx,
+            )?;
+        }
+    }
+    let commands = runtime.lock().unwrap().take_tray_commands();
+    apply_tray_commands(commands, cx);
+    Ok(serde_json::json!({}))
 }
 
 fn open_lua_window(
@@ -683,6 +852,107 @@ mod tests {
 
     use super::*;
     use crate::element_tree::EventPayload;
+
+    #[test]
+    fn resetting_lua_reuses_the_window_and_restores_state_and_painted_bounds() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/solid-counter.luax");
+        let runtime = Arc::new(Mutex::new(
+            LuaRuntime::load_application_file(&path).unwrap(),
+        ));
+        let mut specs = runtime.lock().unwrap().window_options();
+        specs[0].focus = false;
+        let definitions = Rc::new(RefCell::new(
+            specs
+                .iter()
+                .cloned()
+                .map(|spec| (spec.id.clone(), spec))
+                .collect(),
+        ));
+        let windows = Rc::new(LuaWindows::default());
+        let trees = Rc::new(RefCell::new(HashMap::new()));
+        let native_ids = Rc::new(RefCell::new(HashMap::new()));
+        let bounds = Rc::new(LuaWindowBounds::default());
+        let (sender, _) = futures::channel::mpsc::unbounded();
+        let sender = LuaEventSender {
+            sender,
+            generation: 1,
+        };
+        let cx = gpui::TestAppContext::single();
+        cx.update(|cx| {
+            crate::script::tray_api::init(|_| {}, cx);
+            open_lua_window(
+                &specs[0],
+                &runtime,
+                &sender,
+                &windows,
+                &trees,
+                &native_ids,
+                &bounds,
+                cx,
+            )
+            .unwrap();
+            crate::script::test_control::paint(cx).unwrap();
+        });
+        let before = windows.get("main").unwrap().window_id();
+        let tree = trees.borrow()["main"].clone();
+        dispatch_test_id(
+            &mut runtime.lock().unwrap(),
+            &mut tree.lock().unwrap(),
+            "solid-counter",
+            "click",
+            None,
+        );
+        assert_eq!(content_count(&tree.lock().unwrap(), "Count: 1"), 1);
+        cx.update(|cx| {
+            reset_lua_host(
+                &path,
+                &AppOptions::default(),
+                &runtime,
+                &sender,
+                &windows,
+                &trees,
+                &native_ids,
+                &bounds,
+                &definitions,
+                cx,
+            )
+            .unwrap();
+        });
+        cx.update(|cx| {
+            crate::script::test_control::paint(cx).unwrap();
+        });
+        assert_eq!(windows.get("main").unwrap().window_id(), before);
+        let tree = trees.borrow()["main"].clone();
+        assert_eq!(content_count(&tree.lock().unwrap(), "Count: 0"), 1);
+        let id = tree
+            .lock()
+            .unwrap()
+            .elements
+            .values()
+            .find(|element| element.test_id.as_deref() == Some("solid-counter"))
+            .unwrap()
+            .id;
+        assert!(crate::automation::window_bounds(before).contains_key(&id));
+    }
+
+    #[test]
+    fn event_senders_keep_the_generation_that_created_them() {
+        let (sender, mut receiver) = futures::channel::mpsc::unbounded();
+        let old = LuaEventSender {
+            sender: sender.clone(),
+            generation: 0,
+        };
+        let fresh = LuaEventSender {
+            sender,
+            generation: 1,
+        };
+        assert!(old.unbounded_send(LuaEvent::Tray(1)).is_ok());
+        assert!(fresh.unbounded_send(LuaEvent::Tray(1)).is_ok());
+        assert!(old.unbounded_send(LuaEvent::Tray(1)).is_ok());
+        assert_eq!(receiver.try_recv().unwrap().0, 0);
+        assert_eq!(receiver.try_recv().unwrap().0, 1);
+        assert_eq!(receiver.try_recv().unwrap().0, 0);
+    }
 
     #[test]
     fn remembered_bounds_are_used_unless_repositioning_is_requested() {

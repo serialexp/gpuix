@@ -13,20 +13,9 @@
 
 use crate::syntax::HighlightKind;
 use gpui::{hsla, Hsla};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ── Colour helpers ───────────────────────────────────────────────────
-
-/// Opaque grey from an 8-bit channel value (`grey(0x0e)` is `#0e0e0e`).
-pub fn grey(value: u8) -> Hsla {
-    hsla(0.0, 0.0, value as f32 / 255.0, 1.0)
-}
-
-/// Achromatic colour at an oklch lightness — the Tailwind neutral ramp.
-pub fn neutral(lightness: f32) -> Hsla {
-    let [v, _, _] = oklch_to_srgb(lightness, 0.0, 0.0);
-    hsla(0.0, 0.0, v, 1.0)
-}
 
 /// oklch (CSS notation: L 0..1, C, H in degrees) to `gpui::Hsla`.
 pub fn oklch(l: f32, c: f32, h_deg: f32) -> Hsla {
@@ -96,7 +85,8 @@ fn graph_tone(mut color: Hsla) -> Hsla {
 // ── Syntax palette ───────────────────────────────────────────────────
 
 /// Paint-only colours for one Syntect [`HighlightKind`] each.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyntaxPalette {
     pub comment: Hsla,
     pub keyword: Hsla,
@@ -125,6 +115,49 @@ pub struct SyntaxPalette {
 }
 
 impl SyntaxPalette {
+    fn comet(light: bool) -> Self {
+        let (text, comment, keyword, string, number, pink) = if light {
+            (
+                oklch(0.25, 0.01, 255.0),
+                oklch(0.53, 0.01, 255.0),
+                oklch(0.511, 0.19, 277.0),
+                oklch(0.53, 0.105, 163.0),
+                oklch(0.56, 0.13, 60.0),
+                oklch(0.54, 0.17, 350.0),
+            )
+        } else {
+            (
+                oklch(0.93, 0.005, 255.0),
+                oklch(0.6, 0.008, 255.0),
+                oklch(0.673, 0.131, 276.9),
+                oklch(0.765, 0.127, 163.2),
+                oklch(0.828, 0.136, 84.4),
+                oklch(0.718, 0.145, 349.8),
+            )
+        };
+        let mut palette = Self::dark(
+            text,
+            comment,
+            if light {
+                oklch(0.577, 0.215, 27.3)
+            } else {
+                oklch(0.704, 0.191, 22.2)
+            },
+        );
+        palette.keyword = keyword;
+        palette.function = keyword;
+        palette.string = string;
+        palette.constant = string;
+        palette.number = number;
+        palette.type_name = number;
+        palette.property = number;
+        palette.tag = pink;
+        palette.macro_name = pink;
+        palette.escape = pink;
+        palette.attribute = number;
+        palette
+    }
+
     /// Colour for one capture kind.
     pub fn color(&self, kind: HighlightKind) -> Hsla {
         match kind {
@@ -202,8 +235,46 @@ impl SyntaxPalette {
 /// Row heights in particular are load-bearing: `<diff>` virtualizes with a
 /// height model it computes without measuring, so every row kind must know its
 /// height up front.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Metrics {
+    pub test_toolbar_height: f32,
+    pub test_section_height: f32,
+    pub test_row_height: f32,
+    pub test_step_height: f32,
+    pub test_footer_height: f32,
+    pub test_tests_width: f32,
+    pub test_steps_width: f32,
+    pub test_argument_width: f32,
+    pub test_window_width: f32,
+    pub test_window_height: f32,
+    pub test_padding: f32,
+    pub test_duration_width: f32,
+    pub test_duration_bar_width: f32,
+    pub test_status_dot_size: f32,
+    pub test_file_padding: f32,
+    pub test_case_indent: f32,
+    pub test_step_padding: f32,
+    pub test_step_number_width: f32,
+    pub inspector_network_columns: [f32; 5],
+    pub inspector_network_toolbar_height: f32,
+    pub inspector_network_filter_width: f32,
+    pub inspector_network_detail_label_width: f32,
+    pub inspector_network_text_size: f32,
+    pub inspector_network_list_fraction: f32,
+    pub inspector_network_detail_row_height: f32,
+    pub inspector_icon_size: f32,
+    pub scrollbar_width: f32,
+    pub scrollbar_min_thumb: f32,
+    pub input_height: f32,
+    pub input_radius: f32,
+    pub menu_radius: f32,
+    pub menu_item_height: f32,
+    pub control_gap: f32,
+    pub control_padding: f32,
+    pub control_indicator_size: f32,
+    pub control_dot_size: f32,
+    pub control_ring_width: f32,
     pub inspector_height: f32,
     pub inspector_row_height: f32,
     pub inspector_text_size: f32,
@@ -277,6 +348,68 @@ impl Metrics {
             }
         };
         set(&mut self.code_text_size, o.code_text_size);
+        set(&mut self.test_toolbar_height, o.test_toolbar_height);
+        set(&mut self.test_section_height, o.test_section_height);
+        set(&mut self.test_row_height, o.test_row_height);
+        set(&mut self.test_step_height, o.test_step_height);
+        set(&mut self.test_footer_height, o.test_footer_height);
+        set(&mut self.test_tests_width, o.test_tests_width);
+        set(&mut self.test_steps_width, o.test_steps_width);
+        set(&mut self.test_argument_width, o.test_argument_width);
+        set(&mut self.test_window_width, o.test_window_width);
+        set(&mut self.test_window_height, o.test_window_height);
+        set(&mut self.test_padding, o.test_padding);
+        set(&mut self.test_duration_width, o.test_duration_width);
+        set(&mut self.test_duration_bar_width, o.test_duration_bar_width);
+        set(&mut self.test_status_dot_size, o.test_status_dot_size);
+        set(&mut self.test_file_padding, o.test_file_padding);
+        set(&mut self.test_case_indent, o.test_case_indent);
+        set(&mut self.test_step_padding, o.test_step_padding);
+        set(&mut self.test_step_number_width, o.test_step_number_width);
+        set(&mut self.inspector_icon_size, o.inspector_icon_size);
+        set(
+            &mut self.inspector_network_toolbar_height,
+            o.inspector_network_toolbar_height,
+        );
+        set(
+            &mut self.inspector_network_filter_width,
+            o.inspector_network_filter_width,
+        );
+        set(
+            &mut self.inspector_network_detail_label_width,
+            o.inspector_network_detail_label_width,
+        );
+        set(
+            &mut self.inspector_network_text_size,
+            o.inspector_network_text_size,
+        );
+        set(
+            &mut self.inspector_network_list_fraction,
+            o.inspector_network_list_fraction,
+        );
+        set(
+            &mut self.inspector_network_detail_row_height,
+            o.inspector_network_detail_row_height,
+        );
+        if let Some(columns) = &o.inspector_network_columns {
+            if columns.len() == 5 {
+                for (slot, value) in self.inspector_network_columns.iter_mut().zip(columns) {
+                    set(slot, Some(*value));
+                }
+            }
+        }
+        self.inspector_network_list_fraction = self.inspector_network_list_fraction.clamp(0.2, 0.8);
+        set(&mut self.scrollbar_width, o.scrollbar_width);
+        set(&mut self.scrollbar_min_thumb, o.scrollbar_min_thumb);
+        set(&mut self.input_height, o.input_height);
+        set(&mut self.input_radius, o.input_radius);
+        set(&mut self.menu_radius, o.menu_radius);
+        set(&mut self.menu_item_height, o.menu_item_height);
+        set(&mut self.control_gap, o.control_gap);
+        set(&mut self.control_padding, o.control_padding);
+        set(&mut self.control_indicator_size, o.control_indicator_size);
+        set(&mut self.control_dot_size, o.control_dot_size);
+        set(&mut self.control_ring_width, o.control_ring_width);
         set(&mut self.inspector_height, o.inspector_height);
         set(&mut self.inspector_row_height, o.inspector_row_height);
         set(&mut self.inspector_text_size, o.inspector_text_size);
@@ -348,6 +481,18 @@ impl Metrics {
     pub fn hash_diff_layout_into(&self, hasher: &mut impl std::hash::Hasher) {
         let mut feed = |value: f32| hasher.write_u32(value.to_bits());
         for value in [
+            self.inspector_icon_size,
+            self.scrollbar_width,
+            self.scrollbar_min_thumb,
+            self.input_height,
+            self.input_radius,
+            self.menu_radius,
+            self.menu_item_height,
+            self.control_gap,
+            self.control_padding,
+            self.control_indicator_size,
+            self.control_dot_size,
+            self.control_ring_width,
             self.diff_line_height,
             self.diff_file_header_height,
             self.diff_hunk_header_height,
@@ -361,6 +506,33 @@ impl Metrics {
     #[cfg(test)]
     pub fn hash_into(&self, hasher: &mut impl std::hash::Hasher) {
         let mut feed = |value: f32| hasher.write_u32(value.to_bits());
+        feed(self.test_toolbar_height);
+        feed(self.test_section_height);
+        feed(self.test_row_height);
+        feed(self.test_step_height);
+        feed(self.test_footer_height);
+        feed(self.test_tests_width);
+        feed(self.test_steps_width);
+        feed(self.test_argument_width);
+        feed(self.test_window_width);
+        feed(self.test_window_height);
+        feed(self.test_padding);
+        feed(self.test_duration_width);
+        feed(self.test_duration_bar_width);
+        feed(self.test_status_dot_size);
+        feed(self.test_file_padding);
+        feed(self.test_case_indent);
+        feed(self.test_step_padding);
+        feed(self.test_step_number_width);
+        for value in self.inspector_network_columns {
+            feed(value);
+        }
+        feed(self.inspector_network_toolbar_height);
+        feed(self.inspector_network_filter_width);
+        feed(self.inspector_network_detail_label_width);
+        feed(self.inspector_network_text_size);
+        feed(self.inspector_network_list_fraction);
+        feed(self.inspector_network_detail_row_height);
         for value in [
             self.code_text_size,
             self.inspector_height,
@@ -409,8 +581,45 @@ impl Metrics {
 impl Default for Metrics {
     fn default() -> Self {
         Self {
+            test_toolbar_height: 40.0,
+            test_section_height: 28.0,
+            test_row_height: 28.0,
+            test_step_height: 30.0,
+            test_footer_height: 22.0,
+            test_tests_width: 264.0,
+            test_steps_width: 360.0,
+            test_argument_width: 72.0,
+            test_window_width: 1240.0,
+            test_window_height: 780.0,
+            test_padding: 14.0,
+            test_duration_width: 44.0,
+            test_duration_bar_width: 40.0,
+            test_status_dot_size: 6.0,
+            test_file_padding: 10.0,
+            test_case_indent: 16.0,
+            test_step_padding: 12.0,
+            test_step_number_width: 16.0,
+            inspector_icon_size: 14.0,
+            inspector_network_columns: [36.0, 44.0, 44.0, 44.0, 56.0],
+            inspector_network_toolbar_height: 28.0,
+            inspector_network_filter_width: 96.0,
+            inspector_network_detail_label_width: 84.0,
+            inspector_network_text_size: 11.0,
+            inspector_network_list_fraction: 0.63,
+            inspector_network_detail_row_height: 19.0,
+            scrollbar_width: 6.0,
+            scrollbar_min_thumb: 20.0,
+            input_height: 26.0,
+            input_radius: 6.0,
+            menu_radius: 6.0,
+            menu_item_height: 24.0,
+            control_gap: 8.0,
+            control_padding: 8.0,
+            control_indicator_size: 18.0,
+            control_dot_size: 8.0,
+            control_ring_width: 2.0,
             inspector_height: 280.0,
-            inspector_row_height: 24.0,
+            inspector_row_height: 22.0,
             inspector_text_size: 12.0,
             inspector_padding: 8.0,
             inspector_indent: 14.0,
@@ -455,11 +664,28 @@ impl Default for Metrics {
 
 /// The token set the native text components paint with.
 ///
-/// This is a trimmed Comet theme: only tokens read by the native editors and
-/// document elements remain. Surfaces, buttons and chrome tokens are the host
-/// app's business and stay in JS as ordinary `style` props.
-#[derive(Debug, Clone)]
+/// Shared Comet tokens for native content, developer tools and opt-in controls.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Theme {
+    pub surface: Hsla,
+    pub raised: Hsla,
+    pub field: Hsla,
+    pub border_strong: Hsla,
+    pub on_accent: Hsla,
+    pub selection: Hsla,
+    pub focus_ring: Hsla,
+    pub row_selected: Hsla,
+    pub row_hover: Hsla,
+    pub row_pressed: Hsla,
+    pub danger: Hsla,
+    pub on_danger: Hsla,
+    pub danger_wash: Hsla,
+    pub backdrop: Hsla,
+    pub shadow: Hsla,
+    pub scrollbar_thumb: Hsla,
+    pub scrollbar_thumb_hover: Hsla,
+    pub scrollbar_thumb_active: Hsla,
     /// Content plane behind code and diff bodies.
     pub bg: Hsla,
     /// Hairline border.
@@ -472,7 +698,7 @@ pub struct Theme {
     pub text_faint: Hsla,
     /// Diff file paths — one notch below `text_muted`, sampled in Comet as #989898.
     pub text_dim: Hsla,
-    /// Accent (indigo) — list markers, blockquote rail, selection wash.
+    /// Accent — list markers, blockquote rail and developer-tool selection.
     pub accent: Hsla,
     /// Text-editor caret.
     pub caret: Hsla,
@@ -501,20 +727,38 @@ impl Theme {
     /// Comet's dark theme, token for token.
     pub fn dark() -> Self {
         Self {
-            bg: grey(6),
+            surface: oklch(0.195, 0.006, 255.0),
+            raised: oklch(0.235, 0.007, 255.0),
+            field: oklch(0.15, 0.006, 255.0),
+            border_strong: hsla(0.0, 0.0, 1.0, 0.14),
+            on_accent: oklch(0.2, 0.03, 163.0),
+            selection: with_alpha(oklch(0.765, 0.15, 163.0), 0.26),
+            focus_ring: with_alpha(oklch(0.765, 0.15, 163.0), 0.35),
+            row_selected: with_alpha(oklch(0.765, 0.15, 163.0), 0.16),
+            row_hover: hsla(0.0, 0.0, 1.0, 0.05),
+            row_pressed: hsla(0.0, 0.0, 1.0, 0.09),
+            danger: oklch(0.704, 0.191, 22.2),
+            on_danger: oklch(0.2, 0.04, 22.0),
+            danger_wash: with_alpha(oklch(0.704, 0.191, 22.2), 0.14),
+            backdrop: with_alpha(oklch(0.1, 0.006, 255.0), 0.6),
+            shadow: hsla(0.0, 0.0, 0.0, 0.35),
+            scrollbar_thumb: hsla(0.0, 0.0, 1.0, 0.18),
+            scrollbar_thumb_hover: hsla(0.0, 0.0, 1.0, 0.3),
+            scrollbar_thumb_active: hsla(0.0, 0.0, 1.0, 0.44),
+            bg: oklch(0.165, 0.006, 255.0),
             border: hsla(0.0, 0.0, 1.0, 0.08),
-            text: neutral(0.922),
-            text_muted: neutral(0.708),
-            text_faint: neutral(0.556),
-            text_dim: grey(0x98),
-            accent: oklch(0.673, 0.182, 276.935),
-            caret: oklch(0.673, 0.182, 276.935),
+            text: oklch(0.93, 0.005, 255.0),
+            text_muted: oklch(0.72, 0.008, 255.0),
+            text_faint: oklch(0.56, 0.01, 255.0),
+            text_dim: oklch(0.66, 0.008, 255.0),
+            accent: oklch(0.765, 0.15, 163.0),
+            caret: oklch(0.765, 0.15, 163.0),
             code_text: oklch(0.811, 0.111, 293.571),
             code_wash: with_alpha(oklch(0.702, 0.183, 293.541), 0.12),
             diff_add: oklch(0.765, 0.177, 163.223),
             diff_del: oklch(0.704, 0.191, 22.216),
-            diff_hunk_bg: hsla(0.6, 0.35, 0.6, 0.05),
-            syntax: SyntaxPalette::dark(neutral(0.922), neutral(0.60), oklch(0.704, 0.191, 22.216)),
+            diff_hunk_bg: with_alpha(oklch(0.6, 0.04, 255.0), 0.06),
+            syntax: SyntaxPalette::comet(false),
             font_sans: system_sans().to_string(),
             font_mono: system_mono().to_string(),
             metrics: Metrics::default(),
@@ -524,20 +768,38 @@ impl Theme {
     /// Comet's light theme.
     pub fn light() -> Self {
         Self {
-            bg: grey(0xff),
-            border: hsla(0.0, 0.0, 0.0, 0.10),
-            text: neutral(0.25),
-            text_muted: neutral(0.439),
-            text_faint: neutral(0.535),
-            text_dim: neutral(0.50),
-            accent: oklch(0.511, 0.262, 276.966),
-            caret: oklch(0.511, 0.262, 276.966),
+            surface: oklch(0.97, 0.003, 255.0),
+            raised: oklch(1.0, 0.0, 0.0),
+            field: oklch(1.0, 0.0, 0.0),
+            border_strong: with_alpha(oklch(0.25, 0.01, 255.0), 0.16),
+            on_accent: oklch(0.99, 0.01, 163.0),
+            selection: with_alpha(oklch(0.65, 0.13, 163.0), 0.24),
+            focus_ring: with_alpha(oklch(0.58, 0.13, 163.0), 0.3),
+            row_selected: with_alpha(oklch(0.6, 0.13, 163.0), 0.14),
+            row_hover: with_alpha(oklch(0.25, 0.01, 255.0), 0.05),
+            row_pressed: with_alpha(oklch(0.25, 0.01, 255.0), 0.09),
+            danger: oklch(0.577, 0.215, 27.3),
+            on_danger: oklch(0.99, 0.01, 27.0),
+            danger_wash: with_alpha(oklch(0.577, 0.215, 27.3), 0.10),
+            backdrop: with_alpha(oklch(0.25, 0.01, 255.0), 0.28),
+            shadow: with_alpha(oklch(0.25, 0.01, 255.0), 0.14),
+            scrollbar_thumb: with_alpha(oklch(0.25, 0.01, 255.0), 0.2),
+            scrollbar_thumb_hover: with_alpha(oklch(0.25, 0.01, 255.0), 0.32),
+            scrollbar_thumb_active: with_alpha(oklch(0.25, 0.01, 255.0), 0.46),
+            bg: oklch(0.99, 0.002, 255.0),
+            border: with_alpha(oklch(0.25, 0.01, 255.0), 0.09),
+            text: oklch(0.25, 0.01, 255.0),
+            text_muted: oklch(0.45, 0.012, 255.0),
+            text_faint: oklch(0.56, 0.012, 255.0),
+            text_dim: oklch(0.5, 0.01, 255.0),
+            accent: oklch(0.58, 0.13, 163.0),
+            caret: oklch(0.58, 0.13, 163.0),
             code_text: oklch(0.491, 0.27, 292.581),
             code_wash: with_alpha(oklch(0.541, 0.281, 293.009), 0.10),
             diff_add: oklch(0.596, 0.145, 163.225),
             diff_del: oklch(0.577, 0.245, 27.325),
-            diff_hunk_bg: hsla(0.6, 0.35, 0.35, 0.07),
-            syntax: SyntaxPalette::dark(neutral(0.25), neutral(0.48), oklch(0.505, 0.213, 27.518)),
+            diff_hunk_bg: with_alpha(oklch(0.4, 0.04, 255.0), 0.07),
+            syntax: SyntaxPalette::comet(true),
             font_sans: system_sans().to_string(),
             font_mono: system_mono().to_string(),
             metrics: Metrics::default(),
@@ -550,6 +812,24 @@ impl Theme {
             self = Theme::light();
         }
         set(&mut self.bg, &o.bg);
+        set(&mut self.surface, &o.surface);
+        set(&mut self.raised, &o.raised);
+        set(&mut self.field, &o.field);
+        set(&mut self.border_strong, &o.border_strong);
+        set(&mut self.on_accent, &o.on_accent);
+        set(&mut self.selection, &o.selection);
+        set(&mut self.focus_ring, &o.focus_ring);
+        set(&mut self.row_selected, &o.row_selected);
+        set(&mut self.row_hover, &o.row_hover);
+        set(&mut self.row_pressed, &o.row_pressed);
+        set(&mut self.danger, &o.danger);
+        set(&mut self.on_danger, &o.on_danger);
+        set(&mut self.danger_wash, &o.danger_wash);
+        set(&mut self.backdrop, &o.backdrop);
+        set(&mut self.shadow, &o.shadow);
+        set(&mut self.scrollbar_thumb, &o.scrollbar_thumb);
+        set(&mut self.scrollbar_thumb_hover, &o.scrollbar_thumb_hover);
+        set(&mut self.scrollbar_thumb_active, &o.scrollbar_thumb_active);
         set(&mut self.border, &o.border);
         set(&mut self.text, &o.text);
         set(&mut self.text_muted, &o.text_muted);
@@ -663,6 +943,24 @@ fn system_mono() -> &'static str {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ThemeOverride {
+    pub surface: Option<String>,
+    pub raised: Option<String>,
+    pub field: Option<String>,
+    pub border_strong: Option<String>,
+    pub on_accent: Option<String>,
+    pub selection: Option<String>,
+    pub focus_ring: Option<String>,
+    pub row_selected: Option<String>,
+    pub row_hover: Option<String>,
+    pub row_pressed: Option<String>,
+    pub danger: Option<String>,
+    pub on_danger: Option<String>,
+    pub danger_wash: Option<String>,
+    pub backdrop: Option<String>,
+    pub shadow: Option<String>,
+    pub scrollbar_thumb: Option<String>,
+    pub scrollbar_thumb_hover: Option<String>,
+    pub scrollbar_thumb_active: Option<String>,
     /// `"dark"` (default) or `"light"` — picks the base before overrides apply.
     pub appearance: Option<String>,
     pub bg: Option<String>,
@@ -688,6 +986,43 @@ pub struct ThemeOverride {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MetricsOverride {
+    pub test_toolbar_height: Option<f64>,
+    pub test_section_height: Option<f64>,
+    pub test_row_height: Option<f64>,
+    pub test_step_height: Option<f64>,
+    pub test_footer_height: Option<f64>,
+    pub test_tests_width: Option<f64>,
+    pub test_steps_width: Option<f64>,
+    pub test_argument_width: Option<f64>,
+    pub test_window_width: Option<f64>,
+    pub test_window_height: Option<f64>,
+    pub test_padding: Option<f64>,
+    pub test_duration_width: Option<f64>,
+    pub test_duration_bar_width: Option<f64>,
+    pub test_status_dot_size: Option<f64>,
+    pub test_file_padding: Option<f64>,
+    pub test_case_indent: Option<f64>,
+    pub test_step_padding: Option<f64>,
+    pub test_step_number_width: Option<f64>,
+    pub inspector_network_columns: Option<Vec<f64>>,
+    pub inspector_network_toolbar_height: Option<f64>,
+    pub inspector_network_filter_width: Option<f64>,
+    pub inspector_network_detail_label_width: Option<f64>,
+    pub inspector_network_text_size: Option<f64>,
+    pub inspector_network_list_fraction: Option<f64>,
+    pub inspector_network_detail_row_height: Option<f64>,
+    pub inspector_icon_size: Option<f64>,
+    pub scrollbar_width: Option<f64>,
+    pub scrollbar_min_thumb: Option<f64>,
+    pub input_height: Option<f64>,
+    pub input_radius: Option<f64>,
+    pub menu_radius: Option<f64>,
+    pub menu_item_height: Option<f64>,
+    pub control_gap: Option<f64>,
+    pub control_padding: Option<f64>,
+    pub control_indicator_size: Option<f64>,
+    pub control_dot_size: Option<f64>,
+    pub control_ring_width: Option<f64>,
     pub inspector_height: Option<f64>,
     pub inspector_row_height: Option<f64>,
     pub inspector_text_size: Option<f64>,
@@ -783,6 +1118,33 @@ mod tests {
     }
 
     #[test]
+    fn control_tokens_match_the_design_and_accept_independent_overrides() {
+        let dark = Theme::dark();
+        let light = Theme::light();
+        assert_eq!(dark.accent, oklch(0.765, 0.15, 163.0));
+        assert_eq!(light.accent, oklch(0.58, 0.13, 163.0));
+        assert_ne!(dark.bg, dark.surface);
+        assert_ne!(dark.surface, dark.raised);
+        assert_eq!(dark.metrics.inspector_row_height, 22.0);
+        assert_eq!(dark.metrics.input_height, 26.0);
+        let overrides: ThemeOverride = serde_json::from_value(serde_json::json!({
+            "surface": "#112233", "rowSelected": "#334455", "focusRing": "#12345680",
+            "metrics": { "inputHeight": 30, "inspectorIconSize": 16 }
+        }))
+        .unwrap();
+        let custom = dark.clone().with_override(&overrides);
+        assert_eq!(custom.surface, gpui::rgb(0x112233).into());
+        assert_eq!(custom.row_selected, gpui::rgb(0x334455).into());
+        assert_eq!(custom.focus_ring, gpui::rgba(0x12345680).into());
+        assert_eq!(custom.metrics.input_height, 30.0);
+        assert_eq!(custom.metrics.inspector_icon_size, 16.0);
+        assert_eq!(custom.raised, dark.raised);
+        let value = serde_json::to_value(custom).unwrap();
+        assert!(value["borderStrong"].is_string());
+        assert_eq!(value["metrics"]["menuItemHeight"], 24.0);
+    }
+
+    #[test]
     fn dark_theme_tokens_are_distinct() {
         let t = Theme::dark();
         assert_ne!(t.text, t.text_muted);
@@ -869,6 +1231,6 @@ mod tests {
     fn light_appearance_switches_the_base() {
         let o: ThemeOverride = serde_json::from_str(r#"{ "appearance": "light" }"#).unwrap();
         let t = Theme::dark().with_override(&o);
-        assert_eq!(t.bg, grey(0xff));
+        assert_eq!(t.bg, oklch(0.99, 0.002, 255.0));
     }
 }

@@ -1,32 +1,5 @@
 local util = require("gpuix._util")
 
-local panel_defaults = {
-    display = "flex",
-    position = "relative",
-    flexShrink = 0,
-    overflow = "hidden",
-    background = "#18181b",
-    borderColor = "#3f3f46",
-}
-
-local content_defaults = {
-    width = "100%",
-    height = "100%",
-    minWidth = 0,
-    minHeight = 0,
-    display = "flex",
-    flexDirection = "column",
-    overflow = "hidden",
-}
-
-local handle_defaults = {
-    position = "absolute",
-    background = "transparent",
-    hover = { background = "#60a5fa66" },
-    active = { background = "#60a5fa" },
-    focus = util.focus_ring,
-}
-
 local function resolved(style, state)
     if type(style) == "function" then return style(state) end
     return style
@@ -47,6 +20,35 @@ local function default_size(side)
 end
 
 return function(props)
+    local palette = props.theme or util.palette
+    local panel_defaults = {
+        display = "flex",
+        position = "relative",
+        flexShrink = 0,
+        overflow = "hidden",
+        background = palette.surface,
+        color = palette.text,
+        borderColor = palette.border,
+    }
+
+    local content_defaults = {
+        width = "100%",
+        height = "100%",
+        minWidth = 0,
+        minHeight = 0,
+        display = "flex",
+        flexDirection = "column",
+        overflow = "hidden",
+    }
+
+    local handle_defaults = {
+        position = "absolute",
+        background = "transparent",
+        hover = { background = palette.focusRing },
+        active = { background = palette.accent },
+        focus = util.focus_style(palette),
+    }
+
     local side = props.side or "right"
     if side ~= "left" and side ~= "right" and side ~= "bottom" then
         error("gpuix.drawer side must be left, right, or bottom")

@@ -17,6 +17,8 @@ mod custom_elements;
 mod diff;
 mod element_tree;
 mod inspector;
+#[cfg(not(target_family = "wasm"))]
+mod inspector_network;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod lua_app;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
@@ -29,6 +31,8 @@ mod lua_tray;
 mod luax;
 mod markdown;
 mod motion;
+#[cfg(not(target_family = "wasm"))]
+mod network;
 #[cfg(any(feature = "lua54", feature = "luajit"))]
 mod phosphor;
 // The embedded JavaScript engine. The browser build runs JS in the browser.
@@ -76,6 +80,13 @@ pub use lua_app::*;
 ))]
 pub use quickjs_app::*;
 pub use renderer::*;
+#[cfg(all(
+    feature = "quickjs",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+pub use script::reset_bench::benchmark_script_resets;
+#[doc(hidden)]
+pub use script::test_ui::run_test_results;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use script::AppOptions;
 pub use style::*;

@@ -18,6 +18,16 @@ use crate::renderer::GpuixView;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "method", rename_all = "camelCase", deny_unknown_fields)]
 enum Command {
+    TestCommands {},
+    TestRun {
+        #[serde(default, rename = "failedOnly")]
+        failed_only: bool,
+    },
+    Reset {},
+    TestReport {
+        name: String,
+        cases: Vec<super::test_ui::Case>,
+    },
     Health {},
     Windows {},
     Tree {
@@ -137,16 +147,22 @@ impl Server {
                                 unreachable!()
                             };
                             let (response, receiver) = std::sync::mpsc::sync_channel(1);
+                            let timeout =
+                                Duration::from_secs(if matches!(&command, Command::Reset {}) {
+                                    300
+                                } else {
+                                    5
+                                });
                             sender
                                 .unbounded_send(Request {
                                     command,
                                     response,
-                                    deadline: Instant::now() + Duration::from_secs(5),
+                                    deadline: Instant::now() + timeout,
                                 })
                                 .map_err(|_| "app closed".to_string())?;
-                            receiver
-                                .recv_timeout(Duration::from_secs(5))
-                                .map_err(|_| "app did not respond within five seconds".to_string())
+                            receiver.recv_timeout(timeout).map_err(|_| {
+                                format!("app did not respond within {} seconds", timeout.as_secs())
+                            })
                         });
                         let (status, body) = match result {
                             Ok(body) => ("200 OK", body),
@@ -167,6 +183,7 @@ impl Server {
 
     pub(crate) fn attach(mut self, cx: &mut gpui::App) {
         crate::automation::enable_inspector();
+        crate::network::install(cx);
         cx.spawn(async move |cx| {
             while let Some(request) = self.requests.next().await {
                 if Instant::now() >= request.deadline {
@@ -188,6 +205,10 @@ fn respond(response: std::sync::mpsc::SyncSender<Value>, result: Result<Value, S
 }
 
 fn dispatch(request: Request, cx: &mut gpui::App) {
+    if matches!(request.command, Command::Reset {}) {
+        super::test_control::request(request.response, cx);
+        return;
+    }
     if let Command::Screenshot { window: id } = request.command {
         #[cfg(feature = "test-support")]
         {
@@ -339,6 +360,12 @@ fn execute(command: Command, cx: &mut gpui::App) -> Result<Value, String> {
         .filter_map(|window| window.downcast::<GpuixView>())
         .collect::<Vec<_>>();
     let target = match &command {
+        Command::TestCommands {} => return super::test_ui::commands(cx),
+        Command::TestRun { failed_only } => return super::test_ui::request_run(*failed_only, cx),
+        Command::Reset {} => return Err("reset must be dispatched asynchronously".into()),
+        Command::TestReport { name, cases } => {
+            return super::test_ui::update(name.clone(), cases.clone(), cx)
+        }
         Command::Health {} => {
             return Ok(json!({"ready": !windows.is_empty(), "pid": std::process::id()}))
         }
@@ -834,6 +861,23 @@ mod tests {
                 cx
             )
             .is_err());
+        });
+    }
+
+    #[test]
+    fn test_results_window_is_not_an_application_window() {
+        let cx = gpui::TestAppContext::single();
+        cx.update(|cx| {
+            let case =
+                serde_json::from_value(json!({"index":0,"name":"Counter","status":"running"}))
+                    .unwrap();
+            let created = super::super::test_ui::update("Suite".into(), vec![case], cx).unwrap();
+            assert!(created["window"].is_u64());
+            assert_eq!(execute(Command::Windows {}, cx).unwrap(), json!([]));
+            assert_eq!(execute(Command::Health {}, cx).unwrap()["ready"], false);
+            super::super::test_ui::update("Suite".into(), Vec::new(), cx).unwrap();
+            assert_eq!(cx.windows().len(), 1);
+            assert!(super::super::test_ui::update("x".repeat(1025), Vec::new(), cx).is_err());
         });
     }
 

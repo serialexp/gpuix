@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <meta name="design_doc_mode" content="canvas">
+  <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css">
+  <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/fill/style.css">
+  <style>body{margin:0;background:#e9ebef} a{color:#2b7a5e} a:hover{color:#1d5a44}</style>
+</helmet>
+<section id="turn-1" style="display:flex;flex-direction:column;gap:20px;padding:40px;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#24272e">
+  <div style="display:flex;flex-direction:column;gap:6px;max-width:900px">
+    <div style="font-size:24px;font-weight:600;letter-spacing:-0.01em">Native component defaults, three directions</div>
+    <div style="font-size:14px;line-height:21px;color:#5a5f6b;text-wrap:pretty">Each direction shows the inspector dock from <span style="font-family:Menlo,monospace;font-size:12.5px">inspector.rs</span> (wip), plus input and scrollbar states, in dark and light. All three use a cool tint, an emerald accent, the system fonts and the current density.</div>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start">
+    <sc-for list="{{ options }}" as="o" hint-placeholder-count="3">
+      <div id="{{ o.id }}" style="width:560px;display:flex;flex-direction:column;gap:20px;padding:24px;background:#f7f8fa;border:1px solid #d6d9e0;border-radius:14px">
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <div style="font-family:Menlo,monospace;font-size:12px;font-weight:600;padding:3px 8px;border-radius:5px;background:#24272e;color:#f7f8fa">{{ o.id }}</div>
+            <div style="font-size:18px;font-weight:600">{{ o.name }}</div>
+          </div>
+          <div style="font-size:13px;line-height:19px;color:#5a5f6b;text-wrap:pretty;min-height:57px">{{ o.blurb }}</div>
+        </div>
+        <sc-for list="{{ o.modes }}" as="m" hint-placeholder-count="2">
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <div style="font-family:Menlo,monospace;font-size:10.5px;letter-spacing:0.08em;text-transform:uppercase;color:#6b7080">{{ m.name }}</div>
+
+            <div style="display:flex;flex-direction:column;border-radius:10px;overflow:hidden;border:1px solid {{ m.t.frame }};background:{{ m.t.bg }};color:{{ m.t.text }};font-size:12px">
+              <div style="height:150px;position:relative;padding:16px;box-sizing:border-box">
+                <div style="height:100%;border-radius:6px;background:{{ m.stripes }};display:flex;align-items:flex-end;padding:8px;box-sizing:border-box;font-family:Menlo,Consolas,monospace;font-size:10px;color:{{ m.t.faint }}">app content</div>
+                <div style="position:absolute;left:40px;top:40px;width:220px;height:40px;box-sizing:border-box;border:1px solid {{ m.t.accent }};background:{{ m.t.pickWash }};border-radius:2px"></div>
+                <div style="position:absolute;left:40px;top:18px;height:18px;display:flex;align-items:center;padding:0 6px;border-radius:3px;background:{{ m.t.accent }};color:{{ m.t.onAccent }};font-family:Menlo,Consolas,monospace;font-size:10px">div #14 · 220 × 40</div>
+                <div style="position:absolute;left:290px;top:64px;padding:4px;border-radius:{{ o.r }}px;background:{{ m.t.raised }};border:1px solid {{ m.t.borderStrong }};box-shadow:0 6px 20px oklch(0 0 0 / 0.25);display:flex;flex-direction:column;min-width:150px">
+                  <div style="height:24px;display:flex;align-items:center;gap:8px;padding:0 8px;border-radius:{{ o.rs }}px;background:{{ m.t.hover }}"><i class="ph ph-crosshair-simple" style="font-size:14px;color:{{ m.t.muted }}"></i>Inspect element</div>
+                </div>
+              </div>
+              <div style="height:250px;display:flex;flex-direction:column;background:{{ m.t.surface }};border-top:1px solid {{ m.t.border }}">
+                <div style="height:30px;flex-shrink:0;display:flex;align-items:center;gap:2px;padding:0 4px;border-bottom:1px solid {{ m.t.border }}">
+                  <div style="width:24px;height:24px;display:flex;align-items:center;justify-content:center;border-radius:{{ o.rs }}px;background:{{ m.t.pickBg }};color:{{ m.t.pickFg }}"><i class="ph ph-cursor-click" style="font-size:15px"></i></div>
+                  <div style="width:1px;height:14px;margin:0 4px;background:{{ m.t.borderStrong }}"></div>
+                  <div style="height:22px;display:flex;align-items:center;gap:6px;padding:0 8px;border-radius:{{ o.rs }}px;background:{{ m.t.hover }};color:{{ m.t.text }}"><i class="ph ph-tree-structure" style="font-size:14px;color:{{ m.t.muted }}"></i>Elements</div>
+                  <div style="flex:1"></div>
+                  <div style="width:24px;height:24px;display:flex;align-items:center;justify-content:center;border-radius:{{ o.rs }}px;color:{{ m.t.muted }}"><i class="ph ph-arrows-vertical" style="font-size:15px"></i></div>
+                  <div style="width:24px;height:24px;display:flex;align-items:center;justify-content:center;border-radius:{{ o.rs }}px;color:{{ m.t.muted }}"><i class="ph ph-x" style="font-size:15px"></i></div>
+                </div>
+                <div style="flex:1;display:flex;min-height:0">
+                  <div style="flex:1;min-width:0;position:relative;overflow:hidden;font-family:Menlo,Consolas,monospace;font-size:11.5px">
+                    <sc-for list="{{ m.rows }}" as="row" hint-placeholder-count="10">
+                      <div style="height:22px;display:flex;align-items:center;padding-left:{{ row.pad }}px;padding-right:12px;background:{{ row.bg }};white-space:nowrap">
+                        <div style="width:14px;flex-shrink:0;display:flex;align-items:center;color:{{ row.discColor }}"><i class="{{ row.disc }}" style="font-size:10px"></i></div>
+                        <i class="{{ row.icon }}" style="font-size:13px;margin-right:5px;color:{{ row.iconColor }}"></i>
+                        <sc-for list="{{ row.parts }}" as="p" hint-placeholder-count="3"><span style="color:{{ p.c }};white-space:pre">{{ p.s }}</span></sc-for>
+                      </div>
+                    </sc-for>
+                    <div style="position:absolute;right:2px;top:26px;width:6px;height:90px;border-radius:3px;background:{{ m.t.thumb }}"></div>
+                  </div>
+                  <div style="flex:1;min-width:0;position:relative;overflow:hidden;border-left:1px solid {{ m.t.border }};padding:8px;box-sizing:border-box;font-family:Menlo,Consolas,monospace;font-size:11.5px">
+                    <sc-for list="{{ m.json }}" as="line" hint-placeholder-count="10">
+                      <div style="height:18px;display:flex;align-items:center;white-space:pre">
+                        <sc-for list="{{ line }}" as="p" hint-placeholder-count="3"><span style="color:{{ p.c }}">{{ p.s }}</span></sc-for>
+                      </div>
+                    </sc-for>
+                    <div style="position:absolute;right:2px;top:8px;width:6px;height:70px;border-radius:3px;background:{{ m.t.thumbHover }}"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:minmax(0,1fr) 150px;gap:12px">
+              <div style="display:flex;flex-direction:column;gap:10px;padding:12px;border-radius:10px;background:{{ m.t.surface }};border:1px solid {{ m.t.frame }}">
+                <sc-for list="{{ m.inputs }}" as="f" hint-placeholder-count="5">
+                  <div style="display:grid;grid-template-columns:62px minmax(0,1fr);align-items:center;gap:8px;opacity:{{ f.opacity }}">
+                    <div style="font-family:Menlo,Consolas,monospace;font-size:10px;color:{{ m.t.faint }}">{{ f.label }}</div>
+                    <div style="height:26px;box-sizing:border-box;display:flex;align-items:center;padding:0 8px;border-radius:{{ o.r }}px;background:{{ m.t.field }};border:1px solid {{ f.border }};box-shadow:{{ f.ring }};font-size:12px;white-space:nowrap;overflow:hidden;gap:0"><i class="ph ph-magnifying-glass" style="font-size:13px;margin-right:6px;color:{{ m.t.faint }}"></i>
+                      <span style="color:{{ f.color }};white-space:pre">{{ f.pre }}</span><span style="background:{{ m.t.sel }};color:{{ m.t.text }};white-space:pre">{{ f.sel }}</span><span style="width:1.5px;height:14px;background:{{ f.caret }}"></span><span style="color:{{ f.color }}">{{ f.post }}</span>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="display:flex;justify-content:space-around;padding:12px 8px;border-radius:10px;background:{{ m.t.surface }};border:1px solid {{ m.t.frame }}">
+                <sc-for list="{{ m.bars }}" as="b" hint-placeholder-count="3">
+                  <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+                    <div style="flex:1;width:10px;border-radius:5px;background:{{ b.track }};position:relative">
+                      <div style="position:absolute;left:2px;right:2px;top:{{ b.top }}px;height:44px;border-radius:3px;background:{{ b.thumb }}"></div>
+                    </div>
+                    <div style="font-family:Menlo,Consolas,monospace;font-size:9.5px;color:{{ m.t.faint }}">{{ b.label }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px 10px;padding:10px 12px;border-radius:10px;background:{{ m.t.surface }};border:1px solid {{ m.t.frame }}">
+              <sc-for list="{{ m.tokens }}" as="k" hint-placeholder-count="12">
+                <div style="display:flex;align-items:center;gap:6px;min-width:0">
+                  <span style="width:12px;height:12px;flex-shrink:0;border-radius:3px;background:{{ k.v }};box-shadow:0 0 0 1px {{ m.t.borderStrong }}"></span>
+                  <span style="font-family:Menlo,Consolas,monospace;font-size:10px;color:{{ m.t.muted }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ k.n }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </sc-for>
+  </div>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+const W = (a) => `oklch(1 0 0 / ${a})`;
+const K = (h, a) => `oklch(0.25 0.015 ${h} / ${a})`;
+const OPTIONS = [
+  { id: '1a', name: 'Comet, tidied', r: 6, rs: 4, selMode: 'wash',
+    blurb: 'Keeps Comet’s surfaces and syntax balance. The greys get a slight cool tint, the accent moves from indigo to emerald, and surfaces step up one lightness notch at a time.',
+    dark: { bg:'oklch(0.165 0.006 255)', surface:'oklch(0.195 0.006 255)', raised:'oklch(0.235 0.007 255)', field:'oklch(0.15 0.006 255)', frame:'oklch(0.32 0.008 255)', border:W(0.08), borderStrong:W(0.14), text:'oklch(0.93 0.005 255)', muted:'oklch(0.72 0.008 255)', faint:'oklch(0.56 0.01 255)', accent:'oklch(0.765 0.15 163)', onAccent:'oklch(0.2 0.03 163)', rowSel:'oklch(0.765 0.15 163 / 0.16)', sel:'oklch(0.765 0.15 163 / 0.26)', hover:W(0.05), thumb:W(0.18), thumbHover:W(0.3), thumbActive:W(0.44), tag:'oklch(0.74 0.12 350)', attr:'oklch(0.82 0.12 84)', str:'oklch(0.78 0.11 163)', num:'oklch(0.82 0.12 84)', key:'oklch(0.74 0.12 277)' },
+    light: { bg:'oklch(0.99 0.002 255)', surface:'oklch(0.97 0.003 255)', raised:'oklch(1 0 0)', field:'oklch(1 0 0)', frame:K(255,0.14), border:K(255,0.09), borderStrong:K(255,0.16), text:'oklch(0.25 0.01 255)', muted:'oklch(0.45 0.012 255)', faint:'oklch(0.56 0.012 255)', accent:'oklch(0.58 0.13 163)', onAccent:'oklch(0.99 0.01 163)', rowSel:'oklch(0.6 0.13 163 / 0.14)', sel:'oklch(0.65 0.13 163 / 0.24)', hover:K(255,0.05), thumb:K(255,0.2), thumbHover:K(255,0.32), thumbActive:K(255,0.46), tag:'oklch(0.54 0.17 350)', attr:'oklch(0.56 0.12 70)', str:'oklch(0.52 0.11 163)', num:'oklch(0.56 0.13 60)', key:'oklch(0.5 0.18 277)' } },
+  { id: '1b', name: 'Quiet slate', r: 8, rs: 5, selMode: 'neutral',
+    blurb: 'Blue-grey and lower contrast, so the app being inspected stays the loudest thing on screen. Syntax chroma is roughly halved. Emerald shows up only for focus, picking and text selection. Selected rows are neutral.',
+    dark: { bg:'oklch(0.2 0.014 250)', surface:'oklch(0.225 0.014 250)', raised:'oklch(0.26 0.015 250)', field:'oklch(0.19 0.014 250)', frame:'oklch(0.34 0.016 250)', border:W(0.06), borderStrong:W(0.12), text:'oklch(0.88 0.01 250)', muted:'oklch(0.69 0.014 250)', faint:'oklch(0.55 0.016 250)', accent:'oklch(0.74 0.11 165)', onAccent:'oklch(0.2 0.03 165)', rowSel:W(0.08), sel:'oklch(0.74 0.11 165 / 0.24)', hover:W(0.045), thumb:W(0.14), thumbHover:W(0.24), thumbActive:W(0.36), tag:'oklch(0.75 0.07 350)', attr:'oklch(0.8 0.07 84)', str:'oklch(0.77 0.07 165)', num:'oklch(0.8 0.07 84)', key:'oklch(0.75 0.07 260)' },
+    light: { bg:'oklch(0.975 0.006 250)', surface:'oklch(0.955 0.007 250)', raised:'oklch(0.99 0.004 250)', field:'oklch(0.99 0.004 250)', frame:K(250,0.13), border:K(250,0.08), borderStrong:K(250,0.15), text:'oklch(0.3 0.015 250)', muted:'oklch(0.48 0.015 250)', faint:'oklch(0.58 0.015 250)', accent:'oklch(0.6 0.1 165)', onAccent:'oklch(0.99 0.01 165)', rowSel:K(250,0.07), sel:'oklch(0.65 0.1 165 / 0.22)', hover:K(250,0.045), thumb:K(250,0.16), thumbHover:K(250,0.26), thumbActive:K(250,0.38), tag:'oklch(0.52 0.1 350)', attr:'oklch(0.52 0.08 70)', str:'oklch(0.5 0.08 165)', num:'oklch(0.52 0.09 60)', key:'oklch(0.5 0.1 260)' } },
+  { id: '1c', name: 'Graphite instrument', r: 3, rs: 3, selMode: 'solid',
+    blurb: 'Near-neutral graphite with crisper hairlines and tighter 3px corners. The selected row is a solid deep teal, a nod to the cyan-900 already in inspector.rs. Syntax is as saturated as Comet’s.',
+    dark: { bg:'oklch(0.145 0.004 240)', surface:'oklch(0.175 0.004 240)', raised:'oklch(0.21 0.005 240)', field:'oklch(0.13 0.004 240)', frame:'oklch(0.3 0.005 240)', border:W(0.1), borderStrong:W(0.17), text:'oklch(0.95 0.003 240)', muted:'oklch(0.74 0.005 240)', faint:'oklch(0.58 0.006 240)', accent:'oklch(0.78 0.14 170)', onAccent:'oklch(0.18 0.03 170)', rowSel:'oklch(0.38 0.07 175)', sel:'oklch(0.78 0.14 170 / 0.28)', hover:W(0.06), thumb:W(0.2), thumbHover:W(0.34), thumbActive:W(0.5), tag:'oklch(0.75 0.14 350)', attr:'oklch(0.83 0.14 84)', str:'oklch(0.8 0.13 165)', num:'oklch(0.83 0.14 84)', key:'oklch(0.74 0.13 260)' },
+    light: { bg:'oklch(0.995 0.001 240)', surface:'oklch(0.975 0.002 240)', raised:'oklch(1 0 0)', field:'oklch(1 0 0)', frame:K(240,0.18), border:K(240,0.12), borderStrong:K(240,0.2), text:'oklch(0.2 0.005 240)', muted:'oklch(0.42 0.006 240)', faint:'oklch(0.54 0.006 240)', accent:'oklch(0.56 0.12 170)', onAccent:'oklch(0.99 0.01 170)', rowSel:'oklch(0.9 0.05 175)', sel:'oklch(0.62 0.12 170 / 0.24)', hover:K(240,0.05), thumb:K(240,0.22), thumbHover:K(240,0.36), thumbActive:K(240,0.5), tag:'oklch(0.52 0.19 350)', attr:'oklch(0.54 0.14 70)', str:'oklch(0.5 0.13 165)', num:'oklch(0.54 0.15 60)', key:'oklch(0.48 0.2 260)' } },
+];
+const TREE = [
+  [0,'▾','div',1,'root',null],[1,'▾','div',2,'sidebar',null],[2,'▸','div',5,'nav',null],
+  [2,' ','text',9,null,'Inbox'],[1,'▾','div',12,'list',null],[2,'▾','div',14,'row-0',null],
+  [3,' ','text',15,null,'Quarterly planning notes'],[3,' ','img',16,'avatar',null],[2,'▸','div',21,'row-1',null],[2,'▸','div',28,'row-2',null],
+];
+const JSON_LINES = [
+  [['{','p']],
+  [['  "id"','k'],[': ','p'],['14','n'],[',','p']],
+  [['  "type"','k'],[': ','p'],['"div"','s'],[',','p']],
+  [['  "testId"','k'],[': ','p'],['"row-0"','s'],[',','p']],
+  [['  "style"','k'],[': ','p'],['{','p']],
+  [['    "display"','k'],[': ','p'],['"flex"','s'],[',','p']],
+  [['    "padding"','k'],[': ','p'],['12','n'],[',','p']],
+  [['    "gap"','k'],[': ','p'],['8','n']],
+  [['  },','p']],
+  [['  "events"','k'],[': ','p'],['["click"]','s'],[',','p']],
+  [['  "paintedBounds"','k'],[': ','p'],['{ … }','p']],
+];
+function mode(o, name, t, dark) {
+  const selBg = t.rowSel;
+  const rows = TREE.map(([d, disc, type, id, test, content]) => {
+    const on = id === 14;
+    const solid = on && o.selMode === 'solid';
+    const fg = (c) => (solid ? t.text : c);
+    const parts = [{ s: `<${type}>`, c: fg(t.tag) }, { s: ` #${id}`, c: fg(t.faint) }];
+    if (test) parts.push({ s: ` [${test}]`, c: fg(t.attr) });
+    if (content) parts.push({ s: ` ${content}`, c: fg(t.muted) });
+    const icons = { div: 'ph ph-square', text: 'ph ph-text-t', img: 'ph ph-image' };
+    return { pad: 6 + d * 14, disc: disc === '▾' ? 'ph-fill ph-caret-down' : disc === '▸' ? 'ph-fill ph-caret-right' : '', icon: icons[type], iconColor: solid ? t.text : t.faint, discColor: on && o.selMode !== 'neutral' ? t.accent : t.faint, bg: on ? selBg : id === 21 ? t.hover : 'transparent', parts };
+  });
+  const map = { p: t.muted, k: t.key, s: t.str, n: t.num };
+  const json = JSON_LINES.map((l) => l.map(([s, k]) => ({ s, c: map[k] })));
+  const ring = `0 0 0 2px ${t.accent.replace(')', ' / 0.35)')}`;
+  const inputs = [
+    { label: 'default', pre: 'Filter elements', sel: '', post: '', color: t.faint, border: t.borderStrong, ring: 'none', caret: 'transparent', opacity: 1 },
+    { label: 'hover', pre: 'Filter elements', sel: '', post: '', color: t.faint, border: t.thumbHover, ring: 'none', caret: 'transparent', opacity: 1 },
+    { label: 'focus', pre: 'row-', sel: '', post: '', color: t.text, border: t.accent, ring, caret: t.accent, opacity: 1 },
+    { label: 'selection', pre: 'div ', sel: '#14', post: '', color: t.text, border: t.accent, ring, caret: t.accent, opacity: 1 },
+    { label: 'disabled', pre: 'Read only', sel: '', post: '', color: t.faint, border: t.border, ring: 'none', caret: 'transparent', opacity: 0.5 },
+  ];
+  const bars = [
+    { label: 'rest', top: 8, track: 'transparent', thumb: t.thumb },
+    { label: 'hover', top: 34, track: t.hover, thumb: t.thumbHover },
+    { label: 'drag', top: 60, track: t.hover, thumb: t.thumbActive },
+  ];
+  const tokens = [['bg',t.bg],['surface',t.surface],['raised',t.raised],['field',t.field],['text',t.text],['textMuted',t.muted],['textFaint',t.faint],['border',t.borderStrong],['accent',t.accent],['rowSelected',t.rowSel],['selection',t.sel],['scrollThumb',t.thumbHover]].map(([n, v]) => ({ n, v }));
+  const tt = { ...t, pickWash: t.accent.replace(')', ' / 0.12)'), pickBg: t.accent.replace(')', ' / 0.16)'), pickFg: t.accent };
+  const stripes = `repeating-linear-gradient(135deg, ${t.hover} 0 6px, transparent 6px 12px)`;
+  return { name, t: tt, rows, json, inputs, bars, tokens, stripes };
+}
+class Component extends DCLogic {
+  renderVals() {
+    return { options: OPTIONS.map((o) => ({ ...o, modes: [mode(o, 'Dark', o.dark, true), mode(o, 'Light', o.light, false)] })) };
+  }
+}
+</script>
+</body>
+</html>

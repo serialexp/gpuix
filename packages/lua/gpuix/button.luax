@@ -1,14 +1,10 @@
 local util = require("gpuix._util")
 
-local default_style = {
-    display = "flex",
-    flexDirection = "row",
-    alignItems = "center",
-    focus = util.focus_ring,
-}
-
 return function(props)
+    local palette = props.theme or util.palette
+    local default_style = util.control_styles(palette).button
     local disabled = props.disabled == true
+    default_style.opacity = disabled and 0.45 or 1
     local state = { disabled = disabled }
     local on_click
     if props.onClick ~= nil then

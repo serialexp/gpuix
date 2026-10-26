@@ -57,6 +57,7 @@ pub(crate) enum HotUpdate {
 /// unversioned module name: a file's path, or its text module's name.
 #[derive(Clone, Default)]
 pub(crate) struct Graph {
+    pub(crate) attempted: BTreeSet<PathBuf>,
     /// Each module the app loaded: whether it registers with React
     /// Refresh, and the version that last loaded.
     loaded: HashMap<String, (bool, u32)>,
@@ -77,6 +78,14 @@ pub(crate) struct Graph {
 }
 
 impl Graph {
+    pub(crate) fn files(&self) -> BTreeSet<PathBuf> {
+        let mut files: BTreeSet<_> = self.loaded.keys().chain(self.importers.keys())
+            .map(|module| PathBuf::from(module_file(module)))
+            .collect();
+        files.extend(self.attempted.iter().cloned());
+        files
+    }
+
     /// The version of `module` that imports get.
     pub(crate) fn version(&self, module: &str) -> u32 {
         self.versions.get(module).copied().unwrap_or(0)
@@ -87,6 +96,7 @@ impl Graph {
     /// version's imports count: an old version still running, as a timer's
     /// `import()`, isn't what a change has to reach.
     pub(crate) fn imported(&mut self, importer: &str, importer_module: &str, module: &str) {
+        self.attempted.insert(PathBuf::from(module_file(module)));
         if importer.is_empty()
             || is_embedded(importer)
             || importer != versioned(importer_module, self.version(importer_module))
@@ -281,6 +291,7 @@ impl QuickJsRuntime {
             });
             let mut graph = self.shared.graph.borrow_mut();
             let failed = std::mem::replace(&mut *graph, saved);
+            graph.attempted.extend(failed.attempted.iter().cloned());
             graph.last_version = failed.last_version;
             graph.pending = modules.into_iter().collect();
             // QuickJS keeps the modules the update loaded under their names,
